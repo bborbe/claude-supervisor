@@ -98,7 +98,7 @@ The **first line is the verdict**:
 
 | verdict | meaning | what this round does |
 |---|---|---|
-| `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` = never armed, not lost; lever is `/supervisor:goal-loop "<goal>"`, never `restart` |
+| `jump` | live session, loop `OK`/`IDLE`/`UNARMED` | render the row. ⚠️ `UNARMED` = never armed, not lost; lever is `/supervisor:goal-loop "<goal>"`, never `restart`. ⚠️ `IDLE` = work signal old: render, never restart |
 | `open` | no recorded id, **and the goal carries an operator-set flag** | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
 | `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a round may not create one |
 | `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
@@ -107,11 +107,7 @@ The **first line is the verdict**:
 | `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |
 | `crash-loop` | 3 resumes in 30 min already spent | print `⚠️ MANAGER CRASH-LOOP: <goal>` and escalate **once** to the operator |
 
-⚠️ **Never a fresh spawn while a recorded id exists.** A second manager on one goal is the
-double-writer failure `commands/open.md` § Step 2C exists to prevent.
-
-⚠️ **`UNKNOWN`/`AMBIGUOUS`/`MALFORMED` are cannot-tell, never death.** An undecidable probe
-reported as a dead manager is how a working session gets a second writer.
+⚠️ **Never a fresh spawn while a recorded id exists** — a second manager is the double-writer failure `commands/open.md` § Step 2C prevents. ⚠️ **`UNKNOWN`/`AMBIGUOUS`/`MALFORMED` are cannot-tell, never death** — an undecidable probe read as death hands a working session a second writer.
 
 ## Start — inline, because it is this tier's whole product
 

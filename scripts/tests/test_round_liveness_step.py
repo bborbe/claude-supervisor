@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -54,11 +55,42 @@ class RoundLivenessStep(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.plugin, True)
         os.makedirs(os.path.join(self.plugin, "scripts"))
         os.symlink(LIVENESS, os.path.join(self.plugin, "scripts", "manager-liveness.py"))
+        # Isolate the gate heartbeat AND the transcript read, so a live gate loop or the
+        # runner's own session on the host cannot change what a case here reads.
+        self.gate_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.gate_dir, True)
+        self.projects_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.projects_dir, True)
+
+    def env(self):
+        return {
+            **os.environ,
+            "MANAGER_LIVENESS_STATE_DIR": self.state_dir,
+            "MANAGER_GATE_LOOP_STATE_DIR": self.gate_dir,
+            "MANAGER_TRANSCRIPT_PROJECTS_DIR": self.projects_dir,
+        }
 
     def liveness(self, *argv):
-        env = {**os.environ, "MANAGER_LIVENESS_STATE_DIR": self.state_dir}
-        subprocess.run([sys.executable, LIVENESS, *argv], env=env, check=True,
+        subprocess.run([sys.executable, LIVENESS, *argv], env=self.env(), check=True,
                        capture_output=True)
+
+    def arm_old(self, age=5000):
+        """Arm, then move the cadence back so it is past any limit."""
+        self.liveness("--arm", "--subject", FULL, "--branch", "goal", "--interval", "900")
+        for name in os.listdir(self.state_dir):
+            if name.endswith(".cadence"):
+                p = os.path.join(self.state_dir, name)
+                t = time.time() - age
+                os.utime(p, (t, t))
+
+    def heartbeat(self, name, age):
+        d = os.path.join(self.gate_dir, "vault")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("0 x rc=0\n")
+        t = time.time() - age
+        os.utime(p, (t, t))
 
     def run_block(self, subject: str, branch: str) -> str:
         block = (
@@ -74,11 +106,7 @@ class RoundLivenessStep(unittest.TestCase):
             f'python3() {{ case " $* " in *" --arm "*) echo {ARMED} ;; '
             f'*) command "{sys.executable}" "$@" ;; esac; }}\n'
         )
-        env = {
-            **os.environ,
-            "MANAGER_LIVENESS_STATE_DIR": self.state_dir,
-            "CLAUDE_PLUGIN_ROOT": self.plugin,
-        }
+        env = {**self.env(), "CLAUDE_PLUGIN_ROOT": self.plugin}
         done = subprocess.run(["bash", "-c", prelude + block], env=env,
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(0, done.returncode, done.stderr)
@@ -116,6 +144,28 @@ class RoundLivenessStep(unittest.TestCase):
         self.assertIn(ARMED, self.run_block(FULL, "goal"))
 
     def test_a_never_armed_subject_whose_page_resolves_arms(self):
+        self.assertIn(ARMED, self.run_block(FULL, "goal"))
+
+    def state(self, subject: str, branch: str) -> str:
+        done = subprocess.run(
+            [sys.executable, LIVENESS, "--state", "--subject", subject,
+             "--branch", branch, "--vault", self.vault],
+            env=self.env(), capture_output=True, text=True, check=True,
+        )
+        return done.stdout.split("\t")[0].strip()
+
+    def test_idle_arms(self):
+        """IDLE must arm or the fix stalls: the round that ends an IDLE reading is the
+        arm that would have been skipped, so the subject would read IDLE for ever.
+
+        IDLE is the work-signal verdict — a round and the manager transcript's age both
+        old while a live gate watches — and this case builds exactly that shape.
+        """
+        self.arm_old()
+        base = re.sub(r"[^a-z0-9]+", "-", FULL.lower()).strip("-")
+        self.heartbeat(f"{base}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("IDLE", self.state(FULL, "goal"))
         self.assertIn(ARMED, self.run_block(FULL, "goal"))
 
     def test_the_fallback_is_not_an_arm(self):

@@ -99,6 +99,11 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     ack. One lapse still notifies once, not on every
                                     poll — "once" now means once *delivered*, not once
                                     *detected*.
+                                    ⚠️ This verb measures ROUND CADENCE. A subject that is
+                                    armed and gate-watched but has produced neither a round
+                                    nor any work reads `IDLE`, not `OK`; `--check` does not
+                                    report it (it is not stale), but `--state` answers it.
+                                    See the WORK SIGNAL paragraph under `--state`.
   --stood-down-past MINUTES        every subject whose <slug>.stopped marker is older
                                     than MINUTES, as `<age-seconds>\t<slug>`, oldest
                                     first. The selection half of the stood-down-manager
@@ -129,6 +134,27 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     entry stays owed, which is what makes the next poll
                                     re-attempt it.
   --state --subject T --branch B   ONE subject's state, as `<STATE>\t<slug>\t<detail>`.
+                                    **WORK SIGNAL — the record carries two readings, not
+                                    one.** `age` is the ROUND cadence (the age of
+                                    `<slug>.cadence`, refreshed only by `--arm`). The detail
+                                    also carries `work=<seconds>s`: the age of the
+                                    manager's own transcript, resolved from the session id
+                                    `--arm` records in `<slug>.session`
+                                    (`~/.claude/projects/*/<session-id>.jsonl`), which
+                                    Claude Code appends to on every turn — so it moves on
+                                    ANY work, round or not. `work=none` means the signal
+                                    cannot be read (no session marker, or no transcript),
+                                    never "idle". The two readings are what separate a
+                                    manager WORKING WITHOUT A ROUND (cadence old, work
+                                    fresh) from one ARMED WITHOUT WORKING (both old).
+                                    `IDLE` is the eighth state: no round and no work within
+                                    the limit, but the gate is alive and watching this
+                                    goal, so the manager will be woken — armed and watched,
+                                    producing nothing, and NOT lapsed. It is the reading
+                                    that replaces the old gate-driven `OK`, which certified
+                                    a slot on a tick alone. A `topic--` / `fleet--` /
+                                    `task--` subject with no round and no work is `STALE`
+                                    (those tiers arm their own cadence).
                                     `SLEEPING` is a fifth state: a future `.sleeping`
                                     instant, which suppresses the STALE report a frozen
                                     cadence file would otherwise produce.
@@ -172,7 +198,7 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
 `--check` reads files only: no model, no network. A host loop (launchd) runs it and
 turns exit 10 into a push.
 """
-import argparse, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import argparse, glob, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
@@ -219,6 +245,21 @@ GATE_LOOP_STATE_DIR = os.path.expanduser(
 )
 GATE_ALIVE = 1800  # seconds: the loop is alive if ANY subject heartbeat is this fresh
 GATE_SUBJECT_FRESH = 7200  # seconds: a subject's own heartbeat this old is not being ticked
+# ⚠️ The WORK SIGNAL's one source: the manager session's transcript. `--arm` already
+# records the session id (`<slug>.session`), and Claude Code appends to
+# `~/.claude/projects/<escaped-cwd>/<session-id>.jsonl` on every turn, so the file's mtime
+# is how long since the manager last DID anything — a round or a non-round work step alike.
+# No new writer and no instruction the fleet must follow: the transcript is the artifact the
+# session produces by existing. The override exists so a test (or a drill) can isolate the
+# read from the host's real project tree; without it a suite running inside a Claude session
+# would resolve the runner's own transcript and make the signal non-deterministic.
+PROJECTS_DIR = os.path.expanduser(
+    os.environ.get("MANAGER_TRANSCRIPT_PROJECTS_DIR", "~/.claude/projects")
+)
+# A session id is a uuid, but the field is validated as a conservative allow-list rather
+# than a 36-char match: the id is spliced into a glob, so a metacharacter would widen the
+# search past PROJECTS_DIR and lend one session's age to another.
+SESSION_ID_SHAPE = re.compile(r"[0-9a-zA-Z-]{1,64}")
 
 
 def base_slug(subject: str) -> str:
@@ -1273,8 +1314,51 @@ def gate_watched(s: str, now: float):
     return (int(now - subject_hb), (now - newest) <= GATE_ALIVE)
 
 
+def work_age(s: str, now: float):
+    """Seconds since the manager session last did anything, or None when it cannot be read.
+
+    **This is the record's WORK SIGNAL, and it answers a different question from `age`.**
+    `age` is the ROUND cadence — the age of `<slug>.cadence`, which `--arm` refreshes once
+    per round. A manager does a great deal between rounds (answer an operator ask, approve a
+    row, drive a gate, spawn a worker) and none of it arms, so `age` alone read 72 320 s of
+    real work as a dead cadence on 2026-11-13, and the gate fallback read a session that had
+    not rounded in three hours as `OK`. This signal is the second reading: the age of the
+    manager's own transcript, which grows on every turn whether or not a round ran.
+
+    ⚠️ **The transcript, not a marker, and not the gate heartbeat.** A marker would be an
+    instruction the fleet has to follow, and this repo has already measured that an
+    instruction the fleet does not follow is not a signal (`emit_wrapper_reach`). The gate
+    heartbeat is the OTHER false reading: it proves the timer works, never that the manager
+    did anything (`fleet-keepalive.py` says the same of the fleet round). The transcript is
+    the artifact the session writes by existing, so it needs no cooperation.
+
+    `None` — never `inf` — means "cannot tell": no `<slug>.session`, an unreadable one, or
+    no transcript under `PROJECTS_DIR`. That is distinct from a large age (a transcript that
+    exists but has not moved), and the caller prints them differently (`work=none` vs
+    `work=1234s`) so an unknown is never rendered as an idle reading.
+    """
+    marker, _legacy = resolve(s, "session")
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            sid = fh.read().strip()
+    except OSError:
+        return None
+    if not sid or not SESSION_ID_SHAPE.fullmatch(sid):
+        return None
+    try:
+        hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
+    except OSError:
+        return None
+    if not hits:
+        return None
+    try:
+        return int(now - max(os.path.getmtime(h) for h in hits))
+    except OSError:
+        return None
+
+
 def classify(s: str, now: float) -> tuple:
-    """(state, detail) for one subject: OK, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
+    """(state, detail) for one subject: OK, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
 
     ⚠️ `UNARMED` and `INVALID` are different answers and must never be collapsed.
     `INVALID` means a record EXISTS and cannot be read — a probe failure, the
@@ -1336,8 +1420,16 @@ def classify(s: str, now: float) -> tuple:
         # Say so: a pre-split record is a manager that has not re-armed since the
         # split, and the age is measured against a file nothing will refresh.
         basis += " legacy-record"
-    detail = f"age={age}s limit={int(limit)}s {basis}"
+    work = work_age(s, now)
+    work_field = f" work={work}s" if work is not None else " work=none"
+    detail = f"age={age}s limit={int(limit)}s {basis}{work_field}"
     if age > limit:
+        # A ROUND did not happen inside the limit — but a round is not the only thing a
+        # manager does. `work` is the manager's transcript age, refreshed by ANY turn, so
+        # this is the direction the record used to miss: a session working without a round
+        # read STALE and could be restarted mid-work. It reads OK now, on its own evidence.
+        if work is not None and work <= limit:
+            return "OK", detail + f" working (no round; work {work}s ago)"
         # Goal tier only: the detached sweep gate is its sole wake source, so an ageing
         # `.cadence` between gate wakes is expected, not a lapse. A fresh gate heartbeat
         # means the manager is watched; without it, STALE stands. An EXPIRED sleep marker
@@ -1345,7 +1437,14 @@ def classify(s: str, now: float) -> tuple:
         if s.startswith("goal--") and not sleep_pending:
             subject_age, loop_alive = gate_watched(s, now)
             if loop_alive and subject_age is not None and subject_age <= GATE_SUBJECT_FRESH:
-                return "OK", detail + f" gate-driven (gate tick {subject_age}s ago)"
+                # ⚠️ IDLE, never OK. A gate tick proves the TIMER works and that this
+                # manager will be woken; it proves nothing about whether the manager has
+                # produced anything. `OK` here was the false reading — the gate can poll
+                # every 15 minutes for 20 hours while no round runs, and the topic tier
+                # then counts a slot that produces nothing as healthy. IDLE says exactly
+                # what is true: armed and watched, but no round and no work.
+                return "IDLE", detail + (
+                    f" gate-driven (gate tick {subject_age}s ago; no round, no work)")
             if loop_alive is False:
                 # The gate is down: the manager cannot be woken, but restarting it will not
                 # help, and reporting STALE here turns one dead gate into an uncapped
@@ -1466,8 +1565,10 @@ def main() -> int:
     mode.add_argument(
         "--state",
         action="store_true",
-        help="print ONE subject's state: OK / STALE / STOPPED / SLEEPING / UNARMED / INVALID / "
-             "WRONG-BRANCH; exits 3 (stdout empty) for a subject with no record and no page",
+        help="print ONE subject's state: OK / IDLE / STALE / STOPPED / SLEEPING / UNARMED / "
+             "INVALID / WRONG-BRANCH, with `work=` (the work signal) in the detail; "
+             "IDLE = armed and gate-watched but no round and no work; "
+             "exits 3 (stdout empty) for a subject with no record and no page",
     )
     mode.add_argument(
         "--delivered",

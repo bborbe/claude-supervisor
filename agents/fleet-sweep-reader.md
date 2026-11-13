@@ -104,7 +104,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    | Signal | Reading |
    |---|---|
    | session carries an **operator hold** | **held** — render `⏸️ HELD — <reason> · <age>`; never `stalled`, never `parked`, never a nudge |
-   | manager subject reads **`STOPPED`** / **`SLEEPING`** / **`STALE`** via `manager-liveness.py --state` | **`STOPPED` → `stood-down`** — a *correct* self-stand-down, never nudged · **`SLEEPING` → `sleeping`** — a date-gated subject waiting on its own `defer_date`, never nudged and never restarted · **`STALE` → `lapsed`** — no `.stopped` or `.sleeping` marker |
+   | manager subject reads **`STOPPED`** / **`SLEEPING`** / **`IDLE`** / **`STALE`** via `manager-liveness.py --state` | **`STOPPED` → `stood-down`** — a *correct* self-stand-down, never nudged · **`SLEEPING` → `sleeping`** — a date-gated subject waiting on its own `defer_date`, never nudged and never restarted · **`IDLE` → `idle-no-work`** — the record's **work signal** (`work=<seconds>s`, the age of the manager's own transcript) and the round cadence are both old while a live gate still watches it: armed and woken, producing nothing; not a lapse, so never nudged as `lapsed`, but it is not `progressing` either · **`STALE` → `lapsed`** — no round, no work, and no `.stopped`/`.sleeping` marker |
    | status changed since last sweep | progressing |
    | session carries an **open permission / AskUserQuestion gate** | **waiting-on-human** — render `⌛ waiting-on-human`; never `stalled` |
    | `idle` **and** all boxes `[x]` / task complete | **finished — reap candidate** |
