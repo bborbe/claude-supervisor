@@ -202,10 +202,12 @@ class TestGuard(unittest.TestCase):
         base.update(over)
         return base
 
-    def ok(self, in_flight=None, **over):
+    def ok(self, in_flight=None, wrapper=None, **over):
+        if wrapper is None:
+            wrapper = {"state": "idle", "pending_turns": 0, "question": None}
         return reap.guard(
             self.rec(**over),
-            wrapper={"state": "idle", "pending_turns": 0, "question": None},
+            wrapper=wrapper,
             cards=[],
             cards_readable=True,
             children=[],
@@ -280,6 +282,77 @@ class TestGuard(unittest.TestCase):
             children=[],
         )
         self.assertEqual(verdict[0], "wrapper-busy")
+
+    # --- the leaked counter -----------------------------------------------------------
+    #
+    # `pending_turns` is decremented when a turn ends; a turn that ends without the
+    # decrement leaves a counter describing nothing. Measured 2026-11-14 on `ece87199`:
+    # `pending_turns: 1` with `last_event_age_seconds: 49751` (13.8 h) against a 16-minute
+    # hold, while four genuinely pending wrappers read 1/3/24/28 s. The two directions are
+    # pinned separately: this change must free the leaked one WITHOUT freeing the live one.
+
+    def _pending(self, age, **over):
+        wrapper = {
+            "state": "idle",
+            "pending_turns": 1,
+            "question": None,
+            "last_event_age_seconds": age,
+        }
+        wrapper.update(over)
+        return wrapper
+
+    def test_the_leak_bound_is_the_wrappers_own_hold(self):
+        """`childHold()` = 15 min permission timeout + 1 min margin, in `claude-wrapper`."""
+        self.assertEqual(reap.PENDING_TURN_LEAK_SECONDS, 16 * 60)
+
+    def test_a_leaked_pending_turn_does_not_refuse(self):
+        """The defect: a counter older than any turn nothing is waiting on."""
+        self.assertIsNone(self.ok(wrapper=self._pending(49751)))
+
+    def test_a_live_pending_turn_still_refuses(self):
+        """The population this guard is right about — measured ages 1/3/24/28 s."""
+        for age in (1, 3, 24, 28):
+            verdict = self.ok(wrapper=self._pending(age))
+            self.assertEqual(verdict[0], "wrapper-busy", age)
+            self.assertIn("pending_turns 1, expected 0", verdict[1])
+
+    def test_a_pending_turn_inside_the_bound_still_refuses(self):
+        verdict = self.ok(wrapper=self._pending(reap.PENDING_TURN_LEAK_SECONDS - 1))
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_a_pending_turn_at_the_bound_is_leaked(self):
+        self.assertIsNone(self.ok(wrapper=self._pending(reap.PENDING_TURN_LEAK_SECONDS)))
+
+    def test_an_unageable_pending_turn_fails_closed(self):
+        """No `last_event_age_seconds` is an absent reading, never a stale one."""
+        for age in (None, "49751", {}):
+            self.assertEqual(self.ok(wrapper=self._pending(age))[0], "wrapper-busy", age)
+
+    def test_a_leaked_pending_turn_with_an_open_tool_marker_still_refuses(self):
+        """A long tool call is silent too, so the age alone never frees a session."""
+        verdict = self.ok(wrapper=self._pending(49751), in_flight=("Bash", 30.0))
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_a_leaked_pending_turn_with_a_parked_question_still_refuses(self):
+        """The park limb is governed by its own clock and is not touched by this change."""
+        wrapper = self._pending(49751, question={"requested_at": "2020-01-01T00:00:00Z"})
+        self.assertEqual(self.ok(wrapper=wrapper)[0], "wrapper-busy")
+
+    def test_a_leaked_pending_turn_with_a_non_idle_wrapper_still_refuses(self):
+        verdict = self.ok(wrapper=self._pending(49751, state="busy"))
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_an_unreadable_pending_turn_fails_closed(self):
+        for pending in (None, "1", -1):
+            verdict = self.ok(wrapper=self._pending(49751, pending_turns=pending))
+            self.assertEqual(verdict[0], "wrapper-busy", pending)
+
+    def test_the_stale_status_limb_is_unchanged(self):
+        """`_stale_busy()` still governs a non-idle status, and still requires 0 turns."""
+        self.assertIsNone(self.ok(status="busy", wrapper=self._pending(0, pending_turns=0)))
+        self.assertEqual(
+            self.ok(status="busy", wrapper=self._pending(49751))[0], "busy-target"
+        )
 
     def test_parked_question_refuses(self):
         verdict = reap.guard(
@@ -513,9 +586,11 @@ class TestScript(unittest.TestCase):
         self.vaults = os.path.join(self.tmp, "vaults")
         self.tasks = os.path.join(self.vaults, VAULT, "25 Tasks")
         self.projects = os.path.join(self.tmp, "projects")
+        self.attention = os.path.join(self.tmp, "attention")
         os.makedirs(self.sessions)
         os.makedirs(self.tasks)
         os.makedirs(self.projects)
+        os.makedirs(self.attention)
         self.vault_config = os.path.join(self.tmp, "vault-config.json")
         with open(self.vault_config, "w", encoding="utf-8") as handle:
             json.dump(
@@ -592,6 +667,9 @@ class TestScript(unittest.TestCase):
         env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
         env["SUPERVISOR_VAULT_CONFIG"] = self.vault_config
         env["SUPERVISOR_PROJECTS_DIR"] = self.projects
+        # The tool-marker directory is a REAL path on the machine by default, so without
+        # this a stale marker left by another session would decide these fixtures.
+        env["ATTENTION_STATE_DIR"] = self.attention
         env["SUPERVISOR_WRAPPER_URL"] = f"http://127.0.0.1:{self.port}"
         env["ATTENTION_STORE_URL"] = f"http://127.0.0.1:{self.port}"
         return env
@@ -798,6 +876,56 @@ class TestScript(unittest.TestCase):
         self._registry(child.pid)
         self._task()
         _Store.wrapper = {"id": SID, "state": "idle", "pending_turns": 1, "question": None}
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "wrapper-busy")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def _pending_wrapper(self, age_seconds, **over):
+        wrapper = {
+            "id": SID,
+            "state": "idle",
+            "pending_turns": 1,
+            "question": None,
+            "last_event_age_seconds": age_seconds,
+        }
+        wrapper.update(over)
+        return wrapper
+
+    def test_a_leaked_pending_turn_is_reaped(self):
+        """End to end: `guard()` AND main()'s pre-signal re-read must both let it go.
+
+        The unit tests drive `guard()` alone, so a re-read that still refused a leaked
+        counter would leave them green while the real path closed nothing.
+        """
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+        _Store.wrapper = self._pending_wrapper(49751)
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("reaped pid", done.stdout)
+        self.assertIsNotNone(child.poll(), "a leaked counter must be signalled")
+
+    def test_a_live_pending_turn_sends_no_signal(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+        _Store.wrapper = self._pending_wrapper(3)
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "wrapper-busy")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_a_leaked_pending_turn_with_an_open_tool_marker_sends_no_signal(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+        _Store.wrapper = self._pending_wrapper(49751)
+        marker = os.path.join(self.attention, f"{SID}.tool.json")
+        with open(marker, "w", encoding="utf-8") as handle:
+            json.dump({"state": "open", "ts": time.time() - 30, "tool": "Bash"}, handle)
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "wrapper-busy")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
