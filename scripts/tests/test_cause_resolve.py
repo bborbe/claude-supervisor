@@ -82,6 +82,10 @@ class CauseResolveTest(unittest.TestCase):
         self.assertEqual(result["verdict"], "asserted")
         self.assertEqual(result["cause"], "reaper")
         self.assertIn("verb=reap outcome=closed", result["line"])
+        # The fixture's tool_result carries TWO log lines; the quote is the matched one,
+        # not the whole tail, so one line's evidence cannot be read as another's.
+        self.assertNotIn("\n", result["line"])
+        self.assertNotIn("candidates=1", result["line"])
 
     def test_sibling_log_is_never_borrowed(self):
         """The target's own log is silent; the SIBLING's names the target in a reap tick.

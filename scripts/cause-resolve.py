@@ -177,33 +177,47 @@ def _block_texts(content):
                 yield block
 
 
+def _narrow(text, needle):
+    """The single line of `text` carrying `needle`, or `text` when it is already one line.
+
+    A candidate is a whole `tool_result`, which is routinely a multi-line log tail. Quoting
+    all of it would put five unrelated lines in the round's report and let one line's
+    evidence be read as another's; the matched line is the evidence.
+    """
+    if needle and "\n" in text:
+        for line in text.splitlines():
+            if needle in line:
+                return line.strip()
+    return text.strip()
+
+
 def find_assertion(events_path, sid):
     """Return (cause, line) for the first line that names `sid` AND states an action.
 
     Scans only `events_path`. A sibling's file is never opened — the caller passes this
     session's own directory, and the sibling-borrow regression is what the test pins.
     """
-    for line in _iter_log_lines(events_path):
-        for match in REAP_CLOSED.finditer(line):
+    for text in _iter_log_lines(events_path):
+        for match in REAP_CLOSED.finditer(text):
             if _sid_matches(match.group("sid"), sid):
-                return "reaper", line
-        for match in REAP_TICK.finditer(line):
+                return "reaper", _narrow(text, match.group(0))
+        for match in REAP_TICK.finditer(text):
             if not _sid_matches(match.group("sid"), sid):
                 continue
             if match.group("outcome") in REAP_REFUSAL_OUTCOMES:
                 # The reaper looked at this session and declined. That is evidence it
                 # did not reap, so it cannot license a `reaper` cause.
                 continue
-            return "reaper", line
+            return "reaper", _narrow(text, match.group(0))
     return None, None
 
 
 def find_non_assertion(events_path, sid):
     """Return the first line that names `sid` but does not assert an end, if any."""
-    for line in _iter_log_lines(events_path):
-        for match in DRAIN_BOUNDARY.finditer(line):
+    for text in _iter_log_lines(events_path):
+        for match in DRAIN_BOUNDARY.finditer(text):
             if _sid_matches(match.group("sid"), sid):
-                return line
+                return _narrow(text, match.group(0))
     return None
 
 
