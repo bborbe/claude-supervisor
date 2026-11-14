@@ -1,0 +1,1 @@
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"2026-11-14T14:36:04Z drain: session aaaaaaaa-1111-2222-3333-444444444444 at turn boundary (state idle)"}]},"session_id":"aaaaaaaa-1111-2222-3333-444444444444"}

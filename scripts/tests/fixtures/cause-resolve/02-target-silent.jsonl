@@ -1,0 +1,2 @@
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the task file, then the repo."}]},"session_id":"aaaaaaaa-1111-2222-3333-444444444444"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The file 25 Tasks/Some Task.md has been read successfully."}]},"session_id":"aaaaaaaa-1111-2222-3333-444444444444"}
