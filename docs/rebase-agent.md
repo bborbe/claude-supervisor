@@ -30,12 +30,22 @@ signal; only the queue-level sweep and the rebase are new.
 
 The conflict class exists only where a release cut renames `## Unreleased` in a `CHANGELOG.md`
 that open branches also edit. A repo without that convention cannot produce the conflict, so
-sweeping it would rebase branches for nothing. The set is a constant in the script:
+sweeping it would rebase branches for nothing.
+
+**The set is configuration, not code.** It lives in `repos.txt`, one `owner/name` per line,
+read by `--repos-file` (default `/config/repos.txt`). Adding a repo is an edit to that file —
+never a release of this script. The cluster CronJob's clone loop reads the same file, so a
+repo added there is cloned before the sweep runs; a repo named only to this script has no
+clone, `fetch_master` fails, and its row renders `UNKNOWN — queue could not be read` rather
+than sweeping. The current contents:
 
 | Repo | Why it is in the set |
 |---|---|
 | `bborbe/claude-supervisor` | the measured queue — 13 open PRs, 8 `CONFLICTING`/`DIRTY` on 2026-11-07 |
 | `bborbe/vault-cli` | the second repo in the set, and it holds the exact pathology: two open PRs, both `CONFLICTING`, both APPROVED |
+
+A missing, empty or malformed file is exit `2`, never an empty queue: an empty set used to
+render as "nothing is behind" when the truth is "nothing was examined".
 
 ## The poll trigger
 
@@ -165,10 +175,10 @@ it and the operator pasting the line, handing over the wrong commit with no erro
 operator's checkout must have an `origin/master` at least as new as the pod's. A Mac that
 has not fetched since the pod did will be refused by `git fetch`; `git fetch origin` first.
 
-⚠️ **`<operator-path>` is the Mac's checkout, never the pod's.** `path` in `DEFAULT_REPOS`
-is `expanduser`d and resolves to `/workspace/…` under the CronJob's `HOME`; `operator_path`
-is a literal and is the one the line names. A line naming the pod's clone cannot be pasted
-anywhere.
+⚠️ **`<operator-path>` is the Mac's checkout, never the pod's.** `load_repos` derives `path`
+from the repo name and `expanduser`s it, so under the CronJob's `HOME` it resolves to
+`/workspace/…`; `operator_path` is a literal and is the one the line names. A line naming the
+pod's clone cannot be pasted anywhere.
 
 ⚠️ **`&&`, not three steps.** The operator must paste one line and do nothing else; a copy
 that succeeded while the fetch failed must stop before the push.

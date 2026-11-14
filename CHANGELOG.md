@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the rebase agent's repo coverage is configuration, not code.** `scripts/rebase-agent.py` carried the set as the `DEFAULT_REPOS` constant, so adding a repo meant editing the script and shipping a release. It now reads `repos.txt` — one `owner/name` per line, `#` comments and blank lines skipped — via a new `--repos-file` flag (default `/config/repos.txt`), deriving each clone path with `expanduser` and keeping the park thresholds as code defaults. The cluster CronJob's clone loop reads the same file, so a repo added there is cloned before the sweep runs; a repo named only to the script has no clone, `fetch_master` fails, and its row renders `UNKNOWN — queue could not be read`. A missing, empty or malformed set is exit `2` and never the clean-queue line — the same false negative the `--repo` guard already refuses, since an empty list used to read as "nothing is behind" when the truth is "nothing was examined". `docs/rebase-agent.md` § *The repo set* now describes the file rather than a constant, and `scripts/tests/test_rebase_agent.py` gains `LoadReposTest` pinning the six ways the file can be wrong.
+
 ## v0.313.4
 
 - fix: **an unowned gate no longer wakes every manager when no Fleet Manager is live.** `route_to_fleet()` returned the emit path whenever no live Fleet Manager resolved, so a `producer_kind: cron` gate with no session id — or any `unowned` gate — was handed to every manager's arm. It now distinguishes the two cases the old `if not self_id or not fleet` collapsed: an **unreadable** registry (`UNREADABLE`) still fails open, but a **readable** registry with no Fleet Manager suppresses the `unowned` class and counts it in a new `dropped(unowned-no-fleet)` bucket on the `LIVENESS` line, so the fallback is never silent. `dead-manager` and `claim-dead` are a separate residual and keep their fail-open emit.
