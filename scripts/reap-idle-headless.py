@@ -98,6 +98,9 @@ def load_sibling(filename):
 
 close_worker = load_sibling("close-worker.py")
 precheck = load_sibling("restart-precheck.py")
+# The owning-pid rule lives beside `find_target` so the three close verbs share one
+# implementation instead of three drifting copies.
+restart_worker = load_sibling("restart-worker.py")
 
 SESSIONS_DIR = close_worker.SESSIONS_DIR
 
@@ -725,20 +728,23 @@ def main(argv=None):
 
     for session_id in session_ids:
         entries = registry_entries(session_id, args.sessions_dir)
-        if not entries:
+        path, rec, note = restart_worker.resolve_owned_target(entries, session_id)
+        if note:
+            # stderr: this verb's first stdout line is a machine-parsed token.
+            print(f"note: {note}", file=sys.stderr)
+        if rec is None:
             exit_code = refuse(
                 "unknown-session-id", f"no registry entry carries {session_id}"
             )
             continue
-        if len(entries) > 1:
+        if path == "ambiguous":
             exit_code = refuse(
                 "ambiguous-pid",
-                f"{len(entries)} registry entries claim {session_id}: "
-                f"{', '.join(os.path.basename(p) for p, _ in entries)}",
+                f"{len(rec)} registry entries claim {session_id} "
+                f"({', '.join(os.path.basename(p) for p, _ in rec)}) and none owns it — "
+                "no live pid, or several unrelated live pids; nothing was signalled",
             )
             continue
-
-        path, rec = entries[0]
         pid = rec.get("pid")
         # ⚠️ Sampled BEFORE the guard chain, not after it. The window this guard exists for
         # is the whole span between reading the entry and sending the signal — the guards

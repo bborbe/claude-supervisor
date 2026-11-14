@@ -170,6 +170,124 @@ def find_target(entries, sid):
     return matches[0][0], matches[0][1]
 
 
+def pid_alive(pid):
+    """Whether `pid` names a running process.
+
+    EPERM is a live process this user does not own — folding it into "dead" would make a
+    sibling user's session look gone.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def parent_pid(pid):
+    """`pid`'s parent: `None` when the query could not be run, `0` when it was read and
+    reported no parent, otherwise the parent's pid.
+
+    ⚠️ The three states are not decoration. `None` means unreadable, and `is_ancestor`
+    answers False for it — so an unreadable tree leaves the id ambiguous and the close is
+    REFUSED. Folding "read, no parent" into `None` would make the top of the process tree
+    indistinguishable from an unreadable `ps`, which is the collapse the repo's
+    transport-read check exists to catch.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return 0
+    try:
+        return int(out)
+    except ValueError:
+        # `ps` ran and answered without a pid: the transport is reachable and this
+        # process has no usable parent, which is "top of the tree", not a failure.
+        return 0
+
+
+def is_ancestor(ancestor_pid, descendant_pid):
+    """Whether `ancestor_pid` sits anywhere above `descendant_pid` in the process tree."""
+    seen = set()
+    pid = parent_pid(descendant_pid)
+    while pid and pid > 1 and pid not in seen:
+        if pid == ancestor_pid:
+            return True
+        seen.add(pid)
+        pid = parent_pid(pid)
+    return False
+
+
+def resolve_owned_target(entries, sid):
+    """The entry that owns `sid`: `(path, rec, note)`, `('ambiguous', matches, None)`, or
+    `(None, None, None)` when no entry claims it.
+
+    ⚠️ Several entries for one id are not automatically a refusal. A shell wrapper and the
+    child it launched are ONE logical process — the wrapper exists to start and supervise
+    the child, and the child is the work — so refusing there would blind every close verb
+    to the ordinary shape of a supervised session. That is the shape that actually
+    collides: on 2026-11-13 `dd5d9944` was refused `ambiguous-pid` on every tick by a
+    wrapper and its own child, and stayed idle until the wrapper closed it by id instead.
+
+    Resolution order, each step refusing rather than guessing:
+      1. exactly one entry claims the id -> it.
+      2. several claim it, exactly one pid is alive -> the live one; the rest are records a
+         crashed or resumed process left behind.
+      3. several are alive and exactly one is a descendant of every other -> it.
+      4. anything else -> 'ambiguous': picking between unrelated live processes is a guess
+         that closes the wrong session.
+
+    `note` names the pid chosen when the id had more than one claimant. It is RETURNED, not
+    printed, because every caller's first stdout line is a machine-parsed token — a note
+    on stdout would corrupt that contract. Callers print it to stderr.
+    """
+    matches = [(p, r) for p, r in entries if r.get("sessionId") == sid]
+    if not matches:
+        return None, None, None
+    if len(matches) == 1:
+        return matches[0][0], matches[0][1], None
+
+    live = [(p, r) for p, r in matches if pid_alive(r.get("pid"))]
+    if len(live) == 1:
+        return (
+            live[0][0],
+            live[0][1],
+            f"{len(matches)} registry entries claim {sid}; resolved to the only live pid "
+            f"{live[0][1].get('pid')} ({os.path.basename(live[0][0])})",
+        )
+    if len(live) < 2:
+        return "ambiguous", matches, None
+
+    ancestors = set()
+    for path, rec in live:
+        for other_path, other in live:
+            if other_path == path:
+                continue
+            if is_ancestor(rec.get("pid"), other.get("pid")):
+                ancestors.add(path)
+    descendants = [(p, r) for p, r in live if p not in ancestors]
+    if len(descendants) == 1:
+        return (
+            descendants[0][0],
+            descendants[0][1],
+            f"{len(matches)} registry entries claim {sid}; resolved to the descendant pid "
+            f"{descendants[0][1].get('pid')} ({os.path.basename(descendants[0][0])})",
+        )
+    return "ambiguous", matches, None
+
+
 def role_of(sid, name, fb, index, slugs, colours):
     """`'manager'`, `'worker'`, or `None` when no signal could be read.
 
