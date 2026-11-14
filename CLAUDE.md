@@ -215,7 +215,6 @@ agents/gate-relay-send.md                the manager's gate relay, send leg — 
 server/supervisor.mjs                    the DEPRECATED MCP server — drill scripts only; the live tool is the Go claude-wrapper daemon
 server/policy.json                       bundled approval rules (see README § The approval policy)
 launchd/com.bborbe.fleet-keeper.plist    the fleet keeper — one tick a minute, no Claude session as its parent
-launchd/com.bborbe.idle-reaper.plist     the idle reaper
 launchd/com.bborbe.rebase-agent.plist    the rebase agent
 launchd/com.bborbe.session-exit-daily.plist  the daily session exit
 docs/fleet-pusher.md                     the cheap wake cadence — now in-process in `bborbe/claude-wrapper`
