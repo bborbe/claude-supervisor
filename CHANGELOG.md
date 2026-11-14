@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.311.2
 
 - fix: **`manager-liveness.py` imports under Python 3.9 again, so the sweep-gate wake path can read a subject's state.** The script used PEP 604 annotations (`float | None`), which are evaluated at function-definition time and raise under 3.9 — and the in-process sweep-gate job invokes `manager-wake.py` with `/usr/bin/python3` (3.9.6 on this Mac), which then runs the liveness read with `sys.executable`, so every read failed and `pane-wake-guard.py` refused the wake as `skip:state-unreadable`. Measured 2026-11-14 on the wake emitter's first live ticks (09:31Z and 10:35Z), both `skip:state-unreadable` while the same read returned `OK` under a 3.15 interpreter. `from __future__ import annotations` makes the annotations lazy, so the script imports and runs unchanged under both. `scripts/manager-liveness.py`, `CHANGELOG.md`.
 
