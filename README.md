@@ -274,7 +274,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 ## Documentation
 
 - [Fleet surface](docs/fleet-surface.md) — the spawn shape and the table render spec (canonical)
-- [Fleet pusher](docs/fleet-pusher.md) — the cheap wake cadence: two launchd agents, and the five things that look healthy and are not
+- [Fleet pusher](docs/fleet-pusher.md) — the cheap wake cadence: two in-process interval jobs in `bborbe/claude-wrapper`, and the things that look healthy and are not
 - [Session tiers](docs/session-tiers.md) — which commands each session tier may run
 - [Subject resolution](docs/subject-resolution.md) — the four-source subject chain the manager commands share
 - [Pane reads](docs/pane-reads.md) — reading a worker's pane

@@ -218,12 +218,14 @@ launchd/com.bborbe.fleet-keeper.plist    the fleet keeper — one tick a minute,
 launchd/com.bborbe.idle-reaper.plist     the idle reaper
 launchd/com.bborbe.rebase-agent.plist    the rebase agent
 launchd/com.bborbe.session-exit-daily.plist  the daily session exit
-launchd/com.bborbe.fleet-pusher.plist    the CHEAP wake cadence — StartInterval 900, no model turn (docs/fleet-pusher.md)
-launchd/com.bborbe.fleet-pusher-watch.plist  its watchdog — StartInterval 300, reports a dead cadence
-scripts/fleet-pusher-tick.sh             one pusher pass, exits; resolves the NEWEST installed supervisor, never a pinned version
-scripts/fleet-pusher-watch.sh            reads the pusher's heartbeat, posts one `ack` card once it ages past 1800 s
-docs/fleet-pusher.md                     the pusher's two layers, its install, and the five things that look healthy and are not
+docs/fleet-pusher.md                     the cheap wake cadence — now in-process in `bborbe/claude-wrapper`
 ```
+
+The fleet pusher (the 900 s wake tick and its 300 s watchdog) is no longer a launchd agent here.
+Both are interval jobs inside the `claude-wrapper` daemon (`pkg/fleet_pusher.go`,
+`pkg/fleet_pusher_watch.go` in `bborbe/claude-wrapper`); the plists and bash scripts that used to
+live in this repo were retired with it. `docs/fleet-pusher.md` records the flags, the log lines and
+the rollback.
 
 ## Changelog fold guard
 
