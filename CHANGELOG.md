@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`manager-liveness.py` imports under Python 3.9 again, so the sweep-gate wake path can read a subject's state.** The script used PEP 604 annotations (`float | None`), which are evaluated at function-definition time and raise under 3.9 — and the in-process sweep-gate job invokes `manager-wake.py` with `/usr/bin/python3` (3.9.6 on this Mac), which then runs the liveness read with `sys.executable`, so every read failed and `pane-wake-guard.py` refused the wake as `skip:state-unreadable`. Measured 2026-11-14 on the wake emitter's first live ticks (09:31Z and 10:35Z), both `skip:state-unreadable` while the same read returned `OK` under a 3.15 interpreter. `from __future__ import annotations` makes the annotations lazy, so the script imports and runs unchanged under both. `scripts/manager-liveness.py`, `CHANGELOG.md`.
+
 ## v0.311.0
 
 - fix: **the transfer bundle's name carries the repo, not just the PR number.** `DEFAULT_REPOS` sweeps two repos into one `REBASE_BUNDLE_DIR`, and PR numbers collide across them — 521 exists in both — so `pr-<n>.bundle` let one repo's bundle overwrite the other's between the sweep writing it and the operator pasting the line, handing over the wrong commit with no error anywhere. The path is now `<owner>-<repo>-pr-<n>.bundle`, and the Mac's copy takes its name from the bundle's own basename so the two cannot drift. Also documented: a range bundle carries `origin/master..<branch>`, so the operator's checkout must have an `origin/master` at least as new as the pod's — a Mac that has not fetched since the pod did is refused by `git fetch`. Change set: `scripts/rebase-agent.py`, `scripts/tests/test_rebase_agent.py`, `docs/rebase-agent.md`, `CHANGELOG.md`.
