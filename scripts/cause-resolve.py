@@ -145,26 +145,36 @@ def _iter_log_lines(path):
 
 
 def _event_texts(event):
-    """Every text payload in one event, in file order."""
+    """Every text payload in one event, in file order.
+
+    `content` is a string in the common case but the API also emits a LIST of blocks
+    (`[{"type": "text", "text": …}]`), and a tool_result's `content` nests the same way —
+    so a nested block is descended rather than skipped. A reap line inside a structured
+    block is the same evidence as one inside a plain string, and missing it would read as
+    "no cause found" for a session that recorded one.
+    """
     message = event.get("message")
     if isinstance(message, str):
         yield message
         return
     if not isinstance(message, dict):
         return
-    content = message.get("content")
+    for text in _block_texts(message.get("content")):
+        yield text
+
+
+def _block_texts(content):
     if isinstance(content, str):
         yield content
         return
-    if not isinstance(content, list):
-        return
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        for key in ("text", "content"):
-            value = block.get(key)
-            if isinstance(value, str):
-                yield value
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                for key in ("text", "content"):
+                    for text in _block_texts(block.get(key)):
+                        yield text
+            elif isinstance(block, str):
+                yield block
 
 
 def find_assertion(events_path, sid):

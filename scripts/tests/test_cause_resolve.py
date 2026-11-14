@@ -110,6 +110,18 @@ class CauseResolveTest(unittest.TestCase):
         result = self._run(TARGET)
         self.assertEqual(result["verdict"], "unverified")
 
+    def test_nested_content_block_is_scanned(self):
+        """`tool_result.content` can be a list of blocks, not only a string.
+
+        The API emits both shapes, so a resolver that reads only string content misses a
+        reap line recorded inside a structured block and reports `unverified` for a
+        session that did record one.
+        """
+        self._install(TARGET, "05-nested-block.jsonl")
+        result = self._run(TARGET)
+        self.assertEqual(result["verdict"], "asserted")
+        self.assertEqual(result["cause"], "reaper")
+
     def test_ledger_is_reported_as_context_only(self):
         """The ledger row is surfaced, and never turned into a cause."""
         self._install(TARGET, "02-target-silent.jsonl")
