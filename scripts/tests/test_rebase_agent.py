@@ -181,6 +181,7 @@ class PushLineTest(unittest.TestCase):
             ra.BUNDLE_DIR_ENV: "/bundles",
             ra.KUBECTL_ENV: "kubectlprod",
             ra.READER_POD_ENV: "rebase-agent-bundles",
+            ra.OPERATOR_WORKSPACES_ENV: "/srv/operator/workspaces",
         })
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -225,10 +226,10 @@ class PushLineTest(unittest.TestCase):
     def test_the_line_works_in_the_operator_checkout_not_the_pods(self):
         """The pod path is the defect; a line naming it is unrunnable on the Mac."""
         line = ra.push_line(
-            "/Users/b/Documents/workspaces/r", "feat/plain", "abc123", 7,
+            "/srv/operator/workspaces/r", "feat/plain", "abc123", 7,
             "/bundles/pr-7.bundle",
         )
-        self.assertIn("-C /Users/b/Documents/workspaces/r", line)
+        self.assertIn("-C /srv/operator/workspaces/r", line)
         self.assertNotIn("/workspace/Documents", line)
 
 
@@ -240,6 +241,7 @@ class TransferTest(unittest.TestCase):
             ra.BUNDLE_DIR_ENV: self.bundles,
             ra.KUBECTL_ENV: "kubectlprod",
             ra.READER_POD_ENV: "rebase-agent-bundles",
+            ra.OPERATOR_WORKSPACES_ENV: "/srv/operator/workspaces",
         })
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -249,6 +251,17 @@ class TransferTest(unittest.TestCase):
         self.assertIsNone(ra.transfer_refusal())
         with mock.patch.dict(os.environ, {ra.KUBECTL_ENV: ""}):
             self.assertIn(ra.KUBECTL_ENV, ra.transfer_refusal())
+
+    def test_the_operator_path_comes_from_configuration_not_the_pods_home(self):
+        """`cfg["path"]` is the pod's clone; reusing it would emit /workspace again."""
+        cfg = {
+            "repo": "bborbe/claude-supervisor",
+            "path": "/workspace/Documents/workspaces/claude-supervisor",
+        }
+        self.assertEqual(
+            ra.operator_path(cfg),
+            "/srv/operator/workspaces/claude-supervisor",
+        )
 
     def test_the_bundle_carries_the_range_and_verifies(self):
         repo = make_repo()

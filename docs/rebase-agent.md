@@ -175,8 +175,9 @@ fails only after it has been pasted:
 | `REBASE_BUNDLE_DIR` | directory on the PVC the pod writes bundles to, e.g. `/bundles` |
 | `REBASE_KUBECTL` | the operator's wrapper, e.g. `kubectlnukeprod` |
 | `REBASE_READER_POD` | the long-lived pod that mounts the same PVC |
+| `REBASE_OPERATOR_WORKSPACES` | the operator's workspaces directory on the Mac, e.g. `/Users/bborbe/Documents/workspaces` — the line's `-C` path is this plus the repo name |
 
-Any of the three unset **refuses the row** before the rebase runs — it never emits a line
+Any of the four unset **refuses the row** before the rebase runs — it never emits a line
 that cannot work.
 
 `refs/rebase-agent/` is shared across every worktree of the repo, so the line works from the

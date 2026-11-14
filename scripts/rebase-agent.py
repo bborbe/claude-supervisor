@@ -146,6 +146,11 @@ BOARD_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 BUNDLE_DIR_ENV = "REBASE_BUNDLE_DIR"
 KUBECTL_ENV = "REBASE_KUBECTL"
 READER_POD_ENV = "REBASE_READER_POD"
+# Where the OPERATOR's checkouts live. A deployment fact like the three above, and for the
+# same reason: the pod cannot derive it. `expanduser` is wrong here in both directions —
+# in the pod it resolves to /workspace and re-creates the defect this channel exists to
+# remove, and hard-coding one machine's home directory resolves on exactly one machine.
+OPERATOR_WORKSPACES_ENV = "REBASE_OPERATOR_WORKSPACES"
 # The bundle is written here on the operator's Mac, one name per PR so a re-sweep
 # overwrites the previous copy rather than accumulating files.
 LOCAL_BUNDLE = "/tmp/rebase-agent-pr-{number}.bundle"
@@ -162,10 +167,6 @@ DEFAULT_REPOS = (
         # The pod's clone. `expanduser` is deliberate: HOME is /workspace in the pod, and
         # pointing HOME at the volume is what makes the container layout match a laptop.
         "path": os.path.expanduser("~/Documents/workspaces/claude-supervisor"),
-        # The OPERATOR's checkout — never `expanduser`d, because in the pod that would
-        # resolve to /workspace and emit the pod's path again, which is the defect this
-        # whole channel exists to remove. This is the path the line is run from.
-        "operator_path": "/Users/bborbe/Documents/workspaces/claude-supervisor",
         # The auto-reviewer's park thresholds (MAX_ADDITIONS / MAX_CHANGED_FILES in
         # github-pr-watcher) are deployment env, not repo config, so they cannot be
         # read from here. These are the observed defaults and are marked unverified.
@@ -175,7 +176,6 @@ DEFAULT_REPOS = (
     {
         "repo": "bborbe/vault-cli",
         "path": os.path.expanduser("~/Documents/workspaces/vault-cli"),
-        "operator_path": "/Users/bborbe/Documents/workspaces/vault-cli",
         "max_additions": 2000,
         "max_changed_files": 40,
     },
@@ -521,6 +521,20 @@ def reader_pod():
     return (os.environ.get(READER_POD_ENV) or "").strip()
 
 
+def operator_workspaces():
+    return (os.environ.get(OPERATOR_WORKSPACES_ENV) or "").strip()
+
+
+def operator_path(cfg):
+    """The operator's checkout for this repo — the path the line is run from.
+
+    Derived from configuration rather than from `cfg["path"]`: that one is the pod's
+    clone, `expanduser`d against a `HOME` the deployment sets to the transfer volume, so
+    reusing it would emit `/workspace/...` and re-create the defect.
+    """
+    return os.path.join(operator_workspaces(), cfg["repo"].rsplit("/", 1)[-1])
+
+
 def transfer_refusal():
     """Why no transfer can be published, or None when one can.
 
@@ -534,6 +548,7 @@ def transfer_refusal():
             (BUNDLE_DIR_ENV, bundle_dir()),
             (KUBECTL_ENV, kubectl_command()),
             (READER_POD_ENV, reader_pod()),
+            (OPERATOR_WORKSPACES_ENV, operator_workspaces()),
         )
         if not value
     ]
@@ -843,7 +858,7 @@ def process_pr(cfg, pr, keep_scratch=False):
         bundle = publish_bundle(repo_path, number)
         row["transfer"] = {"kind": "pvc-bundle", "target": f"{reader_pod()}:{bundle}"}
         row["push_line"] = push_line(
-            cfg["operator_path"], branch, head_sha, number, bundle
+            operator_path(cfg), branch, head_sha, number, bundle
         )
     except Refusal as refusal:
         row["verdict"] = "REFUSED"
