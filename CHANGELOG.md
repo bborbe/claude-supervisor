@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **an unowned gate no longer wakes every manager when no Fleet Manager is live.** `route_to_fleet()` returned the emit path whenever no live Fleet Manager resolved, so a `producer_kind: cron` gate with no session id — or any `unowned` gate — was handed to every manager's arm. It now distinguishes the two cases the old `if not self_id or not fleet` collapsed: an **unreadable** registry (`UNREADABLE`) still fails open, but a **readable** registry with no Fleet Manager suppresses the `unowned` class and counts it in a new `dropped(unowned-no-fleet)` bucket on the `LIVENESS` line, so the fallback is never silent. `dead-manager` and `claim-dead` are a separate residual and keep their fail-open emit.
+
 ## v0.313.2
 
 - refactor: **the fleet round no longer opens flagged rows — the wrapper's tick does.** Row 5c, `commands/steps/flagged-open.md` and `agents/fleet-flagged-open-actor.md` are deleted, and every cross-reference is reworded in the same change (`fleet-drive.md`'s router and carve-out, `read-guides.md`, `open.md`, `fleet-round-tail.md`, `keepalive-topicless-goals.md`, `keepalive.md`, `output-shape.md` items 13 and 14, `rules.md`, `fleet-sweep-reader.md`), together with the two checkers that asserted the leg's presence. The reopen is `claude-wrapper`'s model-free `flagged-tick`: measured 2026-11-14 over 24 h, 83 close→reopen pairs, median 36.4 min, every opened row live afterwards. Both probes return 0 lines: `grep -rn "flagged-open" commands agents` and `grep -n "5c" commands/fleet-drive.md`.
