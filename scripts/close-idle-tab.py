@@ -187,13 +187,16 @@ def main(argv=None):
                 f"be read, so {session_id} cannot be resolved",
             )
             continue
-        path, rec = restart_worker.find_target(entries, session_id)
+        path, rec, note = restart_worker.resolve_owned_target(entries, session_id)
+        if note:
+            # stderr: this verb's first stdout line is a machine-parsed token.
+            print(f"note: {note}", file=sys.stderr)
         if path == "ambiguous":
             exit_code = refuse(
                 "ambiguous-pid",
                 f"{len(rec)} registry entries claim session {session_id} "
-                f"({', '.join(os.path.basename(p) for p, _ in rec)}); the pid must be "
-                "unique or nothing is closed",
+                f"({', '.join(os.path.basename(p) for p, _ in rec)}) and none owns it — "
+                "no live pid, or several unrelated live pids; nothing is closed",
             )
             continue
         if rec is None:
