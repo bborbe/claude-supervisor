@@ -106,6 +106,13 @@ SITE_LIST = {
     # It returns `None` for a failed query, never an empty argv, and an unreadable argv can
     # only fall back to the load-path check, never turn a refusal into an accept.
     ("restart-worker.py", "worker_argv"),
+    # added 2026-11-14 — `restart-worker.py`'s `ps -o ppid=` read, the half of the
+    # owning-pid rule that walks the process tree to decide whether two entries claiming
+    # one session id are a wrapper and its child. `None` means the parent could not be
+    # read, and `is_ancestor` then answers False — which resolves nothing and leaves the
+    # ambiguity a refusal, so the failure mode is a close that does not happen rather than
+    # a close of the wrong process.
+    ("restart-worker.py", "parent_pid"),
     # added 2026-10-20 — `close-worker.py`'s pane teardown (`wezterm cli kill-pane`).
     # ⚠️ It is an ACTION, not a read, exactly like `reload_pane` above: it returns an exit
     # code and reports every failure rather than collapsing one into an empty result, so
@@ -414,6 +421,10 @@ def main():
         # the property is load-bearing: `watchers` returning `[]` for an unreadable tree
         # would reap a worker whose background watcher was merely unobservable.
         ("rih", "watchers", (1,)), ("rih", "process_start", (1,)),
+        # added 2026-11-14 — the owning-pid rule's process-tree read, DRIVEN and not
+        # merely listed, for the reason the pair above states: an enumeration entry
+        # nothing reaches is a false green for exactly the read it claims to protect.
+        ("rw", "parent_pid", (1,)),
         # added 2026-11-08 — the pane wake's viewport reads, driven like `sg.pane_text`.
         ("pwg", "read_pane", (1,)), ("pw", "read_pane", (1,)),
     ]

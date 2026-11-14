@@ -663,13 +663,16 @@ def main():
             f"the registry at {args.sessions_dir or SESSIONS_DIR} could not be read, so "
             f"{sid} cannot be resolved",
         )
-    path, rec = restart_worker.find_target(entries, sid)
+    path, rec, note = restart_worker.resolve_owned_target(entries, sid)
+    if note:
+        # stderr: this verb's first stdout line is a machine-parsed token.
+        print(f"note: {note}", file=sys.stderr)
     if path == "ambiguous":
         pids = [os.path.basename(p) for p, _ in rec]
         return refuse(
             "ambiguous-pid",
-            f"{len(rec)} registry entries claim session {sid} ({', '.join(pids)}); "
-            "the pid must be unique or nothing is closed",
+            f"{len(rec)} registry entries claim session {sid} ({', '.join(pids)}) and none "
+            "owns it — no live pid, or several unrelated live pids; nothing is closed",
         )
     if rec is None:
         return refuse("unknown-session-id", f"no registry entry carries session id {sid}")
