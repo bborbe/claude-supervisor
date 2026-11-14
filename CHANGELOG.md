@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.313.1
 
 - fix: **a session id claimed by two pids is resolved instead of refused.** Every close verb returned `ambiguous-pid` whenever more than one registry entry carried a session id, so a finished worker could not be closed at all — `dd5d9944` was refused on every tick on 2026-11-13 and stayed idle until the wrapper closed it by id instead. Measured shape: a shell wrapper and the child it launched, both live, both carrying the id.
   **Several entries are not automatically a refusal.** `restart-worker.py` gains `pid_alive`, `parent_pid`, `is_ancestor` and `resolve_owned_target`, and the three close verbs (`close-worker.py`, `close-idle-tab.py`, `reap-idle-headless.py`) call it. Order, each step refusing rather than guessing: one claimant wins; several with exactly one live pid takes the live one; several live with exactly one descendant of the others takes that descendant; anything else stays `ambiguous`, because picking between unrelated live processes is a guess that closes the wrong session.
