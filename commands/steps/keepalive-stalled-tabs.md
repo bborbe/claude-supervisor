@@ -25,7 +25,7 @@ So this leg **reports and hands over**; it never restarts on its own judgement.
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
 F=$(python3 "$P/resolve-folders.py" --vault "<vault>" --require tasks_dir)
-python3 -c '
+python3 - "$vault" "$F" "$P/stalled-tab-restart.py" <<'PY'
 import json, os, subprocess, sys
 vault, f, script = sys.argv[1:4]
 if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
@@ -83,8 +83,14 @@ for sid, row in sorted(sessions.items()):
     # bypassed the restart cap, and truncating it makes that bypass invisible.
     lines = [ln for ln in out.split("\n") if ln.strip()]
     print(sid[:8] + "\t" + "\n".join(lines).replace("\n", "\t"), end="\n")
-' "<vault>" "$F" "$P/stalled-tab-restart.py"
+PY
 ```
+
+⚠️ **A heredoc, not `python3 -c '…'`.** The block's own comments contain apostrophes
+(`the vault's`, `a session's`, `the operator's`), and inside a single-quoted `-c` string an
+apostrophe terminates the quoting — the invocation died with a bash syntax error before the
+first row, so the leg could not run at all. `<<'PY'` quotes nothing, so no apostrophe needs
+escaping and the comments stay readable.
 
 ⚠️ **There is no `class` or `mode` field to filter on** — the snapshot carries `name`,
 `status`, `task_file`, `task_mtime` and `stall_count` only. `stall_count >= 2` is the whole
