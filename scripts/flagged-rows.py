@@ -55,7 +55,7 @@ ROLE_MAP = os.path.expanduser("~/.cache/wezterm-role-map.json")
 TEMPLATE_ROOT = os.path.expanduser("~/Documents/workspaces/nuke/task/recurring-schedules/prod")
 
 #: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path because this
-#: module is loaded by path too (the test suite and `flagged-subjects.py` both do it), so
+#: module is loaded by path too (the test suite and `open-queue.py` both do it), so
 #: `scripts/` is not guaranteed on `sys.path`.
 _FLAG_SPEC = importlib.util.spec_from_file_location(
     "flag_provenance", os.path.join(HERE, "flag_provenance.py"))

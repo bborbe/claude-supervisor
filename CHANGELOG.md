@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **the fleet round no longer opens flagged rows — the wrapper's tick does.** Row 5c, `commands/steps/flagged-open.md` and `agents/fleet-flagged-open-actor.md` are deleted, and every cross-reference is reworded in the same change (`fleet-drive.md`'s router and carve-out, `read-guides.md`, `open.md`, `fleet-round-tail.md`, `keepalive-topicless-goals.md`, `keepalive.md`, `output-shape.md` items 13 and 14, `rules.md`, `fleet-sweep-reader.md`), together with the two checkers that asserted the leg's presence. The reopen is `claude-wrapper`'s model-free `flagged-tick`: measured 2026-11-14 over 24 h, 83 close→reopen pairs, median 36.4 min, every opened row live afterwards. Both probes return 0 lines: `grep -rn "flagged-open" commands agents` and `grep -n "5c" commands/fleet-drive.md`.
+
 ## v0.313.1
 
 - fix: **a session id claimed by two pids is resolved instead of refused.** Every close verb returned `ambiguous-pid` whenever more than one registry entry carried a session id, so a finished worker could not be closed at all — `dd5d9944` was refused on every tick on 2026-11-13 and stayed idle until the wrapper closed it by id instead. Measured shape: a shell wrapper and the child it launched, both live, both carrying the id.
@@ -150,7 +154,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.300.1
 
-
 - docs: **`fleet-surface.md` now states the decision-park resume rule.** The keep-alive leg's § 2b resumes a closed headless worker whose recorded wait has cleared, and the rule was written only in the step file and the agent body — `grep -c decision-park docs/fleet-surface.md` returned 0, so the doc a manager reads first did not mention the leg at all. The new section records the two wait kinds and their reads (approval later than the last transcript message; a non-empty `blocked_by` all `completed` with the latest `completed_date` later than that message), why ordering rather than presence is what makes the wait a consumable event (measured 2026-11-12: a row resumed at 23:39:17Z took a turn at 23:50:26Z and left the next round's candidates), that an empty `blocked_by` and a `hold` dependency are not cleared, that `unread` is a third answer, that the four decision counts live on the hand-back and in no payload file, and that the close belongs to `reap-idle-headless.py` on its own launchd tick rather than to this leg. Change set: `docs/fleet-surface.md`, `CHANGELOG.md`.
 
 ## v0.300.0
@@ -199,7 +202,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.296.2
 
-
 - fix: **a present-but-blank `role:` or `mode:` is defaulted, not used verbatim.** `commands/open.md` § Step 0.6 resolved `role:` by key *presence* — branch 1 read "`role:` present → use it" — so a row carrying `role: ""` opened with no role at all, and `vault-cli task set "<task>" role ""` writes exactly that. `docs/fleet-surface.md` § Spawn a worker item 6 had the same shape for `mode:`, passing the argument "whenever the field is present". Both now treat a blank value as absent: branch 2 re-classifies from the body per matrix Rule 1, the `mode` paragraph resolves per Rule 2, and item 6 passes the argument only for a non-blank value. `scripts/check-open-role-defaults.py` gains three clauses pinning the blank-value arm, with `scripts/tests/test_check_open_role_defaults.py` carrying the pre-change negative controls. Change set: `commands/open.md`, `docs/fleet-surface.md`, `scripts/check-open-role-defaults.py`, `scripts/tests/test_check_open_role_defaults.py`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
 ## v0.296.1
@@ -213,7 +215,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - feat: **`blocked-row-routing.py` decides whether a `🔴 BLOCKED` row needs a manager at all, and emits the routing record when it does.** `agents/fleet-drive.md` renders an `ESCALATION` row for every blocked session and `scripts/escalation-manager.py` resolves which manager owns it — but *whether to route* was still prose. Measured 2026-11-10: 4 of 8 blocked sessions named no recipient, so those rows were escalated to nobody, while 4 that already named an owner would have been double-routed. ⚠️ **It composes two shipped scripts and re-derives neither:** `closer-gate-lint.py`'s `owner_named()` owns "does this closer name an owner" — including the two-haystack split where `⏰ Ends:` sits on its own line — and `escalation-manager.py`'s `resolve()` owns "which manager", including the four-tier chain. A second copy of either is the drift `docs/fleet-surface.md` forbids. ⚠️ **`waiting on someone` is not an owner** — it names a wait, not a recipient — so it routes. ⚠️ **An unresolvable manager exits 2 rather than printing nothing**: silence would read as "an owner was found", the exact failure this ends. Change set: `scripts/blocked-row-routing.py`, `scripts/tests/test_blocked_row_routing.py`, `CHANGELOG.md`.
 
 ## v0.295.3
-
 
 - fix: **the keeper's `restart-worker` budget is raised from 120 s to 400 s, because role resolution alone costs 170.6 s.** `restart-worker.py` resolves the session's role through `fleet-board.vault_index()`, which walks every vault's topic/goal/task pages and reads each task's frontmatter — measured 2026-11-12 at 170.6 s, on its own, before the kill or the spawn. At the old 120 s budget every restart reported `outcome UNKNOWN` and recovered nothing, and because the hang sits BEFORE the kill it aborted harmlessly, so no failure was visible. The new `RESTART_WORKER_TIMEOUT` constant is shared by both call sites — the answer-gated fresh restart and the `--absent` resume — since both pay the same index cost and a literal left behind on either is a live defect. Operator ruling 2026-11-12: raise the budget above the index cost rather than optimise the index here. Tests: `test_the_restart_budget_exceeds_the_measured_index_cost`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
 

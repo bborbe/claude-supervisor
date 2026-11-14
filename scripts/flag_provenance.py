@@ -33,7 +33,7 @@ YAML_TRUE = ("true", "True", "TRUE", "yes", "Yes", "YES",
              "on", "On", "ON", "y", "Y")
 
 #: A **goal or topic** flag is read textually and tolerantly — those pages are edited by
-#: hand and by several writers, and `flagged-subjects.py` historically also accepted `1`.
+#: hand and by several writers, and the goal/topic readers historically also accepted `1`.
 FLAG_TRUTHY = ("true", "yes", "on", "1")
 
 _FLAG_LINE = re.compile(r"^flag:[ \t]*(.*)$", re.MULTILINE)

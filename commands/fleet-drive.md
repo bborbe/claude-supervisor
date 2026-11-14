@@ -47,7 +47,7 @@ Rationale: runbook § Fleet-Manager Command.
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
 goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
-⚠️ **Carve-out: 5b, 5c, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
+⚠️ **Carve-out: 5b, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
 them — it prints a count it was told, not one it measured.
 
@@ -64,7 +64,6 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 4 | Adopt | `adopt-orphans.py` printed rows or exited non-zero — run: `python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/adopt.md` |
 | 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
 | 5b | Keep alive | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/keepalive.md` |
-| 5c | Flagged open | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/flagged-open.md` |
 | 5d | Own parks | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/own-parks.md` |
 | 6 | Reap contract | the drive leg runs | `${CLAUDE_PLUGIN_ROOT}/commands/steps/reap.md` |
 | 7 | Answer a parked or exited worker | a worker is parked on a question or has exited | `${CLAUDE_PLUGIN_ROOT}/commands/steps/worker-channels.md` |
