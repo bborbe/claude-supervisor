@@ -168,7 +168,7 @@ LOCAL_BUNDLE_DIR = "/tmp"
 # loop reads the same file, so a repo added here is cloned before this script runs — a
 # repo known only to this file has no clone, `fetch_master` fails, and the row renders
 # UNKNOWN rather than sweeping.
-REPOS_FILE_DEFAULT = os.path.expanduser("/config/repos.txt")
+REPOS_FILE_DEFAULT = "/config/repos.txt"
 
 # The auto-reviewer's park thresholds (MAX_ADDITIONS / MAX_CHANGED_FILES in
 # github-pr-watcher) are deployment env, not repo config, so they cannot be read from
@@ -217,6 +217,7 @@ def load_repos(path):
     if not repos:
         raise ValueError(f"repo set in {path} is empty — refusing to report a clean queue")
     return tuple(repos)
+
 
 # A prod pin is the operator's approval, never a rebase candidate.
 PROD_PIN_PATTERNS = (
