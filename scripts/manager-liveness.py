@@ -198,6 +198,8 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
 `--check` reads files only: no model, no network. A host loop (launchd) runs it and
 turns exit 10 into a push.
 """
+from __future__ import annotations
+
 import argparse, glob, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
