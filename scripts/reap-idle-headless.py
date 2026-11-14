@@ -39,6 +39,9 @@ Eleven refusals, each exit 1 with a stable token as the first line of output:
                         `pending_turns` that is not 0, or a `question` parked for less
                         than the bound. A question parked PAST the bound no longer
                         refuses — the park clock governs it (see `question_age_seconds`).
+                        A `pending_turns` that has outlived any plausible turn no longer
+                        refuses either: the count is LEAKED, not live (see
+                        `_leaked_pending_turn` / `PENDING_TURN_LEAK_SECONDS`).
   gate-held             the session has an open attention card; closing it orphans a
                         question a person is about to answer.
   watcher-alive         a surviving child of the worker is not one of its MCP/stdio/LSP
@@ -102,6 +105,22 @@ SESSIONS_DIR = close_worker.SESSIONS_DIR
 #: ruling, 2026-11-07: idle >= 15 minutes -> close the process, keep the transcript, resume
 #: on the recorded event. A scheduling policy, not an inference about abandonment.
 IDLE_FLOOR = 15 * 60
+
+#: How long a non-zero `pending_turns` may sit on a wrapper record before the count is read
+#: as LEAKED rather than live.
+#:
+#: The bound is the wrapper's own hold: `claude-wrapper`'s `childHold()` is
+#: `DefaultPermissionTimeout` (15 min) plus `childHoldMargin` (1 min), so 16 minutes is the
+#: longest a turn can hold the permission channel open before the daemon's deny is the
+#: answer its tool reads (`pkg/supervisor.go:1005-1021`). A counter older than that is not
+#: describing a turn anything is waiting on.
+#:
+#: ⚠️ **A turn is not bounded by the hold, so the age is never read alone.** A child inside
+#: one long tool call is silent too, and `last_event_age_seconds` measures stream silence.
+#: `_leaked_pending_turn()` therefore also requires no open tool marker inside
+#: `TOOL_MARKER_WINDOW` — the same second reading `_stale_busy()` takes — so a worker that
+#: is genuinely working keeps its refusal.
+PENDING_TURN_LEAK_SECONDS = 16 * 60
 
 #: "Not supplied" for an injected reading whose real value may legitimately be `None`.
 _UNSET = object()
@@ -544,6 +563,47 @@ def _stale_busy(rec, wrapper, in_flight):
     return in_flight is None
 
 
+def _leaked_pending_turn(rec, wrapper, in_flight):
+    """True when a non-zero `pending_turns` has outlived any plausible turn.
+
+    The counter is incremented when the wrapper accepts a turn and decremented when the turn
+    ends. A turn that ends without the decrement — the observed leak — leaves a record that
+    reads `state: idle` with no parked question and a `pending_turns` describing nothing.
+    Measured 2026-11-14: session `ece87199` carried `pending_turns: 1` with
+    `last_event_age_seconds: 49751` (13.8 h) against the wrapper's 16-minute hold, while the
+    four genuinely pending wrappers on the same machine read 1/3/24/28 s. So the age is the
+    discriminator, and it is a field the wrapper already writes for exactly this question.
+
+    ⚠️ **This is the mirror of `_stale_busy()`, never a widening of it.** `_stale_busy()`
+    discounts a stale registry `status` and REQUIRES `pending_turns == 0` as a precondition,
+    so a leaked counter is the one input it cannot see. This predicate discounts the counter
+    itself and requires the wrapper `state` to be `idle` — the opposite precondition,
+    because the two defects do not co-occur.
+
+    Fails CLOSED on every reading it cannot take: a missing or non-integer `pending_turns`,
+    a non-`idle` wrapper state, a parked question (that limb is governed by its own park
+    clock and is deliberately untouched here), an unageable `last_event_age_seconds`, and an
+    unreadable tool marker all keep the `wrapper-busy` refusal.
+    """
+    if not isinstance(wrapper, dict):
+        return False
+    pending = wrapper.get("pending_turns")
+    if not isinstance(pending, int) or isinstance(pending, bool) or pending <= 0:
+        return False
+    if wrapper.get("state") != "idle":
+        return False
+    if wrapper.get("question"):
+        return False
+    age = wrapper.get("last_event_age_seconds")
+    if not isinstance(age, (int, float)):
+        return False
+    if age < PENDING_TURN_LEAK_SECONDS:
+        return False
+    if in_flight is _UNSET:
+        in_flight = close_worker.in_flight_tool(rec.get("sessionId") or "")
+    return in_flight is None
+
+
 def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children=None, in_flight=_UNSET):
     """`(token, detail)` for the first failing guard, or None when the close may proceed.
 
@@ -597,7 +657,9 @@ def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children
         return ("wrapper-busy", "the wrapper record could not be read")
     if wrapper.get("state") != "idle":
         return ("wrapper-busy", f"wrapper state {wrapper.get('state')!r}, not 'idle'")
-    if wrapper.get("pending_turns") != 0:
+    if wrapper.get("pending_turns") != 0 and not _leaked_pending_turn(
+        rec, wrapper, in_flight
+    ):
         return (
             "wrapper-busy",
             f"wrapper pending_turns {wrapper.get('pending_turns')!r}, expected 0",
@@ -830,7 +892,12 @@ def main(argv=None):
                     "nothing was signalled",
                 )
                 continue
-        if fresh_wrapper.get("pending_turns") != 0:
+        # ⚠️ The same leak reading as `guard()`: a counter that was already leaked before the
+        # guards is still leaked now, and refusing on it here would silently undo the first
+        # gate's decision — the defect this re-read exists to prevent, in the other direction.
+        if fresh_wrapper.get("pending_turns") != 0 and not _leaked_pending_turn(
+            fresh, fresh_wrapper, _UNSET
+        ):
             exit_code = refuse(
                 "wrapper-busy",
                 "a turn arrived during the guards; nothing was signalled",
