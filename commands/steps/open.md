@@ -55,8 +55,8 @@ delegate rule's carve-out).
    - **`truncated=` greater than zero** → `n` refusals ride `payload=` only; read that file, print
      the remainder verbatim, and reconcile it against `refused=` as
      `docs/handback-contract.md` § The shape — the truncation exception — states.
-   - ⚠️ **This leg carries no `LEGS` digest key** — `fleet-legs.py`'s three keys are the keep-alive's
-     two and the flagged-open's one, and item 3 renders this leg's block from the payload. Never
+   - ⚠️ **This leg carries no `LEGS` digest key** — `fleet-legs.py`'s keys are the keep-alive's
+     two, and item 3 renders this leg's block from the payload. Never
      write a `fleet-legs.py` line for it, and never invent a `--not-run` record for a key that does
      not exist.
 

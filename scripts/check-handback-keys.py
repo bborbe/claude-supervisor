@@ -12,9 +12,8 @@ permanently false, and the branch behind it silently never runs.
   (2) **The delegated legs.** Since 2026-11-06 `commands/steps/round-readings.md` and
       `commands/steps/goal-spawn.md` each dispatch a reader agent
       (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`), since 2026-11-07
-      the fleet round's two acting legs do the same (`commands/steps/keepalive.md` →
-      `agents/fleet-keepalive-actor.md`, `commands/steps/flagged-open.md` →
-      `agents/fleet-flagged-open-actor.md`), and since 2026-11-08 the fleet round's open leg
+      the fleet round's acting leg does the same (`commands/steps/keepalive.md` →
+      `agents/fleet-keepalive-actor.md`), and since 2026-11-08 the fleet round's open leg
       does the same (`commands/steps/open.md` → `agents/fleet-open-actor.md`) — each returns
       the verdicts the step no longer computes itself. A step reverted to its pre-split text
       stops dispatching, and a reader that drops one value of a family leaves the caller a
@@ -129,22 +128,14 @@ LEGS = {
             "crash-loop", "cannot-tell",
             # ⚠️ ONE DROPPED COUNT PER LIST, never one shared `truncated=`: two truncatable
             # lists behind a single count cannot say which list lost rows, so the per-list
-            # reconciliation above is unsatisfiable. A one-list leg (flagged-open) keeps
-            # `truncated`.
+            # reconciliation above is unsatisfiable.
             "crash-loop-truncated", "cannot-tell-truncated",
             # the size-cap exception's payload key
             "payload",
         ),
     },
-    "supervisor:fleet-flagged-open-actor": {
-        "agent": "agents/fleet-flagged-open-actor.md",
-        "sites": ("commands/steps/flagged-open.md",),
-        "required": (
-            "legs", "legs-reason", "operator-flagged", "opened", "refused", "truncated", "payload",
-        ),
-    },
-    # The fleet round's open leg (row 16). Unlike the keep-alive and flagged-open legs it writes
-    # NO digest key — `fleet-legs.py` carries three and none is this leg's; its persisted reading
+    # The fleet round's open leg (row 16). Unlike the keep-alive leg it writes
+    # NO digest key — `fleet-legs.py` carries two and neither is this leg's; its persisted reading
     # is the `.open` block payload that `commands/steps/output-shape.md` item 3 renders. So the
     # hand-back is the only channel for every verdict the step acts on, and `render` / `reason`
     # are the two a dropped key silently breaks: a `status=ok` with no `render=` prints no block

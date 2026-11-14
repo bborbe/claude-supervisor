@@ -86,8 +86,7 @@ ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
 # The scheduling states that make a subject a reap candidate. `hold` is deliberately NOT
 # here: a held subject is paused, not finished, and its manager may legitimately wait on
-# it — the same reason `flagged-subjects.py` treats `hold` as terminal for *opening* but
-# this script must not treat it as terminal for *closing*.
+# it — a hold blocks *opening* a manager but must not be read as *closing* one.
 TERMINAL_STATUSES = ("completed", "aborted")
 
 # The page field the manager is recorded in, current first. See the module docstring.
