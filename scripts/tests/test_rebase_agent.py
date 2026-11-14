@@ -193,8 +193,8 @@ class PushLineTest(unittest.TestCase):
         )
         self.assertEqual(shlex.split(line), [
             "kubectlprod", "cp", "rebase-agent-bundles:/bundles/pr-7.bundle",
-            "/tmp/rebase-agent-pr-7.bundle",
-            "&&", "git", "-C", "/tmp/r", "fetch", "/tmp/rebase-agent-pr-7.bundle",
+            "/tmp/pr-7.bundle",
+            "&&", "git", "-C", "/tmp/r", "fetch", "/tmp/pr-7.bundle",
             "+refs/rebase-agent/pr/7:refs/rebase-agent/pr/7",
             "&&", "git", "-C", "/tmp/r", "push",
             "--force-with-lease=refs/heads/feat/x; rm -rf ~:abc123",
@@ -208,8 +208,8 @@ class PushLineTest(unittest.TestCase):
         self.assertEqual(
             line,
             "kubectlprod cp rebase-agent-bundles:/bundles/pr-7.bundle "
-            "/tmp/rebase-agent-pr-7.bundle "
-            "&& git -C /tmp/r fetch /tmp/rebase-agent-pr-7.bundle "
+            "/tmp/pr-7.bundle "
+            "&& git -C /tmp/r fetch /tmp/pr-7.bundle "
             "+refs/rebase-agent/pr/7:refs/rebase-agent/pr/7 "
             "&& git -C /tmp/r push --force-with-lease=refs/heads/feat/plain:abc123 "
             "origin refs/rebase-agent/pr/7:refs/heads/feat/plain",
@@ -268,11 +268,19 @@ class TransferTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, repo, True)
         sha = add_branch_commit(repo, "branch commit", {"code.py": "value = 2\n"})
         git(repo, "update-ref", f"{ra.SCRATCH_REF}/pr/9", sha)
-        path = ra.publish_bundle(repo, 9)
+        path = ra.publish_bundle(repo, "bborbe/claude-supervisor", 9)
         self.assertTrue(os.path.isfile(path))
         # Raises AssertionError when the bundle is unreadable or its prerequisites are
         # missing — the failure a Mac would hit only after pasting the line.
         git(repo, "bundle", "verify", path)
+
+    def test_two_repos_with_the_same_pr_number_never_share_a_bundle(self):
+        """Both repos are swept into one directory, and PR numbers collide across them."""
+        one = ra.bundle_path("bborbe/claude-supervisor", 521)
+        two = ra.bundle_path("bborbe/vault-cli", 521)
+        self.assertNotEqual(one, two)
+        self.assertTrue(one.endswith("-pr-521.bundle"))
+        self.assertTrue(two.endswith("-pr-521.bundle"))
 
 
 class ChangelogDeltaTest(unittest.TestCase):

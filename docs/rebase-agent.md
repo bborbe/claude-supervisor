@@ -148,12 +148,22 @@ transfer volume, and the operator's line copies it off the reader pod, fetches i
 pushes in one paste:
 
 ```
-kubectlWRAPPER cp <reader-pod>:/bundles/pr-<n>.bundle /tmp/rebase-agent-pr-<n>.bundle \
-  && git -C <operator-path> fetch /tmp/rebase-agent-pr-<n>.bundle \
+kubectlWRAPPER cp <ns>/rebase-agent-reader:/bundles/<repo-slug>-pr-<n>.bundle \
+     /tmp/<repo-slug>-pr-<n>.bundle \
+  && git -C <operator-path> fetch /tmp/<repo-slug>-pr-<n>.bundle \
        +refs/rebase-agent/pr/<n>:refs/rebase-agent/pr/<n> \
   && git -C <operator-path> push --force-with-lease=refs/heads/<branch>:<old-sha> \
        origin refs/rebase-agent/pr/<n>:refs/heads/<branch>
 ```
+
+⚠️ **The bundle name carries the repo, not just the PR number.** Both repos are swept into
+one `REBASE_BUNDLE_DIR` and their PR numbers collide — 521 exists in each — so a name keyed
+on the number alone lets one repo's bundle overwrite the other's between the sweep writing
+it and the operator pasting the line, handing over the wrong commit with no error anywhere.
+
+⚠️ **The range bundle has a prerequisite.** It carries `origin/master..<branch>`, so the
+operator's checkout must have an `origin/master` at least as new as the pod's. A Mac that
+has not fetched since the pod did will be refused by `git fetch`; `git fetch origin` first.
 
 ⚠️ **`<operator-path>` is the Mac's checkout, never the pod's.** `path` in `DEFAULT_REPOS`
 is `expanduser`d and resolves to `/workspace/…` under the CronJob's `HOME`; `operator_path`

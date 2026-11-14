@@ -151,9 +151,11 @@ READER_POD_ENV = "REBASE_READER_POD"
 # in the pod it resolves to /workspace and re-creates the defect this channel exists to
 # remove, and hard-coding one machine's home directory resolves on exactly one machine.
 OPERATOR_WORKSPACES_ENV = "REBASE_OPERATOR_WORKSPACES"
-# The bundle is written here on the operator's Mac, one name per PR so a re-sweep
-# overwrites the previous copy rather than accumulating files.
-LOCAL_BUNDLE = "/tmp/rebase-agent-pr-{number}.bundle"
+# The bundle is copied here on the operator's Mac. The name is taken from the bundle's
+# own basename, which carries the repo — two repos are swept into one bundle directory,
+# and PR numbers collide across them (521 exists in both), so a name keyed on the number
+# alone would hand the operator the other repo's artifact.
+LOCAL_BUNDLE_DIR = "/tmp"
 
 
 # The repo set is explicit, never "every repo". The conflict class exists only where a
@@ -557,18 +559,25 @@ def transfer_refusal():
     return None
 
 
-def bundle_path(number):
-    return os.path.join(bundle_dir(), f"pr-{number}.bundle")
+def bundle_path(repo, number):
+    """One file per repo AND PR.
+
+    `DEFAULT_REPOS` sweeps more than one repo into a single `REBASE_BUNDLE_DIR`, and PR
+    numbers collide across them — 521 exists in both. Keying the name on the number alone
+    would let one repo's bundle overwrite the other's between a sweep writing it and the
+    operator pasting the line, which hands over the wrong commit with no error anywhere.
+    """
+    return os.path.join(bundle_dir(), f"{repo.replace('/', '-')}-pr-{number}.bundle")
 
 
-def publish_bundle(repo_path, number):
+def publish_bundle(repo_path, repo, number):
     """Write the rebased commit to the PVC as a range bundle; return its path.
 
     A range (`origin/master..<scratch ref>`) rather than a full bundle: the operator's
     checkout already has `origin/master`, so this carries only the commits the push
     needs, and a full bundle of a long branch would be megabytes for nothing.
     """
-    path = bundle_path(number)
+    path = bundle_path(repo, number)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     proc = git(
         repo_path, "bundle", "create", path,
@@ -591,7 +600,7 @@ def push_line(operator_path, branch, head_sha, number, bundle):
     push rather than leave a stale ref to push. `operator_path` is the Mac's checkout —
     never the pod's, which is the defect the transfer channel exists to remove.
     """
-    local = shlex.quote(LOCAL_BUNDLE.format(number=number))
+    local = shlex.quote(os.path.join(LOCAL_BUNDLE_DIR, os.path.basename(bundle)))
     copy = (
         f"{shlex.quote(kubectl_command())} cp "
         f"{shlex.quote(f'{reader_pod()}:{bundle}')} {local}"
@@ -855,7 +864,7 @@ def process_pr(cfg, pr, keep_scratch=False):
         git(repo_path, "update-ref", f"{SCRATCH_REF}/pr/{number}", new_sha, check=True)
 
         row["verdict"] = "PUSH"
-        bundle = publish_bundle(repo_path, number)
+        bundle = publish_bundle(repo_path, cfg["repo"], number)
         row["transfer"] = {"kind": "pvc-bundle", "target": f"{reader_pod()}:{bundle}"}
         row["push_line"] = push_line(
             operator_path(cfg), branch, head_sha, number, bundle
