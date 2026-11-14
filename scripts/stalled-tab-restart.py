@@ -429,6 +429,12 @@ def act(args):
         state["declined"] = False
         state["declined_at"] = None
         state["escalated"] = None
+        # ⚠️ **Advance `progress_at` too, or this branch fires EVERY round.** The reset
+        # condition is `stamp > progress_at`; leaving `progress_at` where it was keeps that
+        # true on the next round, so the reset re-runs, clears the decline again, and the
+        # card is re-posted forever after any progress following a restart — the exact
+        # "operator re-asked every round" failure this state machine exists to prevent.
+        state["progress_at"] = stamp
         if not write_state(args.vault, args.task, state):
             print("cannot-tell")
             print("the cap reset could not be recorded")

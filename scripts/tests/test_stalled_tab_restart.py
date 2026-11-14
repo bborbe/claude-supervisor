@@ -470,6 +470,22 @@ class Cap(Base):
         self.run_leg_settled()                              # capped again
         self.assertEqual(1, len(escalations()), "the escalation re-posted")
 
+    def test_a_decline_survives_progress_after_a_restart(self):
+        """The reset branch must ADVANCE `progress_at`, or `stamp > progress_at` stays true
+        and the branch fires every round — clearing the decline and re-posting the card
+        forever after any progress following a restart."""
+        self.patch_control(poll="ANSWERED: option: restart it")
+        self.run_leg_settled()                          # restart 1 sets progress_at
+        os.utime(self.task_path, (0, 10 ** 10))         # the page advances past it
+        self.patch_control(poll="ANSWERED: option: leave it", post_id="item-2")
+        self.run_leg_settled()                          # operator declines
+        before = len([a for a in self.calls("ask") if a[0] == "post"])
+        rc, lines = self.run_leg()                      # the round AFTER the decline
+        self.assertEqual(lines[0], "carded")
+        self.assertIn("declined", lines[1])
+        after = len([a for a in self.calls("ask") if a[0] == "post"])
+        self.assertEqual(before, after, "the decline was wiped and the card re-posted")
+
     def test_progress_resets_the_cap(self):
         self.patch_control(poll="ANSWERED: option: restart it")
         self.run_leg_settled()
