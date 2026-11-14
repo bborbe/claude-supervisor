@@ -1510,7 +1510,7 @@ def _write_debt_for(s: str, branch: str, skipped: list) -> bool:
     it. `--start` deliberately does not touch this file.
 
     FLEET ONLY. The goal/topic tier shares `--check`, but nothing there chains
-    `--debt` — only `drive.md`, `keepalive.md` and `flagged-open.md` do — so writing
+    `--debt` — only `drive.md` and `keepalive.md` do — so writing
     the file for that tier would create state no command reads. The sentinel still
     fires there; only the carry is fleet-scoped, which is what it was designed for.
     """

@@ -59,7 +59,7 @@ nothing new, while opening one decides who supervises. Four rules follow:
    half of healthy rounds cross it. No settle window fixes that: one under ~40 min kills healthy
    managers, and one above it leaves any restart cap unreachable. Restarting the Fleet Manager
    stays a human decision, prompted by the card.
-2. **An operator-flagged page is opened automatically by the tier above it** — `flag: true` means
+2. **A page the operator flagged is opened automatically by the tier above it** — `flag: true` means
    *"open me"*, and **provenance is read at every tier**. Ruled 2026-09-28 (*"an agent-set
    `flag: true` is never an approval and opens nothing"*) and generalised to every tier on
    2026-11-10, attention card `f8cd8b41`: the 2026-10-30 ruling governs *which* flagged row may
@@ -76,15 +76,17 @@ nothing new, while opening one decides who supervises. Four rules follow:
 (`commands/fleet-drive.md`: *"No manager-proposal row — the round does not propose managers for
 unmanaged goals"*). No other tier restores that behaviour under another name.
 
-⚠️ **The fleet tier does open a flagged manager, and that is rule 2, not rule 4.** The
-flagged-open leg (`commands/steps/flagged-open.md` § Step 5c.1) runs
-`scripts/flagged-subjects.py` and opens every flagged goal and topic that has no live manager
-through `/supervisor:open --goal` / `--topic`, up to the free manager slots. Two states are
-declined rather than opened and are not the cap's doing: `phase: todo` (the operator's
-approval inbox, reported `WAITING`) and a subject already carrying an open
-`fleet-propose-manager` / `fleet-approve-manager` card (reported `CARDED`). Proposing is
-what rule 4 forbids — asking the operator *which* unmanaged goal deserves a manager; opening
-a page the operator already flagged decides nothing and executes their mark.
+⚠️ **The fleet tier opens no flagged goal or topic, and that is rule 4, not a retreat from
+rule 2.** The round once opened every flagged goal and topic with no live manager; that leg was
+retired, so a flagged goal or topic is now opened only by the tier that owns it — the topic
+manager's `topic-spawn --topic-open` and its `topic-keepalive` `open` verdict start a goal
+manager for a flagged goal, up to the free manager slots, and decline `phase: todo` (the
+operator's approval inbox, reported `WAITING`). The fleet tier's remaining flag reader is its
+open leg (router row 16), which executes `/supervisor:open --flagged` for flagged **worker**
+rows; a flagged goal or topic reaches the fleet round as a row to report, never as an open.
+Proposing is what rule 4 forbids — asking the operator *which* unmanaged goal deserves a
+manager — and a fleet-tier goal manager is the operator's own `/supervisor:open --goal`, not
+the round's.
 
 ⚠️ **The fleet keeper obeys rule 4 trivially: it opens nothing and resumes nothing.** There is
 exactly one fleet manager, and a second would be a double writer over every subject. The
@@ -107,7 +109,7 @@ open — and no `worker-spawn` at all.
 
 | Tier | Manages | May start | Done condition |
 |---|---|---|---|
-| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), a **worker** directly when no lower-tier manager owns it, and a goal manager **only when that goal is flagged** | the fleet has no unmanaged subject and no gate it owns is outstanding |
+| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), a **worker** directly when no lower-tier manager owns it, and a goal manager only through the operator's own `/supervisor:open --goal` — the round opens no goal or topic | the fleet has no unmanaged subject and no gate it owns is outstanding |
 | **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **worker**; and a **goal manager only when that goal is flagged**, at most N at once per topic and never past the fleet manager ceiling | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
 | **Goal manager** | ONE goal's declared task set, and the workers running on it | a **worker**, under the spawn cap | every task in its declared set is terminal, waiting on a named party, or held with a stated reason |
 | **Worker** | ONE anchored task | nothing — a worker never opens a session | its anchored task is terminal, or it reports the gate that stops it |

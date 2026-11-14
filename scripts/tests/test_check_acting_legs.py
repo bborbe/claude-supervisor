@@ -1,13 +1,13 @@
 """check-acting-legs.py: the delegate rule's carve-out, and each acting leg's own statement.
 
 The round's delegate rule sends everything that is not the sweep to a sub-agent, and rows 5b
-(keep alive), 5c (flagged open), 5d (own parks), 16 (open leg) and 16b (manager-subject reap)
+(keep alive), 5d (own parks), 16 (open leg) and 16b (manager-subject reap)
 are exactly that — while being the only rows whose purpose is to act. With no carve-out a round delegates them read-only and
 prints a count it was told to print: measured 2026-11-01 13:27 CET, a round instructed its
 sub-agent to print `opened=0` and resumed none of the 8 `resume` rows it read.
 
-`test_flagged_leg_without_its_statement_fails` is the case this file exists for: a tree whose
-router carries the carve-out and whose 5c file never says the leg acts is exactly the tree that
+`test_own_parks_without_its_statement_fails` is the case this file exists for: a tree whose
+router carries the carve-out and whose 5d file never says the leg acts is exactly the tree that
 shipped the defect — the leg is delegated, the delegate runs read-only, and the round reports
 zero. The neighbouring cases cover the single-home half and the pointer half.
 
@@ -23,17 +23,16 @@ import unittest
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-acting-legs.py"
 ROUTER = "commands/fleet-drive.md"
 KEEPALIVE = "commands/steps/keepalive.md"
-FLAGGED = "commands/steps/flagged-open.md"
 OWN_PARKS = "commands/steps/own-parks.md"
 OPEN = "commands/steps/open.md"
 MANAGER_REAP = "commands/steps/manager-reap.md"
 
-CARVEOUT = "5b, 5c, 5d, 16 and 16b are acting legs"
+CARVEOUT = "5b, 5d, 16 and 16b are acting legs"
 MARKER = "a read-only execution is not a run of it"
 WHEN = "every tick"
 
 
-def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5c", FLAGGED), ("5d", OWN_PARKS), ("16", OPEN), ("16b", MANAGER_REAP))) -> str:
+def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5d", OWN_PARKS), ("16", OPEN), ("16b", MANAGER_REAP))) -> str:
     lines = [
         "# Fleet drive",
         "",
@@ -81,7 +80,6 @@ class Base(unittest.TestCase):
         shutil.copy(SCRIPT, root / "scripts" / "check-acting-legs.py")
         self.write(ROUTER, router())
         self.write(KEEPALIVE, step("Keep alive"))
-        self.write(FLAGGED, step("Flagged open"))
         self.write(OWN_PARKS, step("Own parks"))
         self.write(OPEN, step("Open leg"))
         self.write(MANAGER_REAP, step("Manager-subject reap"))
@@ -108,15 +106,6 @@ class TestGuard(Base):
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("carries the carve-out", r.stderr)
-
-    def test_flagged_leg_without_its_statement_fails(self) -> None:
-        # 5c delegated read-only: the router carves it out, but the leg's own file never says
-        # it acts, so a sub-agent that runs it as written opens nothing and reports zero.
-        self.write(FLAGGED, step("Flagged open", with_marker=False))
-        r = self.guard()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("commands/steps/flagged-open.md", r.stderr)
-        self.assertIn("carries no acting statement", r.stderr)
 
     def test_keepalive_without_its_statement_fails(self) -> None:
         self.write(KEEPALIVE, step("Keep alive", with_marker=False))
@@ -164,7 +153,7 @@ class TestGuard(Base):
 
     def test_carveout_restated_in_a_step_file_fails(self) -> None:
         # Two copies is two counters a grep cannot tell apart.
-        self.write(FLAGGED, step("Flagged open") + f"\n<!-- {CARVEOUT} -->\n")
+        self.write(OPEN, step("Open leg") + f"\n<!-- {CARVEOUT} -->\n")
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("appears 2 times", r.stderr)
@@ -183,17 +172,17 @@ class TestGuard(Base):
         self.assertIn("does not state 'read-only'", r.stderr)
 
     def test_leg_without_pointer_fails(self) -> None:
-        self.write(FLAGGED, step("Flagged open", with_pointer=False))
+        self.write(OPEN, step("Open leg", with_pointer=False))
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("does not point at", r.stderr)
 
     def test_router_row_dropped_fails(self) -> None:
         # A carve-out for a row the router no longer dispatches governs nothing.
-        self.write(ROUTER, router(rows=(("5b", KEEPALIVE),)))
+        self.write(ROUTER, router(rows=(("5d", OWN_PARKS), ("16", OPEN), ("16b", MANAGER_REAP))))
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("row 5c does not name", r.stderr)
+        self.assertIn("row 5b does not name", r.stderr)
 
 
 class TestAgainstTheRealRepo(unittest.TestCase):

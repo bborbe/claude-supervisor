@@ -59,7 +59,7 @@ STEPS = COMMANDS / "steps"
 #: Phrase from the carve-out's own first sentence. A plain substring, so a reflow of the
 #: surrounding prose leaves it intact; rewording that sentence is a deliberate act, and the
 #: failure is the reminder that this home assertion moves with it.
-CARVEOUT = "5b, 5c, 5d, 16 and 16b are acting legs"
+CARVEOUT = "5b, 5d, 16 and 16b are acting legs"
 CARVEOUT_HOME = COMMANDS / "fleet-drive.md"
 CARVEOUT_NEEDS = ("write tools", "read-only")
 
@@ -69,7 +69,6 @@ STEP_MARKER = "a read-only execution is not a run of it"
 POINTER = "commands/fleet-drive.md"
 LEGS = {
     "5b": STEPS / "keepalive.md",
-    "5c": STEPS / "flagged-open.md",
     "5d": STEPS / "own-parks.md",
     # 16 joined on 2026-11-08 with the open leg's split into `agents/fleet-open-actor.md`. It
     # acts the same way — it opens every row the rank selected, through `/supervisor:open` —

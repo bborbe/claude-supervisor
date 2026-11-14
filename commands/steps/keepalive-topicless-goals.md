@@ -52,7 +52,7 @@ page's session id: a held goal manager is neither restarted nor resumed.
 - `jump` → hand the operator the pane. `leave` → nothing. `cannot-tell` → report it, never act.
 
 ⚠️ **Not an open.** A topic-less goal with no recorded id is not in the population. Opening it
-is `commands/steps/flagged-open.md`'s job, and only when the goal is flagged.
+is the wrapper's flagged reopen tick's job (`claude-wrapper`'s `flagged-tick`), and only when the goal is flagged.
 
 **Record the count in the digest.**
 `python3 "$P/fleet-legs.py" --digest "<this round's digest>" --leg topicless-goal-managers --count <n>`

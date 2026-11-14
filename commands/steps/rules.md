@@ -103,11 +103,11 @@ Compare with `grep "  <rel>$" "$L" | awk '{print $1}'`. One target, the same in 
 **The opening condition, stated because the prohibition above is otherwise only half a rule: the only subject this fleet opens is one carrying `flag: true` with no loop armed.** The flag is the operator's alone to set — an agent setting it, or reading an importance judgement as a substitute for it, is the removed row coming back by hand. A subject that is non-terminal, has live workers, or looks important is **not** a reason to propose a manager: none of those three is the flag, and all three are the reasoning the removed row used.
 
 ⚠️ **Proposing is not opening, and the fleet tier does the second.** A flagged **goal** or
-**topic** with no live manager is opened by the flagged-open leg
-(`commands/steps/flagged-open.md` § Step 5c.1), through `scripts/flagged-subjects.py` and
-`/supervisor:open --goal` / `--topic`. That is rule 2 executing the operator's own mark, not
+**topic** with no live manager is opened by the wrapper's flagged reopen tick
+(`claude-wrapper`'s `flagged-tick`), which reopens a flagged row with no live session without a
+model in the path. That is rule 2 executing the operator's own mark, not
 the removed row returning: the removed row asked the operator to decide *which* unmanaged
-goal deserved a manager, while this leg decides nothing — it opens what the operator already
+goal deserved a manager, while the tick decides nothing — it opens what the operator already
 flagged and stops at the cap. **Never restore the ask**: a round that finds an unmanaged,
 unflagged goal reports it and stops.
 

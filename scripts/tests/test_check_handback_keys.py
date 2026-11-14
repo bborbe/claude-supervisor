@@ -5,9 +5,8 @@ Two families are covered, and both are silent when broken:
   (1) the fleet tick's router `When` cells against `agents/fleet-sweep-reader.md`'s
       hand-back, and
   (2) the delegated legs — `commands/steps/round-readings.md` → `agents/round-readings-reader.md`,
-      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's three
-      acting legs, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md`,
-      `commands/steps/flagged-open.md` → `agents/fleet-flagged-open-actor.md` and
+      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's two
+      acting legs, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md` and
       `commands/steps/open.md` → `agents/fleet-open-actor.md`.
 
 The load-bearing cases are the PRE-CHANGE ones. Both reader agents shipped on 2026-11-06
@@ -203,47 +202,24 @@ class CheckHandbackKeysTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("`dead-scan=`", result.stderr)
 
-    def test_pre_change_flagged_open_fence_fails(self):
-        """The pre-change flagged-open hand-back: no `legs-reason`, no truncation channel.
+    def test_pre_change_keepalive_fence_without_the_digest_verdict_fails(self):
+        """The pre-change keep-alive hand-back: counts alone, no `legs`, no `dead-scan`.
 
-        The caller renders `legs: UNKNOWN — <reason>` from `legs-reason=` and reads the
-        refusals that did not fit from `payload=`, so a fence carrying counts alone leaves a
-        failed digest write and a lost refusal both unreportable.
+        The caller renders the digest verdict from `legs=` / `legs-reason=` and reads the
+        `--floor` / `--exact` label from `dead-scan=`, so a fence carrying counts alone leaves
+        a failed digest write and an inferred floor both unreportable.
         """
         self.write(
-            "agents/fleet-flagged-open-actor.md",
+            "agents/fleet-keepalive-actor.md",
             "**Hand-back**\n\n```text\n"
-            "operator-flagged=<n> · opened=<n> · refused=<n>\n"
+            "restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>\n"
+            "crash-loop=<n> · cannot-tell=<n> · payload=<path>\n"
             "```\n</output_format>\n",
         )
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        for key in ("legs", "legs-reason", "truncated", "payload"):
+        for key in ("legs", "legs-reason", "dead-scan", "crash-loop-truncated", "cannot-tell-truncated"):
             self.assertIn(f"`{key}=`", result.stderr)
-
-    def test_flagged_open_fence_without_opened_fails(self):
-        """`opened` is the batch's own footer count — the one number that separates a leg
-        which opened nothing from a leg that was told to print nothing."""
-        self.write(
-            "agents/fleet-flagged-open-actor.md",
-            fence(
-                self.legs["supervisor:fleet-flagged-open-actor"]["required"],
-                drop=("opened",),
-            ),
-        )
-        result = self.run_check()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("`opened=`", result.stderr)
-
-    def test_a_fleet_acting_leg_that_stops_dispatching_fails(self):
-        """The same split guard, on the fleet side: a reverted 5c is its pre-split text."""
-        site = self.legs["supervisor:fleet-flagged-open-actor"]["sites"][0]
-        self.write(site, "# Flagged open\n\n- Open what the operator marked, if any.\n")
-        result = self.run_check()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn(site, result.stderr)
-        self.assertIn("no longer dispatches", result.stderr)
-
 
     def test_open_leg_without_a_branch_count_fails(self):
         """The open leg's reconciliation is four-way: `opened + resumed + jumped + refused == selected`."""
