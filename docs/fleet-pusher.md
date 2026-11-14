@@ -117,11 +117,16 @@ If the in-process jobs must be retired before the fix is trusted:
 
 ```bash
 git revert <the deletion commit>          # in bborbe/claude-supervisor
-cd ~/.claude && make update
-cp launchd/com.bborbe.fleet-pusher*.plist ~/Library/LaunchAgents/
+cd ~/.claude && make update               # refreshes the marketplace clone
+cd ~/.claude/plugins/marketplaces/claude-supervisor
+cp launchd/com.bborbe.fleet-pusher.plist ~/Library/LaunchAgents/
+cp launchd/com.bborbe.fleet-pusher-watch.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-pusher.plist
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-pusher-watch.plist
 ```
+
+The `cp` runs from the marketplace clone, not from `~/.claude` — the plists live in the
+checkout, and a repo-relative path there resolves against `~/.claude/launchd`, which does not exist.
 
 Then disable the in-process jobs with `-fleet-pusher-interval=0 -fleet-pusher-watch-interval=0` so
 two wake layers do not run at once.

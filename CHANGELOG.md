@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- chore: **retire the fleet-pusher launchd agents.** The 900 s wake tick and its 300 s watchdog now run as interval jobs inside the `claude-wrapper` daemon, so `scripts/fleet-pusher-tick.sh`, `scripts/fleet-pusher-watch.sh`, their two plists and `scripts/tests/test_fleet_pusher.py` are removed. The behaviour is ported with specs in `bborbe/claude-wrapper` (the pid → tty → pane join, the 13-verdict screen guard, the tick and the watchdog); `docs/fleet-pusher.md` is rewritten for the in-process jobs and carries the rollback. Change set: `scripts/fleet-pusher-tick.sh`, `scripts/fleet-pusher-watch.sh`, `launchd/com.bborbe.fleet-pusher.plist`, `launchd/com.bborbe.fleet-pusher-watch.plist`, `scripts/tests/test_fleet_pusher.py`, `docs/fleet-pusher.md`, `README.md`, `CLAUDE.md`, `CHANGELOG.md`.
+
 ## v0.311.0
 
 - fix: **the transfer bundle's name carries the repo, not just the PR number.** `DEFAULT_REPOS` sweeps two repos into one `REBASE_BUNDLE_DIR`, and PR numbers collide across them — 521 exists in both — so `pr-<n>.bundle` let one repo's bundle overwrite the other's between the sweep writing it and the operator pasting the line, handing over the wrong commit with no error anywhere. The path is now `<owner>-<repo>-pr-<n>.bundle`, and the Mac's copy takes its name from the bundle's own basename so the two cannot drift. Also documented: a range bundle carries `origin/master..<branch>`, so the operator's checkout must have an `origin/master` at least as new as the pod's — a Mac that has not fetched since the pod did is refused by `git fetch`. Change set: `scripts/rebase-agent.py`, `scripts/tests/test_rebase_agent.py`, `docs/rebase-agent.md`, `CHANGELOG.md`.
