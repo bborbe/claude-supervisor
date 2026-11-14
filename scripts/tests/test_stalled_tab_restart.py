@@ -175,6 +175,22 @@ class Base(unittest.TestCase):
     def lifted_calls(self):
         return [a for a in self.calls("restart") if "--allow-busy-lapse" in a]
 
+
+    def run_leg_settled(self, stall_count=2, rounds=5):
+        """Post on one round, read the answer on the next.
+
+        Posting and polling in the SAME round can only ever read OPEN, and the store's
+        open-scoped dedup means the next round's post mints a new item — so a card is posted
+        one round and its answer is polled the round after. A test that expects an answer
+        must therefore run more than once.
+        """
+        rc, lines = self.run_leg(stall_count)
+        for _ in range(rounds):
+            if not (lines and lines[0] == "carded" and len(lines) > 1 and "posted" in lines[1]):
+                return rc, lines
+            rc, lines = self.run_leg(stall_count)
+        return rc, lines
+
     def assert_no_unattended_lift(self):
         """The invariant: NOTHING passes the lift unless the operator said `restart it`.
 
@@ -188,14 +204,14 @@ class Base(unittest.TestCase):
 
 class Verdicts(Base):
     def test_below_the_threshold_is_skipped_and_never_probes(self):
-        rc, lines = self.run_leg(stall_count=1)
+        rc, lines = self.run_leg_settled(stall_count=1)
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "skipped")
         self.assertEqual([], self.calls("restart"))
 
     def test_a_held_session_is_left_alone(self):
         self.patch_control(hold_rc=0, hold_reason="operator hold")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "held")
         self.assertEqual([], self.calls("restart"))
@@ -203,7 +219,7 @@ class Verdicts(Base):
     def test_an_undecidable_hold_probe_reads_as_held(self):
         """Exit 2 is `unknown`, and unknown is not clear — the leg must not act on it."""
         self.patch_control(hold_rc=2, hold_reason="")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "held")
         self.assertEqual([], self.calls("restart"))
 
@@ -211,7 +227,7 @@ class Verdicts(Base):
         """SC3: the token is the script's own, never composed here."""
         self.patch_control(restart={"dry": {"rc": 1, "out": ["stale-load-path", "nothing newer"]},
                                     "real": {"rc": 0, "out": ["unused"]}})
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "skipped")
         self.assertEqual(lines[1], "stale-load-path")
@@ -221,14 +237,14 @@ class Verdicts(Base):
         session the sweep no longer classifies as stalled."""
         self.patch_control(restart={"dry": {"rc": 0, "out": ["   ✅ would kill the pid"]},
                                     "real": {"rc": 0, "out": ["unused"]}})
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "skipped")
         self.assertEqual([], self.calls("ask"))
 
 
 class Handover(Base):
     def test_an_unanswered_card_is_carded_and_nothing_is_killed(self):
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "carded")
         posts = [a for a in self.calls("ask") if a[0] == "post"]
@@ -236,7 +252,7 @@ class Handover(Base):
         self.assertNotIn("--allow-busy-lapse", self.calls("restart")[0])
 
     def test_the_card_key_is_scoped_per_session_so_a_rerun_does_not_stack(self):
-        self.run_leg()
+        self.run_leg_settled()
         post = [a for a in self.calls("ask") if a[0] == "post"][0]
         key = post[post.index("--dedup-key") + 1]
         self.assertTrue(key.startswith("stuck-tab:"), key)
@@ -245,11 +261,11 @@ class Handover(Base):
         """A bare `stuck-tab:<slug>` would resolve to the answered item forever, so the
         operator would never be re-asked on the one row this leg exists for."""
         self.patch_control(poll="ANSWERED: option: restart it")
-        self.run_leg()
+        self.run_leg_settled()
         first = [a for a in self.calls("ask") if a[0] == "post"][0]
         first_key = first[first.index("--dedup-key") + 1]
         self.patch_control(poll="OPEN", post_id="item-2")
-        self.run_leg()
+        self.run_leg_settled()
         posts = [a for a in self.calls("ask") if a[0] == "post"]
         second_key = posts[-1][posts[-1].index("--dedup-key") + 1]
         self.assertNotEqual(first_key, second_key,
@@ -257,9 +273,13 @@ class Handover(Base):
 
     def test_declined_is_not_an_answer(self):
         self.patch_control(poll="DECLINED")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "carded")
-        self.assertEqual(1, len(self.calls("restart")), "only the dry run may have run")
+        # The leg runs more than once (post, then poll), so the dry run fires per round —
+        # the property is that EVERY restart call is a dry run, not that there is exactly one.
+        self.assertTrue(self.calls("restart"), "the unattended probe should still have run")
+        for argv in self.calls("restart"):
+            self.assertIn("--dry-run", argv, f"a non-dry-run reached the script: {argv}")
         self.assert_no_unattended_lift()
 
     def test_answered_leave_it_does_not_restart(self):
@@ -267,15 +287,15 @@ class Handover(Base):
         `leave it`, and acting on the terminal alone would make the card's safest answer the
         most destructive one."""
         self.patch_control(poll="ANSWERED: option: leave it")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "carded")
         self.assertEqual([], self.lifted_calls())
 
     def test_answered_leave_it_is_recorded_so_it_is_not_reread(self):
         self.patch_control(poll="ANSWERED: option: leave it")
-        self.run_leg()
-        rc, lines = self.run_leg()
+        self.run_leg_settled()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "carded")
         # The decline is remembered in our own store, because the attention store drops its
         # suppression once a card is answered — a same-key post would mint a fresh item and
@@ -287,7 +307,7 @@ class Handover(Base):
 
     def test_a_failed_post_is_cannot_tell(self):
         self.patch_control(post_rc=1)
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "cannot-tell")
         self.assertEqual([], self.lifted_calls())
 
@@ -296,13 +316,28 @@ class Handover(Base):
         yields that hint, so `poll` answers `cannot-tell` forever and the leg reports
         `carded` every round while never restarting anything."""
         self.patch_control(poll="ANSWERED: option: restart it")
-        self.run_leg()
+        self.run_leg_settled()
         polls = [a for a in self.calls("ask") if a[0] == "poll"]
         self.assertEqual(["item-1"], polls[0][1:2])
 
+    def test_the_answer_is_read_from_the_card_posted_the_round_before(self):
+        """The defect this pins: posting and polling in the SAME round can only ever read
+        OPEN, and the store's open-scoped dedup mints a new item next round — so `ANSWERED`
+        was unreachable, the operator was re-asked every round, and no restart ever ran."""
+        self.patch_control(poll="ANSWERED: option: restart it")
+        rc, lines = self.run_leg()                 # round 1 — posts, must NOT poll
+        self.assertEqual(lines[0], "carded")
+        self.assertIn("posted", lines[1])
+        self.assertEqual([], [a for a in self.calls("ask") if a[0] == "poll"],
+                         "the round that posted polled its own fresh card")
+        rc, lines = self.run_leg()                 # round 2 — polls the remembered id
+        polls = [a for a in self.calls("ask") if a[0] == "poll"]
+        self.assertEqual(1, len(polls), "the remembered card was not polled exactly once")
+        self.assertEqual(lines[0], "restart")
+
     def test_answered_runs_the_real_restart_with_the_lift(self):
         self.patch_control(poll="ANSWERED: option: restart it")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(rc, 0, lines)
         self.assertEqual(lines[0], "restart")
         # The reported line must be the ✅ one, never the header — the header names the
@@ -321,9 +356,9 @@ class Handover(Base):
         """The card is marked consumed BEFORE the call, so a second round that still reads
         `ANSWERED` does not restart again."""
         self.patch_control(poll="ANSWERED: option: restart it")
-        self.run_leg()
+        self.run_leg_settled()
         before = len([a for a in self.calls("restart") if "--dry-run" not in a])
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "carded")
         after = len([a for a in self.calls("restart") if "--dry-run" not in a])
         self.assertEqual(before, after, "a consumed card restarted the session a second time")
@@ -358,7 +393,7 @@ class FailClosed(Base):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("{not json")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "cannot-tell")
         self.assertEqual([], self.lifted_calls())
 
@@ -367,14 +402,14 @@ class FailClosed(Base):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"restarts": "two", "consumed": []}, fh)
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "cannot-tell")
         self.assertEqual([], self.lifted_calls())
 
     def test_a_missing_hold_probe_reads_as_held(self):
         """`session-holds.py` absent means heldness is unknown, and unknown is not clear."""
         os.remove(st.HOLDS)
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "held")
         self.assertEqual([], self.calls("restart"))
 
@@ -382,11 +417,11 @@ class FailClosed(Base):
 class Cap(Base):
     def test_the_cap_stops_the_third_restart_and_escalates_once(self):
         self.patch_control(poll="ANSWERED: option: restart it")
-        self.run_leg()                      # restart 1
+        self.run_leg_settled()                      # restart 1
         self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
-        self.run_leg()                      # restart 2
+        self.run_leg_settled()                      # restart 2
         self.patch_control(poll="ANSWERED: option: restart it", post_id="item-3")
-        rc, lines = self.run_leg()          # capped
+        rc, lines = self.run_leg_settled()          # capped
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "capped")
         real = [a for a in self.calls("restart") if "--dry-run" not in a]
@@ -403,10 +438,10 @@ class Cap(Base):
         """A stale decline would silence every later episode that reaches the same
         generation — the leg going permanently quiet on the row it exists for."""
         self.patch_control(poll="ANSWERED: option: leave it")
-        self.run_leg()                              # decline at generation 0
+        self.run_leg_settled()                              # decline at generation 0
         os.utime(self.task_path, (0, 10 ** 10))     # progress resets the cap
         self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "restart", "a stale decline silenced the new episode")
 
     def test_a_decline_survives_an_unreadable_task_page(self):
@@ -414,8 +449,8 @@ class Cap(Base):
         carry it, and the operator would be re-asked every round."""
         os.remove(self.task_path)
         self.patch_control(poll="ANSWERED: option: leave it")
-        self.run_leg()
-        rc, lines = self.run_leg()
+        self.run_leg_settled()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "carded")
         self.assertIn("declined", lines[1])
 
@@ -427,23 +462,23 @@ class Cap(Base):
                     if a[0] == "post" and any("stuck-tab-capped" in x for x in a)]
 
         self.patch_control(poll="ANSWERED: option: restart it")
-        self.run_leg()
+        self.run_leg_settled()
         self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
-        self.run_leg()
-        self.run_leg()                              # capped — escalates
+        self.run_leg_settled()
+        self.run_leg_settled()                              # capped — escalates
         self.assertEqual(1, len(escalations()))
-        self.run_leg()                              # capped again
+        self.run_leg_settled()                              # capped again
         self.assertEqual(1, len(escalations()), "the escalation re-posted")
 
     def test_progress_resets_the_cap(self):
         self.patch_control(poll="ANSWERED: option: restart it")
-        self.run_leg()
+        self.run_leg_settled()
         self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
-        self.run_leg()
+        self.run_leg_settled()
         # A newer task page is the reset signal, exactly worker-keepalive.py's.
         os.utime(self.task_path, (0, 10 ** 10))
         self.patch_control(poll="ANSWERED: option: restart it", post_id="item-3")
-        rc, lines = self.run_leg()
+        rc, lines = self.run_leg_settled()
         self.assertEqual(lines[0], "restart", "progress did not reset the cap")
         real = [a for a in self.calls("restart") if "--dry-run" not in a]
         self.assertEqual(3, len(real))

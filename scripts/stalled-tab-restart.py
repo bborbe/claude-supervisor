@@ -99,7 +99,8 @@ def state_path(vault, task):
 
 
 def fresh_state():
-    return {"restarts": 0, "progress_at": None, "consumed": [], "declined": False, "declined_at": None, "escalated": None}
+    return {"restarts": 0, "progress_at": None, "consumed": [], "declined": False,
+            "declined_at": None, "escalated": None, "card_item": None}
 
 
 def read_state(vault, task):
@@ -137,6 +138,7 @@ def read_state(vault, task):
     return {"restarts": restarts, "progress_at": progress_at,
             "consumed": consumed, "declined": bool(data.get("declined")),
             "declined_at": data.get("declined_at"),
+            "card_item": data.get("card_item"),
             "escalated": data.get("escalated")}, None
 
 
@@ -496,10 +498,27 @@ def act(args):
             print("the operator declined this episode and the task has not moved since")
             return 0
 
-    item = post_card(args.task, args.session_id, detail, state)
-    if not item:
-        print("cannot-tell")
-        print("the card could not be posted")
+    # ⚠️ **Poll the card a PREVIOUS round posted — never the one this round just made.**
+    # Posting and polling in the same round can only ever read `OPEN`: the operator has not
+    # answered yet. And because the store's dedup is open-scoped, the next round's post mints
+    # a NEW item, so the answered one is never polled — `ANSWERED` is unreachable, the
+    # operator is re-asked every round, and no restart ever runs. That is a no-op of the
+    # feature's whole mechanism, so the posted id is remembered in our own store and polled
+    # on the round AFTER it was posted.
+    item = state.get("card_item")
+    if not item or item in state["consumed"]:
+        item = post_card(args.task, args.session_id, detail, state)
+        if not item:
+            print("cannot-tell")
+            print("the card could not be posted")
+            return 0
+        state["card_item"] = item
+        if not write_state(args.vault, args.task, state):
+            print("cannot-tell")
+            print("the card id could not be recorded, so its answer could never be read")
+            return 0
+        print("carded")
+        print(f"card {item} posted; its answer is read next round")
         return 0
 
     verdict, answer = poll_card(item)
@@ -522,6 +541,8 @@ def act(args):
         # is answered, so without this the next round posts a fresh card and asks again.
         state["declined"] = True
         state["declined_at"] = stamp
+        # The card is spent, so the next episode posts a fresh one rather than polling this.
+        state["card_item"] = None
         if not write_state(args.vault, args.task, state):
             print("cannot-tell")
             print("the answer could not be recorded")
@@ -552,9 +573,11 @@ def act(args):
 
     state["restarts"] += 1
     state["progress_at"] = stamp
-    # The generation advanced, so the previous episode's decline and escalation are spent.
+    # The generation advanced, so the previous episode's decline and escalation are spent,
+    # and its card is spent with them — the next stall posts a new one.
     state["declined"] = False
     state["declined_at"] = None
+    state["card_item"] = None
     state["escalated"] = None
     if not write_state(args.vault, args.task, state):
         # The consumed marker already landed, so this cannot become a loop; what is lost is
