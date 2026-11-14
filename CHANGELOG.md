@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.310.1
 
 - fix: **the bare-`gopls` fixture targets `/usr/bin/gnuyes` when present, so it survives the `ubuntu-latest` roll to ubuntu-26.04.** `test_a_bare_gopls_child_does_not_refuse` symlinked `gopls` → `/usr/bin/yes` and required `pgrep -P` to find the child. On ubuntu-26.04 `/usr/bin/yes` is the uutils multi-call binary, which refuses a foreign argv[0] (`Security violation: Requested utility \`gopls\` does not match executable name`) and exits before `pgrep` can see it, so the fixture built no shape and the assertion failed — on CI only. Measured: the same commit passed on ubuntu-24.04 and failed on ubuntu-26.04, and the prescribed `& wait` remedy changed nothing because `yes` itself dies. `gnuyes` is GNU `yes` (ignores argv[0], spins forever) and is present on 26.04, absent on 24.04, so preferring it with a `yes` fallback keeps both images green and leaves `assertTrue(pids, …)` intact. Change set: `scripts/tests/test_reap_idle_headless.py`, `CHANGELOG.md`.
 
