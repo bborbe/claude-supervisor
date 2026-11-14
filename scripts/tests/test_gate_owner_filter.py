@@ -61,6 +61,7 @@ _SCRIPT = os.path.join(os.path.dirname(_HERE), "gate-owner-filter.py")
 _TEST_STATE = tempfile.mkdtemp(prefix="gate-owner-filter-tests-")
 os.environ["GATE_EMISSIONS_DIR"] = os.path.join(_TEST_STATE, "emissions")
 os.environ["SUPERVISOR_WORKER_MANAGER_DIR"] = os.path.join(_TEST_STATE, "worker-manager")
+_FLEET_DIR = os.environ["SUPERVISOR_WORKER_MANAGER_DIR"]
 
 _spec = importlib.util.spec_from_file_location("gate_owner_filter", _SCRIPT)
 gf = importlib.util.module_from_spec(_spec)
@@ -69,6 +70,43 @@ _spec.loader.exec_module(gf)
 ME = "92de43c3-bd91-409d-a33e-824a61e5706a"
 PEER = "64b4a415-906d-457f-81f9-48a842007b88"
 GATED = "33333333-3333-4333-8333-333333333333"
+
+
+def _make_me_live(registry_dir):
+    """Register ME as a live session in a fixture registry.
+
+    The subprocess arms below run as ME and must see unowned gates emitted, so they need ME
+    registered as the live Fleet Manager (module-level registration below) AND ME in the
+    registry `live_ids` reads. Without this an unowned gate is suppressed for lack of a
+    fleet — correct production behaviour, but not what an arm-mechanics test exercises.
+    """
+    os.makedirs(registry_dir, exist_ok=True)
+    with open(os.path.join(registry_dir, ME + ".json"), "w", encoding="utf-8") as handle:
+        json.dump({"sessionId": ME}, handle)
+
+
+# Register ME as the live Fleet Manager in the shared fixture dir the subprocesses inherit,
+# so an unowned gate routes to this arm and emits. `fleet_manager` keys the id off the
+# FILENAME and requires it live, which `_make_me_live` supplies per registry.
+os.makedirs(os.environ["SUPERVISOR_WORKER_MANAGER_DIR"], exist_ok=True)
+with open(os.path.join(os.environ["SUPERVISOR_WORKER_MANAGER_DIR"], ME + ".json"),
+          "w", encoding="utf-8") as _fleet_handle:
+    json.dump({"branch": "fleet", "resolved_at": "2026-01-01T00:00:00+00:00"},
+              _fleet_handle)
+
+
+def setUpModule():
+    """Re-pin the fleet fixture dir for this module's run.
+
+    `test_restart_worker`, `test_answer_path_check` and `test_fleet_register` set the SAME
+    `SUPERVISOR_WORKER_MANAGER_DIR` env at import, and `unittest discover` imports every
+    module before any test runs — so the last importer's value would otherwise leak into
+    this module's subprocesses (which inherit `os.environ`) and into ScopeCli's in-process
+    fleet-registration write. Re-pinning here makes the fleet fixtures deterministic
+    regardless of discovery order.
+    """
+    os.environ["SUPERVISOR_WORKER_MANAGER_DIR"] = _FLEET_DIR
+    gf.WORKER_MANAGER_DIR = _FLEET_DIR
 
 
 class OwnerStub:
@@ -117,12 +155,16 @@ class Verdict(unittest.TestCase):
     LIVE = {"worker-1", "manager-x", "manager-y"}
 
     def call(self, session_id, spawner, ledger=_UNSET, live=_UNSET, me=ME):
+        lv = self.LIVE if live is _UNSET else live
         return gf.verdict(
             session_id,
             spawner,
             self.LEDGER if ledger is _UNSET else ledger,
-            self.LIVE if live is _UNSET else live,
+            lv,
             me,
+            # Mirror production: an unreadable registry is UNREADABLE (fail open); a
+            # readable one with no Fleet Manager resolves to None (unowned suppressed).
+            fleet=gf.UNREADABLE if lv is None else None,
         )
 
     def test_peer_manager_is_dropped(self):
@@ -178,11 +220,13 @@ class Verdict(unittest.TestCase):
             (gf.EMIT, "worker-spawner"),
         )
 
-    def test_unowned_pane_is_kept(self):
-        self.assertEqual(self.call("w", None), (gf.EMIT, "unowned"))
+    def test_unowned_pane_is_suppressed_when_no_fleet(self):
+        """The keep-set is no longer WIDE for `unowned`: with no Fleet Manager live it is
+        suppressed and counted, not handed to every manager."""
+        self.assertEqual(self.call("w", None), (gf.DROP, gf.UNOWNED_NO_FLEET))
 
-    def test_session_with_no_id_is_kept(self):
-        self.assertEqual(self.call(None, None), (gf.EMIT, "unowned"))
+    def test_session_with_no_id_is_suppressed_when_no_fleet(self):
+        self.assertEqual(self.call(None, None), (gf.DROP, gf.UNOWNED_NO_FLEET))
 
     def test_dead_manager_is_kept(self):
         """A dead manager's panes are nobody's to route, so they emit."""
@@ -267,29 +311,31 @@ class Verdict(unittest.TestCase):
         """Self-exclusion outranks the new rule, or the watcher silences itself."""
         self.assertEqual(self.call(ME, None, live={ME}), (gf.EMIT, "self"))
 
-    def test_dead_peer_managers_own_gate_is_kept(self):
-        """SC3: a dead manager cannot act on its own gate, so nothing duplicates
-        this wake and dropping it would leave the gate owned by nobody."""
-        self.assertEqual(self.call("manager-z", None, live=set()), (gf.EMIT, "unowned"))
+    def test_dead_peer_managers_own_gate_is_suppressed_when_no_fleet(self):
+        """An empty registry is READABLE and carries no Fleet Manager, so the gate is
+        `unowned` and suppressed + counted rather than handed to every manager."""
+        self.assertEqual(
+            self.call("manager-z", None, live=set()),
+            (gf.DROP, gf.UNOWNED_NO_FLEET),
+        )
 
     def test_unknown_liveness_keeps_a_managers_own_gate(self):
         """An unreadable registry is UNKNOWN -- fail open, as every hop does."""
         self.assertEqual(self.call("manager-z", None, live=None), (gf.EMIT, "unowned"))
 
-    def test_worker_with_unresolved_parent_is_not_dropped(self):
+    def test_worker_with_unresolved_parent_is_not_a_manager(self):
         """Hop 3b keys on LEDGER MEMBERSHIP, not on an empty spawner.
 
         A worker whose spawn chain never resolved to a registered session carries
         `parent_session: null` too (CLAUDE.md § The spawn ledger) -- but it has a
-        ledger record of its OWN, so it is not a manager and must keep emitting.
-        Keying the new branch on the empty spawner would drop every such worker,
-        which is a live shape rather than a hypothetical one.
+        ledger record of its OWN, so it is not a manager and must NOT be dropped as
+        `peer-manager-own`. It is `unowned`, and with no Fleet Manager live that class
+        is suppressed + counted, not kept.
         """
         ledger = {"w-null": {"session_id": "w-null", "parent_session": None}}
-        self.assertEqual(
-            self.call("w-null", None, ledger=ledger, live={"w-null"}),
-            (gf.EMIT, "unowned"),
-        )
+        call, reason = self.call("w-null", None, ledger=ledger, live={"w-null"})
+        self.assertNotEqual(reason, "peer-manager-own")
+        self.assertEqual((call, reason), (gf.DROP, gf.UNOWNED_NO_FLEET))
 
 
 class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
@@ -338,8 +384,9 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
             self.call("w-dead", "mgr-dead", ledger=ledger, me=self.FLEET),
             (gf.EMIT, "dead-manager-fleet"),
         )
-        # Fail-open is per-class: the reason keeps its own spelling, so a routed row is
-        # never confused with an un-routed one in the ledger.
+        # Fail-open is per-class: `dead-manager` is NOT the unowned residual, so it keeps
+        # emitting when no Fleet Manager is live. The reason keeps its own spelling, so a
+        # routed row is never confused with an un-routed one in the ledger.
         self.assertEqual(
             self.call("w-dead", "mgr-dead", ledger=ledger, fleet=None),
             (gf.EMIT, "dead-manager"),
@@ -437,9 +484,18 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
             (gf.EMIT, gf.UNOWNED_FLEET),
         )
 
-    def test_no_live_fleet_manager_falls_open_to_every_manager(self):
-        """An unresolvable destination is not a licence to silence a gate."""
-        self.assertEqual(self.call("worker-1", None, fleet=None), (gf.EMIT, gf.UNOWNED))
+    def test_no_live_fleet_manager_suppresses_and_counts_the_gate(self):
+        """No destination is not a licence to wake every manager — but never silent.
+
+        The fail-open residual: with no live Fleet Manager there is nothing to route to, and
+        emitting to every manager wakes each of them for a gate none can act on. Suppress it,
+        and count it under `UNOWNED_NO_FLEET` so the LIVENESS line names the fallback. The
+        live-Fleet-Manager and goal-manager cases above remain the both-direction guard.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, fleet=None),
+            (gf.DROP, gf.UNOWNED_NO_FLEET),
+        )
 
     def test_a_diagnostic_run_with_no_self_still_emits(self):
         """`--pane` with no `--self` has no reader to route FOR, and a silent probe reads
@@ -470,7 +526,7 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
                     json.dump({"branch": "fleet", "resolved_at": at}, h)
             self.assertEqual(gf.fleet_manager(self.LIVE, directory), "fleet-live")
             self.assertIsNone(gf.fleet_manager({"nobody"}, directory))
-            self.assertIsNone(gf.fleet_manager(None, directory))
+            self.assertIs(gf.fleet_manager(None, directory), gf.UNREADABLE)
 
     def test_fleet_resolution_prefers_the_newest_registration(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -818,6 +874,7 @@ class CorruptRecordsFailOpen(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        # No `_make_me_live` here: this class asserts an EMPTY registry (live_ids == set()).
         with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
             handle.write(json.dumps({
                 "type": "open", "item_id": "1", "pane": "372", "session_id": GATED,
@@ -875,8 +932,10 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(spawner, PEER)
 
     def test_pane_with_no_event_record_is_unowned(self):
+        # No event record -> unowned; with no Fleet Manager live (fleet defaults None)
+        # that class is suppressed + counted, not emitted.
         call, reason, session_id, _ = gf.evaluate("1", {}, set(), [], ME)
-        self.assertEqual((call, reason, session_id), (gf.EMIT, "unowned", None))
+        self.assertEqual((call, reason, session_id), (gf.DROP, gf.UNOWNED_NO_FLEET, None))
 
     def test_full_chain_pane_to_a_peer_managers_own_gate(self):
         """The measured shape: an operator-started manager's OWN pane.
@@ -909,26 +968,26 @@ class Claims(unittest.TestCase):
     LIVE = {"worker-1", "manager-x", "manager-y", ME, PEER}
 
     def call(self, session_id, spawner, claims, live=_UNSET, me=ME):
+        lv = self.LIVE if live is _UNSET else live
         return gf.verdict(
             session_id,
             spawner,
             self.LEDGER,
-            self.LIVE if live is _UNSET else live,
+            lv,
             me,
             claims,
+            fleet=gf.UNREADABLE if lv is None else None,
         )
 
     def test_claimed_pane_is_dropped(self):
         """Half one: a claim held by a live peer drops the pane."""
         self.assertEqual(self.call("w", None, {"w": PEER}), (gf.DROP, "claimed"))
 
-    def test_unclaimed_pane_is_still_emitted(self):
-        """Half two: the same pane with no claim still emits.
-
-        This is the half that fails a fix dropping every `spawner=None` pane --
-        the reason the criterion names both halves rather than one.
-        """
-        self.assertEqual(self.call("w", None, {}), (gf.EMIT, "unowned"))
+    def test_unclaimed_pane_is_suppressed_when_no_fleet(self):
+        """Half two: an unclaimed pane is `unowned`, and with no Fleet Manager live that
+        class is suppressed (counted) rather than emitted. The claim branch still drops
+        ONLY for a live peer, which `test_claimed_pane_is_dropped` pins."""
+        self.assertEqual(self.call("w", None, {}), (gf.DROP, gf.UNOWNED_NO_FLEET))
 
     def test_a_claim_cannot_weaken_a_resolved_spawner_drop(self):
         """A claim may only ADD a drop, never remove one.
@@ -974,8 +1033,13 @@ class Claims(unittest.TestCase):
         )
 
     def test_claim_on_another_session_does_not_leak(self):
-        """Keyed on the gated session id -- a claim elsewhere must not drop here."""
-        self.assertEqual(self.call("w", None, {"other": PEER}), (gf.EMIT, "unowned"))
+        """Keyed on the gated session id -- a claim elsewhere must not drop here.
+
+        The pane is `unowned` and suppressed for lack of a Fleet Manager; what this pins
+        is that the OTHER claim is not what dropped it (that would read `claimed`)."""
+        call, reason = self.call("w", None, {"other": PEER})
+        self.assertNotEqual(reason, "claimed")
+        self.assertEqual((call, reason), (gf.DROP, gf.UNOWNED_NO_FLEET))
 
     def test_self_session_beats_a_claim(self):
         self.assertEqual(self.call(ME, None, {ME: PEER}), (gf.EMIT, "self"))
@@ -992,7 +1056,7 @@ class Claims(unittest.TestCase):
         self.assertEqual(self.call("w", ME, {"w": PEER}), (gf.EMIT, "own-worker"))
 
     def test_absent_claims_mapping_is_the_pre_claim_behaviour(self):
-        self.assertEqual(self.call("w", None, None), (gf.EMIT, "unowned"))
+        self.assertEqual(self.call("w", None, None), (gf.DROP, gf.UNOWNED_NO_FLEET))
 
     # --- the claim x hop-3b intersection -----------------------------------
     #
@@ -1062,10 +1126,10 @@ class EvaluateWithClaims(unittest.TestCase):
         self.assertEqual(session_id, "884016da")
         self.assertIsNone(spawner)
 
-    def test_same_pane_unclaimed_still_emits(self):
+    def test_same_pane_unclaimed_is_unowned_and_suppressed(self):
         items = [{"pane": "372", "session_id": "884016da", "ts": 1}]
         call, reason, _, _ = gf.evaluate("372", {}, {PEER}, items, ME, {})
-        self.assertEqual((call, reason), (gf.EMIT, "unowned"))
+        self.assertEqual((call, reason), (gf.DROP, gf.UNOWNED_NO_FLEET))
 
 
 class ClaimsFilePath(unittest.TestCase):
@@ -1092,6 +1156,7 @@ class ClaimsFilePath(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         os.makedirs(self.state)
         os.makedirs(self.registry)
+        _make_me_live(self.registry)
         with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
             handle.write(json.dumps({
                 "type": "open", "item_id": "1", "pane": "372", "session_id": GATED,
@@ -1156,6 +1221,7 @@ class FeedEmitCarriesTheReplayMark(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        _make_me_live(self.registry)
 
     def emit(self, feed):
         return subprocess.run(
@@ -1213,6 +1279,7 @@ class SummaryLine(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        _make_me_live(self.registry)
         # Two panes off one live manager: its OWN gate (no ledger record at all,
         # so hop 3b's branch) and its worker's (a ledger record, so hop 3's).
         with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
@@ -1301,6 +1368,7 @@ class EmptyFeedIsNotAUsageError(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        _make_me_live(self.registry)
         # A stand-in for `who-needs-me.py`, so a bare `--pane` (which now produces the
         # feed itself) is exercised without reaching the operator's live store.
         self.producer_script = os.path.join(self.dir, "feed.py")
@@ -1409,6 +1477,7 @@ class UpstreamRefusalFailsLoudly(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        _make_me_live(self.registry)
 
     def invoke(self, *argv, feed=None):
         return subprocess.run(
@@ -1513,6 +1582,7 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        _make_me_live(self.registry)
         self.counter = os.path.join(self.dir, "count")
 
     def producer(self, *frames, prelude="", exit_code=0):
@@ -1795,6 +1865,7 @@ class FeedStateSurvivesTheReArm(unittest.TestCase):
         self.feed_state = os.path.join(self.dir, "feed-state")
         for path in (self.state, self.registry):
             os.makedirs(path)
+        _make_me_live(self.registry)
         self.arm = 0
         self.ts = 0
 
@@ -2240,6 +2311,7 @@ class RoleHumanEndToEnd(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        _make_me_live(self.registry)
         with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
             handle.write(json.dumps(
                 {"type": "open", "item_id": "1", "pane": "2165", "session_id": "human-1"}
@@ -2300,6 +2372,14 @@ class ScopeCli(unittest.TestCase):
         self._orig_owner = gf._OWNER
         gf._OWNER = OwnerStub()
         self.addCleanup(self._restore)
+        # Register the fixture's SELF as the live Fleet Manager in the shared fixture dir so
+        # an unowned gate routes to this arm and emits — the scope cases need a KEPT pane,
+        # and the no-fleet suppression has its own in-process test. (`replay.run()` does this
+        # for the ForeignGoalFixture class; ScopeCli drives `main()` directly.)
+        with open(os.path.join(os.environ["SUPERVISOR_WORKER_MANAGER_DIR"],
+                               self.SELF + ".json"), "w", encoding="utf-8") as handle:
+            json.dump({"branch": "fleet",
+                       "resolved_at": "2026-01-01T00:00:00+00:00"}, handle)
 
     def _restore(self):
         gf._OWNER = self._orig_owner
