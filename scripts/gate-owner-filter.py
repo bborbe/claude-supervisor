@@ -397,6 +397,28 @@ FLEET_SUFFIX = "-fleet"
 #: The routed spelling of `unowned`, kept as its own name because it is the one the SC2
 #: criterion quotes.
 UNOWNED_FLEET = UNOWNED + FLEET_SUFFIX
+#: Appended to a routed reason when there is no live Fleet Manager to route to. The row is
+#: suppressed rather than emitted to every manager, and the counts line buckets it under
+#: `dropped(unowned-no-fleet)` so the fail-open case is never silent.
+NO_FLEET_SUFFIX = "-no-fleet"
+#: The fail-open spelling of `unowned`; the bucket the live verification quotes.
+UNOWNED_NO_FLEET = UNOWNED + NO_FLEET_SUFFIX
+
+
+class _Unreadable:
+    """The registry could not be read, so "no live Fleet Manager" is UNKNOWN, not empty.
+
+    `route_to_fleet` fails OPEN on this sentinel and only suppresses when the registry was
+    readable and carried no live Fleet Manager (`fleet is None`). Kept distinct from `None`
+    because "nothing resolved" and "resolved but unreadable" are different outcomes — the
+    same UNREADABLE-vs-None split the 2026-11-13 fix needed for the peer-manager path.
+    """
+
+    def __repr__(self):
+        return "<unreadable>"
+
+
+UNREADABLE = _Unreadable()
 
 #: One manager's per-decision ledger. Shares the per-session root the tracked-set arm
 #: writes its `events.jsonl` into, so both arms of the same manager sit together.
@@ -652,12 +674,13 @@ def fleet_manager(live, directory=None):
     unowned class to a dead session would be a black hole with extra steps — the gate would
     leave every other manager's feed and arrive nowhere.
 
-    `live is None` (the registry could not be read) resolves nothing, which sends the
-    caller down the fail-open limb. That is the same "unknown is not empty" rule every
-    other ownership input here takes.
+    `live is None` (the registry could not be read) returns `UNREADABLE`, which sends the
+    caller down the fail-open limb — unknown is not empty. A READABLE registry with no live
+    Fleet Manager registration returns `None`, which is the "no destination" case the caller
+    now suppresses and counts rather than emitting to every manager.
     """
     if live is None:
-        return None
+        return UNREADABLE
     best, best_at = None, ""
     for path in glob.glob(os.path.join(directory or WORKER_MANAGER_DIR, "*.json")):
         try:
@@ -681,20 +704,32 @@ def route_to_fleet(self_id, fleet, reason):
 
     Every class the caller routes here shares one property: the reader cannot answer it and
     no other manager owns it, so leaving it in every feed is cost without work. The reason
-    is preserved with `FLEET_SUFFIX` appended, so a routed row still says WHICH class it was
+    is preserved with a suffix appended, so a routed row still says WHICH class it was
     while the counts line buckets them together.
 
-    Four answers, and every one of them is deliberate:
+    Five answers, and every one of them is deliberate:
 
       * no `--self` — a diagnostic run, not a manager's arm: emit, exactly as before.
         There is no reader to route FOR, and a `--pane` probe that printed nothing would
         read as "this pane is fine".
-      * no live Fleet Manager — emit. The fail-open limb: an unresolvable destination is
-        not a licence to silence a gate.
+      * the registry could not be read (`UNREADABLE`) — emit. Unknown is not empty: a
+        Fleet Manager may exist, so suppressing on an unreadable input would hide a gate.
+      * no live Fleet Manager (`None`, registry readable) — the `unowned` class DROPs and
+        is counted under `NO_FLEET_SUFFIX`; `dead-manager` and `claim-dead` still emit.
+        Emitting unowned to every manager when there is no destination woke each of them
+        for a gate none can act on, so suppress it — but never silently: the counts line
+        names the bucket (`dropped(unowned-no-fleet)`). The two siblings are a separate
+        residual and keep their fail-open emit.
       * this watcher IS the Fleet Manager — emit. It is the destination.
       * anything else — drop, so the row says where it went.
     """
-    if not self_id or not fleet:
+    if not self_id:
+        return EMIT, reason
+    if fleet is UNREADABLE:
+        return EMIT, reason
+    if not fleet:
+        if reason == UNOWNED:
+            return DROP, reason + NO_FLEET_SUFFIX
         return EMIT, reason
     routed = reason + FLEET_SUFFIX
     if self_id == fleet:
@@ -1375,8 +1410,9 @@ def evaluate_panes(panes, ledger, live, items, self_id, claims, scope=None, stat
 
     `fleet` is resolved ONCE here rather than per row: it is a directory glob plus a
     liveness intersection, and a poll can carry dozens of panes. Passing `None` explicitly
-    means "no Fleet Manager resolved" and takes the fail-open limb; omitting it means
-    "resolve it".
+    means "readable registry, no Fleet Manager resolved" and SUPPRESSES a routed gate
+    (counted under `dropped(unowned-no-fleet)`); omitting it means "resolve it", and an
+    unreadable registry resolves to `UNREADABLE`, which fails open.
     """
     states = states or {}
     if fleet is _UNSET:
@@ -1514,7 +1550,16 @@ def counts_line(rows):
     # ONE bucket for every routed class, because the bucket answers "how much left this
     # feed for the Fleet Manager", not "which hop found it". The specific reason stays on
     # the row (`--explain`, `--json`, and the ledger's `reason`), so nothing is lost.
-    dropped_fleet = [r for r in dropped if r["reason"].endswith(FLEET_SUFFIX)]
+    # The fail-open bucket: a routed class suppressed because no Fleet Manager was live.
+    # One bucket, like `dropped(fleet-routed)` — it answers "how much the fallback caught",
+    # and is named for the `unowned` class the live verification feeds. Excluded from
+    # `dropped(fleet-routed)` because `unowned-no-fleet` also ends in `-fleet`.
+    dropped_no_fleet = [r for r in dropped if r["reason"].endswith(NO_FLEET_SUFFIX)]
+    dropped_fleet = [
+        r for r in dropped
+        if r["reason"].endswith(FLEET_SUFFIX)
+        and not r["reason"].endswith(NO_FLEET_SUFFIX)
+    ]
     excluded = [r for r in rows if r["verdict"] == EXCLUDE]
     excluded_goal = [r for r in excluded if r["reason"].startswith("foreign-goal:")]
     excluded_unknown = [r for r in excluded if r["reason"] == "owner-unknown"]
@@ -1526,6 +1571,7 @@ def counts_line(rows):
         f"dropped(claimed): {len(dropped_claimed)}  "
         f"dropped(not-open): {len(dropped_not_open)}  "
         f"dropped(fleet-routed): {len(dropped_fleet)}  "
+        f"dropped(unowned-no-fleet): {len(dropped_no_fleet)}  "
         f"excluded(foreign-goal): {len(excluded_goal)}  "
         f"excluded(owner-unknown): {len(excluded_unknown)}  "
         f"excluded(role-human): {len(excluded_human)}"
