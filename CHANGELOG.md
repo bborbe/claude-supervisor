@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **the fleet round no longer opens flagged rows — the wrapper's tick does.** Row 5c, `commands/steps/flagged-open.md` and `agents/fleet-flagged-open-actor.md` are deleted, and every cross-reference is reworded in the same change (`fleet-drive.md`'s router and carve-out, `read-guides.md`, `open.md`, `fleet-round-tail.md`, `keepalive-topicless-goals.md`, `keepalive.md`, `output-shape.md` items 13 and 14, `rules.md`, `fleet-sweep-reader.md`), together with the two checkers that asserted the leg's presence. The reopen is `claude-wrapper`'s model-free `flagged-tick`: measured 2026-11-14 over 24 h, 83 close→reopen pairs, median 36.4 min, every opened row live afterwards. Both probes return 0 lines: `grep -rn "flagged-open" commands agents` and `grep -n "5c" commands/fleet-drive.md`.
+
 ## v0.311.2
 
 - fix: **`manager-liveness.py` imports under Python 3.9 again, so the sweep-gate wake path can read a subject's state.** The script used PEP 604 annotations (`float | None`), which are evaluated at function-definition time and raise under 3.9 — and the in-process sweep-gate job invokes `manager-wake.py` with `/usr/bin/python3` (3.9.6 on this Mac), which then runs the liveness read with `sys.executable`, so every read failed and `pane-wake-guard.py` refused the wake as `skip:state-unreadable`. Measured 2026-11-14 on the wake emitter's first live ticks (09:31Z and 10:35Z), both `skip:state-unreadable` while the same read returned `OK` under a 3.15 interpreter. `from __future__ import annotations` makes the annotations lazy, so the script imports and runs unchanged under both. `scripts/manager-liveness.py`, `CHANGELOG.md`.

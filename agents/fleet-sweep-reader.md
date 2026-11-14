@@ -146,7 +146,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 **Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.digest`, verbatim and byte-for-byte. ⚠️ **Write it through `python3`, and nothing else** — this agent holds no `mkdir`, no `mv` and no `Write` tool, so an instruction to create a directory or move a temp file over is one you cannot execute. Make the parent and the file in a single call, and **write it atomically**: `pathlib.Path(...).expanduser()` → `.parent.mkdir(parents=True, exist_ok=True)` → write the render to `<path>.tmp` → `os.replace("<path>.tmp", "<path>")`. ⚠️ **The atomic write is not decoration.** A partial `.digest` left by a crash mid-write is read as rows by Steps 3, 5, 11 and 14, and a truncated digest is indistinguishable from a small fleet — the same silent-short-read the snapshot's own ordering rule guards against. That is the only file you write besides the snapshot, and step 9's persist rule is unchanged.
 
-⚠️ **Prune as you write.** The store is keyed by round, so it grows a file per leg per round — roughly 96 a day at the 15-minute default, and nothing else prunes it. After writing, delete every `*.digest`, `*.drive`, `*.keepalive`, `*.flagged-open`, `*.decision` and `*.open*` in `~/.claude/state/fleet-handback/` beyond the newest 100 of each kind. The bound is stated because an unbounded store under `~/.claude/state/` is a slow operational failure, not a tidy-up — and it covers a day of rounds plus the after-measure.
+⚠️ **Prune as you write.** The store is keyed by round, so it grows a file per leg per round — roughly 96 a day at the 15-minute default, and nothing else prunes it. After writing, delete every `*.digest`, `*.drive`, `*.keepalive`, `*.decision` and `*.open*` in `~/.claude/state/fleet-handback/` beyond the newest 100 of each kind. The bound is stated because an unbounded store under `~/.claude/state/` is a slow operational failure, not a tidy-up — and it covers a day of rounds plus the after-measure.
 
 The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads it — the digest does **not** ride the hand-back.
 
@@ -181,11 +181,10 @@ LEDGER (open)
   <id> · <kind> · <what> · <state> · <age>          — or: (none) / UNKNOWN (read failed)
 LEGS
   keep-alive: not run — no reading recorded this round
-  flagged-open: not run — no reading recorded this round
 NOTES   runbook/command disagreements, unreadable inputs
 ```
 
-⚠️ **The `LEGS` section is seeded here and owned by `commands/steps/output-shape.md` item 14 — never restate its formats.** Rows 5b/5c run *after* this digest is written, so no reading exists; a fabricated `0` would be indistinguishable from a leg that ran and found nothing. Write the two `not run` lines verbatim; each leg replaces its own via `scripts/fleet-legs.py`. ⚠️ **Never write a count here** — this leg does not measure those populations.
+⚠️ **The `LEGS` section is seeded here and owned by `commands/steps/output-shape.md` item 14 — never restate its formats.** Row 5b runs *after* this digest is written, so no reading exists; a fabricated `0` would be indistinguishable from a leg that ran and found nothing. Write the `not run` line verbatim; the leg replaces it via `scripts/fleet-legs.py`. ⚠️ **Never write a count here** — this leg does not measure those populations.
 
 ⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a non-progressing `CLASSIFICATION` row — `parked`, `parked-on-watcher`, `waiting-on-human` or `finished — reap candidate`, which is the same four step 7b attempts the lookup for. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the fixed-section allowance still holds; keep the link and trim the row's prose if a section runs long.
 

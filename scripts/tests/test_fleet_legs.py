@@ -33,7 +33,6 @@ _spec.loader.exec_module(legs)
 
 SHAPE = os.path.join(_ROOT, "commands", "steps", "output-shape.md")
 KEEPALIVE = os.path.join(_ROOT, "commands", "steps", "keepalive.md")
-FLAGGED = os.path.join(_ROOT, "commands", "steps", "flagged-open.md")
 READER = os.path.join(_ROOT, "agents", "fleet-sweep-reader.md")
 
 #: The pre-fix digest, byte-shaped like the real one: header, classification, rows, NOTES —
@@ -496,20 +495,19 @@ class TestStatus(Base):
 class TestSingleHome(unittest.TestCase):
     """The formats live in output-shape.md item 14, and nowhere else is a second copy."""
 
-    def test_output_shape_defines_the_four_formats(self):
+    def test_output_shape_defines_the_three_formats(self):
         with open(SHAPE, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("**`Legs`**", text)
         self.assertIn("keep-alive: unactioned: <n> lapsed-managers", text)
         self.assertIn("keep-alive: unactioned: <n> topicless-goal-managers", text)
         self.assertIn("keep-alive: unactioned: <n> dead-workers", text)
-        self.assertIn("flagged-open: unactioned: <n> operator-flagged (batch invoked|batch not invoked)", text)
         self.assertIn("(lower bound, scan incomplete)", text)
         self.assertIn("not run — <reason>", text)
         self.assertIn("fleet-legs.py", text)
 
     def test_the_acting_legs_point_at_that_home_and_do_not_restate_it(self):
-        for path in (KEEPALIVE, FLAGGED):
+        for path in (KEEPALIVE,):
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
             with self.subTest(path=os.path.basename(path)):
@@ -523,7 +521,7 @@ class TestSingleHome(unittest.TestCase):
             text = fh.read()
         self.assertIn("LEGS", text)
         self.assertIn("keep-alive: not run — no reading recorded this round", text)
-        self.assertIn("flagged-open: not run — no reading recorded this round", text)
+        self.assertNotIn("flagged-open: not run — no reading recorded this round", text)
 
 
 class TestBatchMarker(Base):
