@@ -61,7 +61,9 @@ so the pod's log is all a later reader has — `kubectl logs job/<name> | grep '
 ```json
 {"agent":"rebase-agent","generated_at":"2026-11-13T14:00:12+00:00","trigger":"schedule",
  "state":"/state/2026-11-13T14-00-12Z.json","errors":[],
- "rows":[{"repo":"bborbe/claude-supervisor","pr":123,"verdict":"PUSH","push_line":"git -C …"}]}
+ "rows":[{"repo":"bborbe/claude-supervisor","pr":123,"verdict":"PUSH",
+          "transfer":{"kind":"pvc-bundle","target":"rebase-agent-bundles:/bundles/pr-123.bundle"},
+          "push_line":"kubectl… cp … && git -C … fetch … && git -C … push …"}]}
 ```
 
 `--trigger` (default `manual`) is written into the payload, so a run started by hand is
@@ -140,13 +142,42 @@ git -C <tmp> update-ref refs/rebase-agent/pr/<n> HEAD
 git -C <tmp> worktree remove --force <tmp>   # in the repo, after the ref is written
 ```
 
-The main worktree is never entered and no local branch is ever created. The push line maps
-the throwaway ref onto the live branch, with the lease pinning the old SHA:
+The main worktree is never entered and no local branch is ever created. The rebased commit
+is published as a **range bundle** — `origin/master..refs/rebase-agent/pr/<n>` — to the
+transfer volume, and the operator's line copies it off the reader pod, fetches it, and
+pushes in one paste:
 
 ```
-git -C <repo> push --force-with-lease=refs/heads/<branch>:<old-sha> \
-  origin refs/rebase-agent/pr/<n>:refs/heads/<branch>
+kubectlWRAPPER cp <reader-pod>:/bundles/pr-<n>.bundle /tmp/rebase-agent-pr-<n>.bundle \
+  && git -C <operator-path> fetch /tmp/rebase-agent-pr-<n>.bundle \
+       +refs/rebase-agent/pr/<n>:refs/rebase-agent/pr/<n> \
+  && git -C <operator-path> push --force-with-lease=refs/heads/<branch>:<old-sha> \
+       origin refs/rebase-agent/pr/<n>:refs/heads/<branch>
 ```
+
+⚠️ **`<operator-path>` is the Mac's checkout, never the pod's.** `path` in `DEFAULT_REPOS`
+is `expanduser`d and resolves to `/workspace/…` under the CronJob's `HOME`; `operator_path`
+is a literal and is the one the line names. A line naming the pod's clone cannot be pasted
+anywhere.
+
+⚠️ **`&&`, not three steps.** The operator must paste one line and do nothing else; a copy
+that succeeded while the fetch failed must stop before the push.
+
+⚠️ **The fetch is forced (`+`).** The Mac's scratch ref survives between lines, so a
+re-sweep fetches a newer commit onto an older ref, which a plain refspec refuses.
+
+The transfer needs three deployment facts, all from the environment — a pod cannot infer
+which `kubectl` wrapper the operator's Mac has, and a wrong guess produces a line that
+fails only after it has been pasted:
+
+| Variable | Meaning |
+|---|---|
+| `REBASE_BUNDLE_DIR` | directory on the PVC the pod writes bundles to, e.g. `/bundles` |
+| `REBASE_KUBECTL` | the operator's wrapper, e.g. `kubectlnukeprod` |
+| `REBASE_READER_POD` | the long-lived pod that mounts the same PVC |
+
+Any of the three unset **refuses the row** before the rebase runs — it never emits a line
+that cannot work.
 
 `refs/rebase-agent/` is shared across every worktree of the repo, so the line works from the
 main checkout.

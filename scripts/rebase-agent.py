@@ -137,6 +137,19 @@ BOARD_ANSWER_MECHANISM = "ack"
 BOARD_INTERRUPT_CLASS = "approve"
 BOARD_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
+# The transfer channel. The pod writes a git bundle to a PVC, a long-lived reader pod
+# mounts that PVC, and the operator's one line copies the bundle off the reader and
+# fetches it before pushing. All three values are deployment facts, so they come from the
+# environment: a pod cannot infer which `kubectl` wrapper the operator's Mac has, and a
+# wrong guess produces a line that fails only after it has been pasted — which reads as a
+# broken rebase rather than a missing setting.
+BUNDLE_DIR_ENV = "REBASE_BUNDLE_DIR"
+KUBECTL_ENV = "REBASE_KUBECTL"
+READER_POD_ENV = "REBASE_READER_POD"
+# The bundle is written here on the operator's Mac, one name per PR so a re-sweep
+# overwrites the previous copy rather than accumulating files.
+LOCAL_BUNDLE = "/tmp/rebase-agent-pr-{number}.bundle"
+
 
 # The repo set is explicit, never "every repo". The conflict class exists only where a
 # release cut renames `## Unreleased` in a CHANGELOG that open branches also edit — a
@@ -146,7 +159,13 @@ BOARD_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 DEFAULT_REPOS = (
     {
         "repo": "bborbe/claude-supervisor",
+        # The pod's clone. `expanduser` is deliberate: HOME is /workspace in the pod, and
+        # pointing HOME at the volume is what makes the container layout match a laptop.
         "path": os.path.expanduser("~/Documents/workspaces/claude-supervisor"),
+        # The OPERATOR's checkout — never `expanduser`d, because in the pod that would
+        # resolve to /workspace and emit the pod's path again, which is the defect this
+        # whole channel exists to remove. This is the path the line is run from.
+        "operator_path": "/Users/bborbe/Documents/workspaces/claude-supervisor",
         # The auto-reviewer's park thresholds (MAX_ADDITIONS / MAX_CHANGED_FILES in
         # github-pr-watcher) are deployment env, not repo config, so they cannot be
         # read from here. These are the observed defaults and are marked unverified.
@@ -156,6 +175,7 @@ DEFAULT_REPOS = (
     {
         "repo": "bborbe/vault-cli",
         "path": os.path.expanduser("~/Documents/workspaces/vault-cli"),
+        "operator_path": "/Users/bborbe/Documents/workspaces/vault-cli",
         "max_additions": 2000,
         "max_changed_files": 40,
     },
@@ -489,19 +509,92 @@ def gate_noop(scratch):
 # ------------------------------------------------------------------------------ one PR
 
 
-def push_line(repo_path, branch, head_sha, number):
-    """The operator's one line.
+def bundle_dir():
+    return (os.environ.get(BUNDLE_DIR_ENV) or "").strip()
+
+
+def kubectl_command():
+    return (os.environ.get(KUBECTL_ENV) or "").strip()
+
+
+def reader_pod():
+    return (os.environ.get(READER_POD_ENV) or "").strip()
+
+
+def transfer_refusal():
+    """Why no transfer can be published, or None when one can.
+
+    A missing deployment fact refuses the row rather than emitting a line that cannot
+    work: the line names the operator's `kubectl` wrapper and a pod that has to exist,
+    and a line that fails after it is pasted is indistinguishable from a broken rebase.
+    """
+    missing = [
+        name
+        for name, value in (
+            (BUNDLE_DIR_ENV, bundle_dir()),
+            (KUBECTL_ENV, kubectl_command()),
+            (READER_POD_ENV, reader_pod()),
+        )
+        if not value
+    ]
+    if missing:
+        return "transfer is not configured — " + ", ".join(missing) + " unset"
+    return None
+
+
+def bundle_path(number):
+    return os.path.join(bundle_dir(), f"pr-{number}.bundle")
+
+
+def publish_bundle(repo_path, number):
+    """Write the rebased commit to the PVC as a range bundle; return its path.
+
+    A range (`origin/master..<scratch ref>`) rather than a full bundle: the operator's
+    checkout already has `origin/master`, so this carries only the commits the push
+    needs, and a full bundle of a long branch would be megabytes for nothing.
+    """
+    path = bundle_path(number)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    proc = git(
+        repo_path, "bundle", "create", path,
+        f"origin/master..{SCRATCH_REF}/pr/{number}",
+    )
+    if proc.returncode != 0:
+        raise Refusal(f"could not write the transfer bundle: {proc.stderr.strip()}")
+    return path
+
+
+def push_line(operator_path, branch, head_sha, number, bundle):
+    """The operator's one line — copy the bundle off the reader pod, fetch it, push.
 
     Every interpolated value is shell-quoted. `branch` comes from the PR, and this line
     is a shell command the operator pastes — an unquoted branch name is command
     injection regardless of where it came from.
+
+    Three commands chained with `&&`, not three steps: the operator pastes one line and
+    does nothing else, and a copy that succeeded while the fetch failed must stop the
+    push rather than leave a stale ref to push. `operator_path` is the Mac's checkout —
+    never the pod's, which is the defect the transfer channel exists to remove.
     """
+    local = shlex.quote(LOCAL_BUNDLE.format(number=number))
+    copy = (
+        f"{shlex.quote(kubectl_command())} cp "
+        f"{shlex.quote(f'{reader_pod()}:{bundle}')} {local}"
+    )
+    ref = f"{SCRATCH_REF}/pr/{number}"
+    # The `+` is load-bearing: the Mac's scratch ref survives between lines, so a
+    # re-sweep fetches a newer commit onto an older ref, which a plain refspec refuses.
+    fetch = (
+        f"git -C {shlex.quote(operator_path)} fetch {local} "
+        f"{shlex.quote(f'+{ref}:{ref}')}"
+    )
     lease = shlex.quote(f"refs/heads/{branch}:{head_sha}")
-    refspec = shlex.quote(f"{SCRATCH_REF}/pr/{number}:refs/heads/{branch}")
-    return (
-        f"git -C {shlex.quote(repo_path)} push "
+    refspec = shlex.quote(f"{ref}:refs/heads/{branch}")
+    push = (
+        f"git -C {shlex.quote(operator_path)} push "
         f"--force-with-lease={lease} origin {refspec}"
     )
+    return f"{copy} && {fetch} && {push}"
 
 
 # ---------------------------------------------------------------------------- the board
@@ -669,6 +762,9 @@ def process_pr(cfg, pr, keep_scratch=False):
         "head_sha": None,
         "new_sha": None,
         "scratch": None,
+        # `None` on every row that is not a PUSH: the key must be present so a reader
+        # can tell "no transfer" from "a build that never learned the field".
+        "transfer": None,
         "board_item_id": None,
         "board_error": None,
     }
@@ -697,6 +793,14 @@ def process_pr(cfg, pr, keep_scratch=False):
     if pin:
         row["verdict"] = "REFUSED"
         row["reason"] = f"prod-pin PR — the operator's approval, not a rebase candidate ({pin})"
+        return row
+
+    # Before the rebase, not after: a deployment with no transfer channel would otherwise
+    # spend a worktree and a rebase to discover it cannot hand the result over.
+    unconfigured = transfer_refusal()
+    if unconfigured:
+        row["verdict"] = "REFUSED"
+        row["reason"] = unconfigured
         return row
 
     scratch = None
@@ -736,7 +840,11 @@ def process_pr(cfg, pr, keep_scratch=False):
         git(repo_path, "update-ref", f"{SCRATCH_REF}/pr/{number}", new_sha, check=True)
 
         row["verdict"] = "PUSH"
-        row["push_line"] = push_line(repo_path, branch, head_sha, number)
+        bundle = publish_bundle(repo_path, number)
+        row["transfer"] = {"kind": "pvc-bundle", "target": f"{reader_pod()}:{bundle}"}
+        row["push_line"] = push_line(
+            cfg["operator_path"], branch, head_sha, number, bundle
+        )
     except Refusal as refusal:
         row["verdict"] = "REFUSED"
         row["reason"] = str(refusal)

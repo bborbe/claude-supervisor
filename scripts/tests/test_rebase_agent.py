@@ -176,22 +176,90 @@ class SingleUnreleasedGateTest(unittest.TestCase):
 
 
 class PushLineTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {
+            ra.BUNDLE_DIR_ENV: "/bundles",
+            ra.KUBECTL_ENV: "kubectlprod",
+            ra.READER_POD_ENV: "rebase-agent-bundles",
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_a_hostile_branch_name_stays_one_shell_word(self):
         """The line is pasted into a shell; a branch name must never split or execute."""
-        line = ra.push_line("/tmp/r", "feat/x; rm -rf ~", "abc123", 7)
+        line = ra.push_line(
+            "/tmp/r", "feat/x; rm -rf ~", "abc123", 7, "/bundles/pr-7.bundle"
+        )
         self.assertEqual(shlex.split(line), [
-            "git", "-C", "/tmp/r", "push",
+            "kubectlprod", "cp", "rebase-agent-bundles:/bundles/pr-7.bundle",
+            "/tmp/rebase-agent-pr-7.bundle",
+            "&&", "git", "-C", "/tmp/r", "fetch", "/tmp/rebase-agent-pr-7.bundle",
+            "+refs/rebase-agent/pr/7:refs/rebase-agent/pr/7",
+            "&&", "git", "-C", "/tmp/r", "push",
             "--force-with-lease=refs/heads/feat/x; rm -rf ~:abc123",
             "origin", "refs/rebase-agent/pr/7:refs/heads/feat/x; rm -rf ~",
         ])
 
     def test_an_ordinary_branch_name_reads_normally(self):
-        line = ra.push_line("/tmp/r", "feat/plain", "abc123", 7)
+        line = ra.push_line(
+            "/tmp/r", "feat/plain", "abc123", 7, "/bundles/pr-7.bundle"
+        )
         self.assertEqual(
             line,
-            "git -C /tmp/r push --force-with-lease=refs/heads/feat/plain:abc123 "
+            "kubectlprod cp rebase-agent-bundles:/bundles/pr-7.bundle "
+            "/tmp/rebase-agent-pr-7.bundle "
+            "&& git -C /tmp/r fetch /tmp/rebase-agent-pr-7.bundle "
+            "+refs/rebase-agent/pr/7:refs/rebase-agent/pr/7 "
+            "&& git -C /tmp/r push --force-with-lease=refs/heads/feat/plain:abc123 "
             "origin refs/rebase-agent/pr/7:refs/heads/feat/plain",
         )
+
+    def test_the_copy_fetch_and_push_run_in_that_order(self):
+        """A copy that succeeded while the fetch failed must not reach the push."""
+        line = ra.push_line(
+            "/tmp/r", "feat/plain", "abc123", 7, "/bundles/pr-7.bundle"
+        )
+        self.assertLess(line.index(" cp "), line.index(" fetch "))
+        self.assertLess(line.index(" fetch "), line.index(" push "))
+
+    def test_the_line_works_in_the_operator_checkout_not_the_pods(self):
+        """The pod path is the defect; a line naming it is unrunnable on the Mac."""
+        line = ra.push_line(
+            "/Users/b/Documents/workspaces/r", "feat/plain", "abc123", 7,
+            "/bundles/pr-7.bundle",
+        )
+        self.assertIn("-C /Users/b/Documents/workspaces/r", line)
+        self.assertNotIn("/workspace/Documents", line)
+
+
+class TransferTest(unittest.TestCase):
+    def setUp(self):
+        self.bundles = tempfile.mkdtemp(prefix="rebase-bundles-")
+        self.addCleanup(shutil.rmtree, self.bundles, True)
+        patcher = mock.patch.dict(os.environ, {
+            ra.BUNDLE_DIR_ENV: self.bundles,
+            ra.KUBECTL_ENV: "kubectlprod",
+            ra.READER_POD_ENV: "rebase-agent-bundles",
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_missing_setting_refuses_naming_the_variable(self):
+        """A line that cannot run is refused at the row, never emitted for a paste."""
+        self.assertIsNone(ra.transfer_refusal())
+        with mock.patch.dict(os.environ, {ra.KUBECTL_ENV: ""}):
+            self.assertIn(ra.KUBECTL_ENV, ra.transfer_refusal())
+
+    def test_the_bundle_carries_the_range_and_verifies(self):
+        repo = make_repo()
+        self.addCleanup(shutil.rmtree, repo, True)
+        sha = add_branch_commit(repo, "branch commit", {"code.py": "value = 2\n"})
+        git(repo, "update-ref", f"{ra.SCRATCH_REF}/pr/9", sha)
+        path = ra.publish_bundle(repo, 9)
+        self.assertTrue(os.path.isfile(path))
+        # Raises AssertionError when the bundle is unreadable or its prerequisites are
+        # missing — the failure a Mac would hit only after pasting the line.
+        git(repo, "bundle", "verify", path)
 
 
 class ChangelogDeltaTest(unittest.TestCase):
