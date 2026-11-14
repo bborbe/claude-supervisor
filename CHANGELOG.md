@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.313.2
 
 - refactor: **the fleet round no longer opens flagged rows — the wrapper's tick does.** Row 5c, `commands/steps/flagged-open.md` and `agents/fleet-flagged-open-actor.md` are deleted, and every cross-reference is reworded in the same change (`fleet-drive.md`'s router and carve-out, `read-guides.md`, `open.md`, `fleet-round-tail.md`, `keepalive-topicless-goals.md`, `keepalive.md`, `output-shape.md` items 13 and 14, `rules.md`, `fleet-sweep-reader.md`), together with the two checkers that asserted the leg's presence. The reopen is `claude-wrapper`'s model-free `flagged-tick`: measured 2026-11-14 over 24 h, 83 close→reopen pairs, median 36.4 min, every opened row live afterwards. Both probes return 0 lines: `grep -rn "flagged-open" commands agents` and `grep -n "5c" commands/fleet-drive.md`.
 
