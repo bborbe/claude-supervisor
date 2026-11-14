@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.312.0
 
 - chore: **retire the fleet-pusher launchd agents.** The 900 s wake tick and its 300 s watchdog now run as interval jobs inside the `claude-wrapper` daemon, so `scripts/fleet-pusher-tick.sh`, `scripts/fleet-pusher-watch.sh`, their two plists and `scripts/tests/test_fleet_pusher.py` are removed. The behaviour is ported with specs in `bborbe/claude-wrapper` (the pid → tty → pane join, the 13-verdict screen guard, the tick and the watchdog); `docs/fleet-pusher.md` is rewritten for the in-process jobs and carries the rollback. Change set: `scripts/fleet-pusher-tick.sh`, `scripts/fleet-pusher-watch.sh`, `launchd/com.bborbe.fleet-pusher.plist`, `launchd/com.bborbe.fleet-pusher-watch.plist`, `scripts/tests/test_fleet_pusher.py`, `docs/fleet-pusher.md`, `README.md`, `CLAUDE.md`, `CHANGELOG.md`.
 
