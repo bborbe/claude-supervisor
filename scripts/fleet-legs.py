@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""The acting legs' counts, written into the round's digest — one home for their shape.
+"""The acting leg's counts, written into the round's digest — one home for their shape.
 
-Rows 5b (keep alive) and 5c (flagged open) restart a crashed manager and open a page the
-operator flagged, and both print a count. That count reached the round's **tool output** and
-nothing else: `agents/fleet-sweep-reader.md` writes the digest at router row 2, before either
-leg runs, and `commands/steps/output-shape.md` had no slot for them. So the round restarted a
-manager, and the artifact that survives the round said nothing about it.
+Row 5b (keep alive) restarts a crashed manager and prints a count. That count reached the
+round's **tool output** and nothing else: `agents/fleet-sweep-reader.md` writes the digest at
+router row 2, before the leg runs, and `commands/steps/output-shape.md` had no slot for it. So
+the round restarted a manager, and the artifact that survives the round said nothing about it.
 
 Measured 2026-11-06: `~/.claude/state/fleet-handback/2026-11-06T19-10Z.digest` is a real
 69-line rendered round over 24 sessions, and `grep -c 'unactioned:'` over it returns **0** —
-while `keepalive.md` and `flagged-open.md` both instruct the round to print those lines.
+while `keepalive.md` instructs the round to print those lines.
 
 The fix is a persisted line, not a louder chat line: the digest carries the shape from the
-moment the sweep writes it, and each leg replaces its own line once it has a reading.
+moment the sweep writes it, and the leg replaces its own line once it has a reading.
 
 Verbs, all against one digest path:
 
@@ -25,23 +24,12 @@ Verbs, all against one digest path:
 
   --leg <key|leg> --not-run <reason>
         Replace the leg's lines with one `not run — <reason> · <keys>` line. This is what a
-        round whose 5b/5c did not execute renders, and it is the whole point of the file: a
+        round whose 5b did not execute renders, and it is the whole point of the file: a
         suppressed leg and a leg that ran and found nothing must never print the same thing.
 
-  --per-kind "tasks=<o>/<u>/<e> goals=… topics=…" --invoked|--not-invoked
-        Replace the flagged-open reading with
-        `flagged-open: tasks=<o>/<u>/<e> goals=<o>/<u>/<e> topics=<o>/<u>/<e> <marker>`.
-        One `unactioned: <n>` cannot say WHICH kind the operator's flag reached — a round
-        that opened three topics and a round that opened nothing printed the same line — so
-        each kind carries `opened/declined/eligible` and `opened + declined == eligible` is
-        refused at the writer AND the reader when it does not hold. It supersedes the single
-        count rather than joining it: both cover `operator-flagged`, and two lines for one
-        key is the duplicate `--check` refuses.
-
   --check
-        Exit 1 unless every one of the four keys is covered exactly once, by a count line, a
-        per-kind line or a not-run line that names it. Exit 2 when the digest cannot be read
-        or written.
+        Exit 1 unless every one of the three keys is covered exactly once, by a count line or
+        a not-run line that names it. Exit 2 when the digest cannot be read or written.
 
   --status
         Print the round's ONE-LINE verdict — `legs: OK …`, `legs: INCOMPLETE — <reason>` or
@@ -54,7 +42,7 @@ Verbs, all against one digest path:
 pins, and it is why `--count` creating the section is a convenience for a hand-run, never the
 round's path: a round that creates its own section has already lost the not-run reading.
 
-⚠️ **The four keys and their legs live here, once.** `commands/steps/output-shape.md` item 14
+⚠️ **The three keys and their leg live here, once.** `commands/steps/output-shape.md` item 14
 renders the lines and `agents/fleet-sweep-reader.md` seeds them; neither restates the mapping.
 
 Exit codes: 0 ok, 1 the digest is missing a line (`--check`), 2 the digest could not be read
@@ -67,22 +55,17 @@ import sys
 import tempfile
 
 #: Render order. A list, not a set: the digest's line order is part of its shape.
-KEYS = ["lapsed-managers", "topicless-goal-managers", "dead-workers", "operator-flagged"]
+KEYS = ["lapsed-managers", "topicless-goal-managers", "dead-workers"]
 LEG_OF = {
     "lapsed-managers": "keep-alive",
     "topicless-goal-managers": "keep-alive",
     "dead-workers": "keep-alive",
-    "operator-flagged": "flagged-open",
 }
 KEYS_OF = {
     "keep-alive": ["lapsed-managers", "topicless-goal-managers", "dead-workers"],
-    "flagged-open": ["operator-flagged"],
 }
 FLOOR_KEY = "dead-workers"
 FLOOR_SUFFIX = " (lower bound, scan incomplete)"
-#: The flagged-open count. Its number means two different things — rows left by a batch that
-#: ran, and rows waiting because it never did — so the line carries which one.
-BATCH_KEY = "operator-flagged"
 SECTION = "LEGS"
 NOT_RUN = "not run — "
 #: The sweep reader's seed reason. `--check` treats it as NOT RECORDED: the shape exists,
@@ -93,22 +76,9 @@ SEED_REASON = "no reading recorded this round"
 
 COUNT_RE = re.compile(
     r"^(?P<leg>[\w-]+): unactioned: (?P<n>\d+) (?P<key>[\w-]+)"
-    r"(?P<floor> \(lower bound, scan incomplete\))?"
-    r"(?P<batch> \((?:batch invoked|batch not invoked)\))?$"
+    r"(?P<floor> \(lower bound, scan incomplete\))?$"
 )
 NOTRUN_RE = re.compile(r"^(?P<leg>[\w-]+): not run — (?P<reason>.+?)(?: · (?P<keys>.+))?$")
-
-#: The per-kind reading — the shape that answers *which* of the three kinds the flag reached.
-#: A single `unactioned: <n>` cannot: a round that opened three topics and a round that opened
-#: nothing print the same line. Each kind carries `opened/declined/eligible`, so
-#: `opened + declined == eligible` is checkable per kind instead of asserted once for all three.
-PER_KIND_LEG = "flagged-open"
-PER_KIND_KEYS = ("tasks", "goals", "topics")
-PER_KIND_RE = re.compile(
-    r"^(?P<leg>[\w-]+): tasks=(?P<tasks>\d+/\d+/\d+) goals=(?P<goals>\d+/\d+/\d+)"
-    r" topics=(?P<topics>\d+/\d+/\d+)"
-    r"(?P<batch> \((?:batch invoked|batch not invoked)\))?$"
-)
 
 EXIT_INCOMPLETE = 1
 EXIT_FAILED = 2
@@ -138,100 +108,26 @@ def split_section(lines):
     return list(lines), None, []
 
 
-#: One `opened/declined/eligible` triple. The WRITER validates against this same regex the
-#: READER uses, never `int()`: `int()` also accepts `+1`, `01` and `1_0`, so a writer that
-#: trusted it would emit a line the reader's `\d+/\d+/\d+` rejects — a write that reports
-#: success and leaves a digest `--check` then refuses.
-TRIPLE_RE = re.compile(r"^\d+/\d+/\d+$")
-
-
-def per_kind_adds_up(triple):
-    """Is `<opened>/<declined>/<eligible>` a well-formed, arithmetically consistent reading?
-
-    `opened + declined == eligible` is the whole point of carrying three numbers instead of
-    one, so it is refused at the writer AND at the reader rather than printed and trusted.
-    ⚠️ **This says the numbers agree, not that they are independently sourced** — for `tasks`
-    `<eligible>` IS `<opened> + <declined>` by construction, and the guard there is a
-    consistency check; the independent reconciliation is the goals/topics one, where all
-    three come from the selector's own verdict lines plus the invocations. See
-    `agents/fleet-flagged-open-actor.md` § 4 for which kind is which.
-    """
-    if not TRIPLE_RE.match(triple):
-        return False
-    opened, declined, eligible = (int(p) for p in triple.split("/"))
-    return opened + declined == eligible
-
-
-def parse_per_kind(spec):
-    """-> tuple of three `o/u/e` triples, or None when `spec` is not a per-kind reading.
-
-    The argument is order-bearing on purpose: `tasks=… goals=… topics=…` in that order, each
-    appearing exactly once. A caller that transposes two kinds would otherwise write a line
-    whose labels are a lie, and nothing downstream could tell.
-    """
-    if spec is None:
-        return None
-    parts = spec.split()
-    if len(parts) != len(PER_KIND_KEYS):
-        return None
-    out = []
-    for part, kind in zip(parts, PER_KIND_KEYS):
-        head, sep, triple = part.partition("=")
-        if head != kind or not sep or not per_kind_adds_up(triple):
-            return None
-        out.append(triple)
-    return tuple(out)
-
-
 def parse(body):
     """-> (entries, errors). An entry is (leg, kind, payload, keys).
 
-    `kind` is `count` (payload = (n, floor, batch)), `perkind` (payload = (triples, batch))
-    or `notrun` (payload = reason). `batch` is the ` (batch invoked)` / ` (batch not invoked)`
-    marker, or `` for a key that has no batch to report. A line that matches none of the three
-    is an error, never silently dropped: an unparseable line is a count the round wrote and
-    nobody can read.
+    `kind` is `count` (payload = (n, floor)) or `notrun` (payload = reason). A line that
+    matches neither is an error, never silently dropped: an unparseable line is a count the
+    round wrote and nobody can read.
     """
     entries, errors = [], []
     for line in body:
         text = line.strip()
         if not text:
             continue
-        m = PER_KIND_RE.match(text)
-        if m:
-            batch = m.group("batch") or ""
-            # The per-kind shape belongs to the leg whose single count it replaces, and it
-            # carries the same batch marker that count is required to carry — a per-kind line
-            # on another leg, or without the marker, is a line nobody wrote on purpose.
-            if m.group("leg") != PER_KIND_LEG or not batch:
-                errors.append(text)
-                continue
-            triples = tuple(m.group(k) for k in PER_KIND_KEYS)
-            if any(not per_kind_adds_up(t) for t in triples):
-                errors.append(text)
-                continue
-            entries.append(
-                (m.group("leg"), "perkind", (triples, batch), [BATCH_KEY])
-            )
-            continue
         m = COUNT_RE.match(text)
         if m:
-            key, batch = m.group("key"), m.group("batch") or ""
-            # The same invariant the writer enforces, read back: a bare operator-flagged count
-            # is ambiguous, and a marker on a key with no batch is a line nobody wrote on purpose.
-            # A digest carrying either is not a complete reading, which is what --check reports.
-            if key == BATCH_KEY and not batch:
-                errors.append(text)
-                continue
-            if key != BATCH_KEY and batch:
-                errors.append(text)
-                continue
             entries.append(
                 (
                     m.group("leg"),
                     "count",
-                    (int(m.group("n")), bool(m.group("floor")), batch),
-                    [key],
+                    (int(m.group("n")), bool(m.group("floor"))),
+                    [m.group("key")],
                 )
             )
             continue
@@ -259,15 +155,9 @@ def render(entries):
     out = []
     for leg, kind, payload, keys in sorted(entries, key=order_key):
         if kind == "count":
-            n, floor, batch = payload
+            n, floor = payload
             suffix = FLOOR_SUFFIX if floor else ""
-            out.append("  %s: unactioned: %d %s%s%s" % (leg, n, keys[0], suffix, batch))
-        elif kind == "perkind":
-            triples, batch = payload
-            readings = " ".join(
-                "%s=%s" % (k, t) for k, t in zip(PER_KIND_KEYS, triples)
-            )
-            out.append("  %s: %s%s" % (leg, readings, batch))
+            out.append("  %s: unactioned: %d %s%s" % (leg, n, keys[0], suffix))
         else:
             # Print the key list only when it is a STRICT SUBSET of the leg's keys: a line
             # covering the whole leg is unambiguous from the leg name alone, and a partial
@@ -278,30 +168,14 @@ def render(entries):
     return out
 
 
-def set_per_kind(entries, triples, batch):
-    """Replace the flagged-open key's reading with the per-kind line.
-
-    It supersedes the single count rather than joining it: both cover `operator-flagged`, and
-    two lines for one key is the duplicate `--check` refuses. A round that can say `tasks=…`
-    has no use for the total it decomposes into.
-    """
-    entries = [
-        (leg, kind, payload, [k for k in keys if k != BATCH_KEY])
-        for leg, kind, payload, keys in entries
-    ]
-    entries = [e for e in entries if e[3]]
-    entries.append((PER_KIND_LEG, "perkind", (triples, batch), [BATCH_KEY]))
-    return entries
-
-
-def set_count(entries, key, n, floor, batch=""):
+def set_count(entries, key, n, floor):
     """Replace `key`'s reading with a count line, dropping it from any not-run line."""
     entries = [
         (leg, kind, payload, [k for k in keys if k != key])
         for leg, kind, payload, keys in entries
     ]
     entries = [e for e in entries if e[3]]
-    entries.append((LEG_OF[key], "count", (n, floor, batch), [key]))
+    entries.append((LEG_OF[key], "count", (n, floor), [key]))
     return entries
 
 
@@ -437,11 +311,11 @@ def write_digest(digest, before, body, after, new_body):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Write the acting legs' counts into the round's digest."
+        description="Write the acting leg's counts into the round's digest."
     )
     parser.add_argument("--digest", required=True, help="this round's .digest path")
     parser.add_argument(
-        "--check", action="store_true", help="verify the four lines are present"
+        "--check", action="store_true", help="verify the three lines are present"
     )
     parser.add_argument(
         "--status",
@@ -459,25 +333,6 @@ def main(argv=None):
         help="assert the dead-worker scan completed, so the count is not a floor",
     )
     parser.add_argument("--not-run", dest="not_run", help="why the leg did not execute")
-    parser.add_argument(
-        "--per-kind",
-        dest="per_kind",
-        help=(
-            "the flagged-open leg's reading, per kind: "
-            '"tasks=<opened>/<declined>/<eligible> goals=… topics=…"'
-        ),
-    )
-    parser.add_argument(
-        "--invoked",
-        action="store_true",
-        help="the flagged-open leg ran its batch; the count is what the batch left",
-    )
-    parser.add_argument(
-        "--not-invoked",
-        dest="not_invoked",
-        action="store_true",
-        help="the flagged-open leg only counted the debt; the batch never ran",
-    )
     args = parser.parse_args(argv)
 
     if (
@@ -485,41 +340,25 @@ def main(argv=None):
         and not args.status
         and args.count is None
         and args.not_run is None
-        and args.per_kind is None
     ):
-        parser.error(
-            "one of --check, --status, --count, --per-kind or --not-run is required"
-        )
+        parser.error("one of --check, --status, --count or --not-run is required")
     if args.status and (
         args.check
         or args.leg
         or args.count is not None
         or args.not_run is not None
-        or args.per_kind is not None
     ):
-        parser.error(
-            "--status takes no --check, --leg, --count, --per-kind or --not-run"
-        )
+        parser.error("--status takes no --check, --leg, --count or --not-run")
     if args.count is not None and args.not_run is not None:
         parser.error("--count and --not-run are mutually exclusive")
-    if args.per_kind is not None and (
-        args.count is not None or args.not_run is not None or args.leg
-    ):
-        parser.error(
-            "--per-kind is the whole flagged-open reading — it takes no --leg, --count "
-            "or --not-run"
-        )
-    if args.invoked and args.not_invoked:
-        parser.error("--invoked and --not-invoked are mutually exclusive")
     if args.floor and args.exact:
         parser.error("--floor and --exact are mutually exclusive")
     if args.check and (
         args.leg
         or args.count is not None
         or args.not_run is not None
-        or args.per_kind is not None
     ):
-        parser.error("--check takes no --leg, --count, --per-kind or --not-run")
+        parser.error("--check takes no --leg, --count or --not-run")
     if args.count is not None and args.count < 0:
         parser.error("--count cannot be negative — a negative reading is not a count")
     if args.not_run is not None:
@@ -555,7 +394,7 @@ def main(argv=None):
         if body is None:
             print(
                 "fleet-legs: %s carries no %s section — the round rendered without the "
-                "acting legs' counts" % (args.digest, SECTION),
+                "acting leg's counts" % (args.digest, SECTION),
                 file=sys.stderr,
             )
             return EXIT_INCOMPLETE
@@ -567,38 +406,6 @@ def main(argv=None):
             return EXIT_INCOMPLETE
         print("legs ok: %s carries a recorded reading for all %d keys" % (args.digest, len(KEYS)))
         return 0
-
-    if args.per_kind is not None:
-        # Resolved before `--leg`, which this verb does not take: the per-kind line belongs to
-        # exactly one leg, so asking the caller to name it would be a second place to get it
-        # wrong. These two refusals sit here, not in argparse, so they return EXIT_FAILED like
-        # the sibling `--count` guards rather than SystemExit — one guard, one shape.
-        if not (args.invoked or args.not_invoked):
-            # Without the marker a reader cannot tell a leg that ran and found nothing from
-            # one that never invoked the batch — the ambiguity the count shape already solved.
-            print(
-                "fleet-legs: --per-kind needs --invoked or --not-invoked — without the "
-                "marker an unactioned count reads as a batch that ran and found nothing",
-                file=sys.stderr,
-            )
-            return EXIT_FAILED
-        triples = parse_per_kind(args.per_kind)
-        if triples is None:
-            print(
-                "fleet-legs: --per-kind must read exactly "
-                '"tasks=<opened>/<declined>/<eligible> goals=… topics=…", each kind once, '
-                "in that order, with opened + declined == eligible",
-                file=sys.stderr,
-            )
-            return EXIT_FAILED
-        entries, errors = parse(body or [])
-        if errors:
-            for e in errors:
-                print("fleet-legs: unparseable LEGS line: %r" % e, file=sys.stderr)
-            return EXIT_FAILED
-        batch = " (batch invoked)" if args.invoked else " (batch not invoked)"
-        new_body = render(set_per_kind(entries, triples, batch))
-        return write_digest(args.digest, before, body, after, new_body)
 
     resolved = resolve(args.leg or "")
     if resolved is None:
@@ -643,27 +450,7 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return EXIT_FAILED
-        if key == BATCH_KEY:
-            # One line carried two meanings: "the leg ran and left N" and "the leg never ran,
-            # N rows are waiting". A reader — human or model — cannot tell them apart, and the
-            # second is the failure this leg exists to remove.
-            if not (args.invoked or args.not_invoked):
-                print(
-                    "fleet-legs: a %r count must say whether the batch was invoked — "
-                    "--invoked (the leg ran it) or --not-invoked (it only counted the debt)"
-                    % key,
-                    file=sys.stderr,
-                )
-                return EXIT_FAILED
-        elif args.invoked or args.not_invoked:
-            print(
-                "fleet-legs: --invoked / --not-invoked describe the %r batch only, not %r"
-                % (BATCH_KEY, key),
-                file=sys.stderr,
-            )
-            return EXIT_FAILED
-        batch = " (batch invoked)" if args.invoked else (" (batch not invoked)" if args.not_invoked else "")
-        new_body = render(set_count(entries, key, args.count, args.floor, batch))
+        new_body = render(set_count(entries, key, args.count, args.floor))
     else:
         new_body = render(set_not_run(entries, leg, keys, args.not_run))
 
