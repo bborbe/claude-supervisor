@@ -4,7 +4,7 @@ Two layers keep the fleet moving, and they cost very different amounts:
 
 | Layer | What it does | Cost | When |
 |---|---|---|---|
-| **Fleet Pusher** (`com.bborbe.fleet-pusher`) | `pane-wake.py` in send mode over every live session — types one line into an idle composer | **no model turn** | every 15 min, launchd |
+| **Fleet Pusher** (inside `claude-wrapper`) | reads every live session, joins pid → tty → pane, runs the screen guard, and types one line into an idle composer | **no model turn** | every 15 min, in-process |
 | **Fleet triage** (`/supervisor:fleet-triage`) | one pass that classifies, closes, drives and cards | one model turn | on demand |
 
 The pusher is the layer that reaches an idle session without the operator. It is **not** a triage
@@ -14,138 +14,132 @@ wakes panes has done its whole job.
 ⚠️ **Never put `fleet-triage` on the tick.** Each run is a model turn, and a session that runs it
 repeatedly fills its own context until it can no longer do the job.
 
-## Install
+## Where it runs
 
-```bash
-cp launchd/com.bborbe.fleet-pusher.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-pusher.plist
+The tick and its watchdog are **interval jobs inside the `claude-wrapper` daemon**, not launchd
+agents. The old `com.bborbe.fleet-pusher` / `com.bborbe.fleet-pusher-watch` plists and their bash
+scripts are retired; the work they did is now `pkg/fleet_pusher.go` and
+`pkg/fleet_pusher_watch.go` in `bborbe/claude-wrapper`.
 
-cp launchd/com.bborbe.fleet-pusher-watch.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-pusher-watch.plist
+The move exists because the service already held three of the four pieces — the live-session
+registry, the pane writer, and the attention client. The fourth, the pid → tty → pane join, was
+the only thing that had to be written (`pkg/pane_join.go`).
+
+Flags on the daemon:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-fleet-pusher-interval` | `15m` | how often to wake; `0` disables the tick |
+| `-fleet-pusher-heartbeat` | `~/.claude/state/fleet-pusher/heartbeat` | the file the tick stamps and the watchdog reads |
+| `-fleet-pusher-watch-interval` | `5m` | how often the heartbeat is checked; `0` disables the watchdog |
+| `-fleet-pusher-watch-max-age` | `30m` | heartbeat age past which the cadence is declared dead |
+| `-fleet-pusher-once` | off | run one tick and exit, for a scoped probe; never binds the listener, never writes the heartbeat |
+| `-send` | off | type into idle sessions in a `-fleet-pusher-once` probe; the daemon's own tick always sends |
+| `-sessions` | empty | comma-separated ids to scope a `-fleet-pusher-once` probe to |
+
+## What one tick does
+
+1. **Live sessions** from the wrapper's own registry (`pkg/session_registry.go`), pid-checked.
+2. **Join** pid → tty (`ps`) → pane (`wezterm cli list`) — `pkg/pane_join.go`.
+3. **Skip classes**, in order: `skip:self`, `skip:fleet-manager`, `skip:pusher`, `skip:not-live`,
+   `skip:no-pane`, `skip:open-card`.
+4. **Guard** the screen (`pkg/pane_guard.go`, ported from `pane-wake-guard.py`): 13 screen verdicts
+   plus the fail-closed `skip:state-unreadable`. Panes are read with `--escapes`, because the dim
+   next-prompt suggestion is only distinguishable from typed text by its SGR attributes.
+5. **Send** through the wrapper's own `SendWhenReady` (`pkg/tab.go`), with the wake path's own
+   readiness and confirmation rules: `PaneIsReady` accepts a dim placeholder, and `WakeConfirmed`
+   takes a spinner over an empty composer as proof — the same signal `pane-wake.py` used.
+
+A wake is never an authorisation; the typed line says so.
+
+## The log lines
+
+Both jobs emit their line **unconditionally, zeros included** — the retired bash script printed its
+counter only when non-empty, so a healthy idle tick and a dead one looked identical.
+
+```
+job=fleet-pusher action=tick sessions=<n> delivered=<n> skipped=<n>
+job=fleet-pusher action=deliver session=<id> outcome=<delivered|dry-run|skip:*|failed:*>
+job=fleet-pusher-watch action=ok age=<n>s
+job=fleet-pusher-watch action=grace age=<n>s
+job=fleet-pusher-watch action=post key=<key> card=<id>
+job=fleet-pusher-watch action=skip key=<key> card=<id>
 ```
 
-Reload after an upgrade — the plists point at the **marketplace clone**, so the scripts follow
-`make update` without a reload; the reload is only needed if the plist itself changed:
+A fleet-wide read failure appends `error=<reason>` to the tick line rather than suppressing it.
 
-```bash
-launchctl kickstart -k gui/$UID/com.bborbe.fleet-pusher
-```
-
-Remove:
-
-```bash
-launchctl bootout gui/$UID/com.bborbe.fleet-pusher
-launchctl bootout gui/$UID/com.bborbe.fleet-pusher-watch
-```
-
-## Why two agents
+## Why a watchdog
 
 The tick **cannot report its own death**: if the tick is the thing that stopped, nothing inside it
-runs. `com.bborbe.fleet-pusher-watch` (`StartInterval` 300) reads
-`~/.claude/state/fleet-pusher/heartbeat` and, past 1800 s (2× the tick interval, so one slow tick
-raises nothing), posts one `ack` card. It is a **condition, not a question**, deduped on a fixed
-key so a long outage yields one card rather than one per check.
+runs. The watchdog runs in the same daemon, reads the heartbeat, and past the max age posts one
+`ack` card. It is a **condition, not a question**, deduped on a fixed key so a long outage yields
+one card rather than one per check.
 
 Three dedup keys, one per failure mode:
 
 | Key | Means |
 |---|---|
-| `fleet-pusher-heartbeat-missing` | the heartbeat file does not exist — the cadence never ran on this machine |
+| `fleet-pusher-heartbeat-missing` | the heartbeat file does not exist — the cadence never ran |
 | `fleet-pusher-heartbeat-unparseable` | the file holds something that is not an ISO-8601 UTC stamp |
-| `fleet-pusher-heartbeat-stale` | the stamp is older than 1800 s — the cadence has stopped |
+| `fleet-pusher-heartbeat-stale` | the stamp is older than the max age — the cadence has stopped |
 
-## Two things the watchdog needs to actually work
+Two behaviours keep it honest:
 
-Both were found in review, and either one alone makes the watchdog decorative.
+- **The first cycle waits one interval.** The tick writes its first heartbeat on its own first tick;
+  a watchdog that ran first after a restart with a long downtime would post a false `stale` card.
+- **A boot younger than the max age is a startup grace**, not a dead cadence. The machine's boot
+  time is read from `sysctl kern.boottime` and injected, so the branch is testable.
 
-**`--producer-id` is mandatory.** `attention-ask.py` defaults the producer to
-`$CLAUDE_CODE_SESSION_ID`, and launchd provides no such variable, so a post without the flag is
-**refused** — the watchdog would detect a dead cadence and report it to nobody. It passes a fixed
-slug, `--producer-id fleet-pusher-watch`, which also makes every card carry the same `owner:`
-liveness ref (never pruned).
+The watchdog still detects a cadence that *stopped*, not one that runs and fails. A
+running-and-failing tick shows up as `error=` on the tick line and as `failed:*` outcomes.
 
-**A boot is not a dead cadence.** Right after a reboot the tick has had no chance to run, so an
-absent or ageing heartbeat is expected. The watchdog stays quiet while the machine has been up for
-less than 1800 s. Residual, stated rather than hidden: a long **sleep** is not covered by boot
-time — launchd runs the missed tick promptly on wake, but a watchdog pass landing first can still
-post one card. That direction is deliberate: one false card is cheaper than a silent dead cadence.
+## Things that look healthy and are not
 
-## Five things that look healthy and are not
+1. **A fresh heartbeat is not proof of a delivery.** The tick writes it *before* any work, so a tick
+   with nothing to do and a dead tick produce the same stamp. Read `delivered=N`.
+2. **`skip:*` is the normal outcome on a healthy fleet.** Most sessions are headless
+   (`skip:no-pane`) or resting on a machine wait (`skip:machine-wait`). A tick with
+   `delivered=0 skipped=40` has done its whole job.
+3. **A watchdog that cries wolf gets ignored.** The original parsed the stamp with BSD `date`, whose
+   `%Z` does not accept a literal trailing `Z`, and posted false cards for an eight-minute-old
+   heartbeat. The port parses with Go's `time.Parse` on the exact layout.
+4. **A failed liveness read is not an empty fleet.** The registry read is an error, and the tick
+   line carries `error=registry: …` rather than `sessions=0`. Collapsing the two is the
+   silent-nothing-woke failure this layer exists to remove.
+5. **The dim composer is the wake target, not a refusal.** A long-idle pane always shows Claude
+   Code's dim next-prompt suggestion; a guard that refused it would starve the wake layer of exactly
+   the sessions it exists for. This is why panes are read with `--escapes` and why the wake path's
+   confirmation is escape-safe.
 
-Every one of these was measured on this machine. Items 1, 2, 4 and 5 are each pinned by a named
-test in `scripts/tests/test_fleet_pusher.py`; item 3 is not a defect a test can catch — it is a
-rule the tick enforces at runtime.
+## Rollback
 
-1. **`launchctl list` showing exit `0` does not mean the cadence works.** Measured 2026-11-12:
-   with `wezterm` missing from the launchd PATH, every tick exited **0** and woke nothing for ~35
-   minutes. `pane-wake.py` shells out to `wezterm cli list`, which ships at
-   `/Applications/WezTerm.app/Contents/MacOS/wezterm` — a path no system directory contains. The
-   plist appends that directory **last**, and the tick treats a pane-wake `{"error": …}` line as a
-   broken **environment** (exit 1, `TERMINAL:`) rather than one more skipped session. A green
-   agent that wakes nothing is worse than a red one.
+If the in-process jobs must be retired before the fix is trusted:
 
-2. **A fresh heartbeat is not proof of a delivery.** The tick writes it *before* any work, and
-   exits `0` when `session-liveness.py` returns no sessions. A dead cadence and a cadence with
-   nothing to do produce the same heartbeat. Read the log's `delivered=N` line instead.
+```bash
+git revert <the deletion commit>          # in bborbe/claude-supervisor
+cd ~/.claude && make update               # refreshes the marketplace clone
+cd ~/.claude/plugins/marketplaces/claude-supervisor
+cp launchd/com.bborbe.fleet-pusher.plist ~/Library/LaunchAgents/
+cp launchd/com.bborbe.fleet-pusher-watch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-pusher.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-pusher-watch.plist
+```
 
-3. **A non-zero exit is normal on a healthy fleet.** `pane-wake.py` exits `0` when every session
-   ended `dry-run`, `delivered` or a `skip:*`; `1` when a wake was attempted and not positively
-   confirmed delivered; `2` on a read failure. Skips are **rc-neutral** — a healthy fleet is
-   mostly skips (`skip:no-pane`, `skip:machine-wait`, `skip:open-card`). The tick therefore
-   discriminates on output: at least one JSON line means the pass ran, none means it did not.
+The `cp` runs from the marketplace clone, not from `~/.claude` — the plists live in the
+checkout, and a repo-relative path there resolves against `~/.claude/launchd`, which does not exist.
 
-4. **A watchdog that cries wolf gets ignored.** The first version parsed the stamp with BSD
-   `date -j -f "%Y-%m-%dT%H:%M:%SZ"`, whose `%Z` does not accept a literal trailing `Z`; it
-   returned a bogus epoch and posted a card claiming a valid timestamp was unparseable — for a
-   heartbeat eight minutes old. It parses with `datetime.strptime` now.
-
-5. **A failed liveness read is not an empty fleet.** The tick originally discarded
-   `session-liveness.py`'s stderr and exit status and parsed `[]` out of the failure, so a broken
-   read rendered as "0 live session(s)", the tick exited 0 with a fresh heartbeat, and the
-   watchdog — which reads only the heartbeat — stayed silent. It now separates the two: a
-   non-zero exit or unparseable output is `TERMINAL:` and exit 1.
-
-⚠️ **What the watchdog does not cover.** It detects a cadence that has *stopped*, not one that
-runs and fails — the heartbeat is written before any work. A running-and-failing tick shows up in
-`launchctl list` as a non-zero last exit and in the log as a `TERMINAL:` line.
-
-## Why launchd and not a loop
-
-The previous implementation was `/tmp/fleet-pusher-loop.sh` (40 rounds × 900 s). It had no
-supervisor, was not running, and would have evaporated on reboot. A detached loop is the exact
-failure mode `launchd/com.bborbe.fleet-keeper.plist` documents: *"one long-lived process that can
-die silently and take the supervision with it."* `StartInterval` gives a fresh process per tick,
-so there is no loop to die.
-
-The same reasoning rejects two other hosts:
-
-- **`/supervisor:fleet-loop` cannot host it.** That command is driven by `ScheduleWakeup`, which
-  fires only when the REPL is idle (a manager fielding gate events starves its own round), and
-  every round is a model turn — the exact cost this layer exists to avoid.
-- **`fleet-keeper.py` cannot host it.** It is report-only by operator decision: it holds no kill,
-  re-arm or spawn path and contains zero `pane-wake` references.
-
-## Why the plist points at the clone and the tick reads the cache
-
-Both halves are deliberate:
-
-- The plist's `ProgramArguments` is the **marketplace clone**, so an upgrade does not orphan the
-  agent — a version-pinned cache path would pin it to one release and silently run stale code
-  after every upgrade.
-- The tick resolves the **newest installed cache version** for `pane-wake.py`, so the work it
-  drives is always current.
-
-`test_a_pinned_version_is_observably_stale` runs that mutation as well as the real script: the
-same test that demands the newest version shows a pinned copy producing the older one.
+Then disable the in-process jobs with `-fleet-pusher-interval=0 -fleet-pusher-watch-interval=0` so
+two wake layers do not run at once.
 
 ## Files
 
 | Path | Role |
 |---|---|
-| `scripts/fleet-pusher-tick.sh` | one pass, exits |
-| `scripts/fleet-pusher-watch.sh` | reads the heartbeat, posts when it ages |
-| `launchd/com.bborbe.fleet-pusher.plist` | `StartInterval` 900, `RunAtLoad` |
-| `launchd/com.bborbe.fleet-pusher-watch.plist` | `StartInterval` 300 |
-| `scripts/tests/test_fleet_pusher.py` | the defects above, each as a case |
+| `bborbe/claude-wrapper` `pkg/fleet_pusher.go` | the tick |
+| `bborbe/claude-wrapper` `pkg/fleet_pusher_watch.go` | the watchdog |
+| `bborbe/claude-wrapper` `pkg/pane_guard.go` | the screen → verdict function |
+| `bborbe/claude-wrapper` `pkg/pane_join.go` | pid → tty → pane |
+| `bborbe/claude-wrapper` `pkg/pane_text.go` | escape stripping, dim parsing, composer readiness |
+| `bborbe/claude-wrapper` `pkg/subject_state.go` | the `SLEEPING` / awake subject read |
 
-Logs: `~/Library/Logs/fleet-pusher.log` and `~/Library/Logs/fleet-pusher-watch.log`.
+Logs: the daemon's own stderr log, `~/Library/Logs/claude-wrapper/stderr.log`.
