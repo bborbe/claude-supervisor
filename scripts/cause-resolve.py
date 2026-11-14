@@ -42,7 +42,7 @@ results that merely *read* a log, including the task file that documents this bu
 
 ## What it does not claim
 
-The ledger (`~/.claude/state/state-ledger/events-YYYY-MM-DD.jsonl`) records that a session
+The ledger (`state-ledger/events-YYYY-MM-DD.jsonl` under the Claude state directory) records that a session
 closed and why it was judged absent (`reason: absent-from-sources`). It does **not** record
 the mechanism, so the resolver reports the ledger row as context and never derives a cause
 from it. Reading a fact from the store that owns it means not reading a mechanism out of a
