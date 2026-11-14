@@ -955,7 +955,13 @@ class TestScript(unittest.TestCase):
         bindir = tempfile.mkdtemp(prefix="reap-gopls-")
         self.addCleanup(shutil.rmtree, bindir, True)
         link = os.path.join(bindir, "gopls")
-        os.symlink("/usr/bin/yes", link)
+        # ⚠️ Not `/usr/bin/yes` unconditionally: on ubuntu-26.04 that is the uutils multi-call
+        # binary, which refuses a foreign argv[0] ("Security violation: Requested utility
+        # `gopls` does not match executable name") and exits before `pgrep` can see it.
+        # `gnuyes` is GNU `yes` — ignores argv[0], spins forever — and 24.04 ships it only
+        # as `yes`, so prefer it when present and fall back otherwise.
+        yes = "/usr/bin/gnuyes" if os.path.exists("/usr/bin/gnuyes") else "/usr/bin/yes"
+        os.symlink(yes, link)
         # The session process is the `sh`; the `gopls` is its CHILD, which is the shape
         # `watchers()` scans. `yes` spins forever writing to /dev/null, so the child stays
         # alive exactly like the LSP child does, and its command line is the bare link path.
