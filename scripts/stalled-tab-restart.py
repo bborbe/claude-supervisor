@@ -224,11 +224,8 @@ def refusal(session_id, dry_run=True, lift=False):
     lines = (out.stdout or "").strip().splitlines()
     head = lines[0].strip() if lines else ""
     if out.returncode == 0:
-        # ⚠️ The FIRST line is the header — `🔄 restart-worker · session <sid> · pid <pid>` —
-        # and it names the session that just DIED. The line that says what happened is the
-        # last `✅` one, and it is the only one carrying the new pane and the new session id.
-        # Returning the header made the leg report the old sid as though it were the result,
-        # which is precisely the confusion the restart row warns about.
+        # ⚠️ The FIRST line is the header, naming the session that just DIED; the last `✅`
+        # one is what happened, and the only line carrying the new pane and session id.
         ok = next((ln.strip() for ln in reversed(lines) if ln.strip().startswith("✅")), head)
         return 0, "ok", ok
     return out.returncode, head, (lines[1].strip() if len(lines) > 1 else "")
