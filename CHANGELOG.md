@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.321.2
 
 - fix: name an expired `defer_date` as the close refusal reason — a task at `in_progress` with a lapsed defer now reports the expiry and the three exits instead of a message identical to one that was never deferred
 
