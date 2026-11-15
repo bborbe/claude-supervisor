@@ -496,13 +496,9 @@ def act(args):
             print("the operator declined this episode and the task has not moved since")
             return 0
 
-    # ⚠️ **Poll the card a PREVIOUS round posted — never the one this round just made.**
-    # Posting and polling in the same round can only ever read `OPEN`: the operator has not
-    # answered yet. And because the store's dedup is open-scoped, the next round's post mints
-    # a NEW item, so the answered one is never polled — `ANSWERED` is unreachable, the
-    # operator is re-asked every round, and no restart ever runs. That is a no-op of the
-    # feature's whole mechanism, so the posted id is remembered in our own store and polled
-    # on the round AFTER it was posted.
+    # ⚠️ Poll the card a PREVIOUS round posted, never the one this round just made: posting
+    # and polling in the same round can only read `OPEN`, and open-scoped dedup then mints a
+    # NEW item next round, so `ANSWERED` is unreachable and no restart ever runs.
     item = state.get("card_item")
     if not item or item in state["consumed"]:
         item = post_card(args.task, args.session_id, detail, state)
