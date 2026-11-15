@@ -261,8 +261,7 @@ def post_card(task, session_id, token_detail, state):
         out = subprocess.run(
             [sys.executable, ask, "post",
              "--dedup-key", card_key(task, state),
-             # A stable producer id: the asking session reads its own item back, and the
-             # fleet round that posts is not always the session that polls on a later tick.
+             # A stable producer id: the poster is not always the session that polls.
              "--producer-id", f"stalled-tab:{slug_for(task)}",
              "--payload", (f"STALLED TAB WORKER: {task} ({session_id[:8]}) has made no "
                            f"progress for 2+ sweeps. {token_detail} "
