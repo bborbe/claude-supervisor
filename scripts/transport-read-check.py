@@ -180,9 +180,17 @@ SITE_LIST = {
     # pane-wake half of "Wire the Sweep Gate Verdict Into the Manager Wake" types with.
     # ⚠️ It is an ACTION, not a read: it reports its own failure and types nothing when
     # the guard refuses, so it is enumerated for mechanism/list agreement and
-    # deliberately not driven into the three states. The pane JOIN it uses is `jump.py`'s
-    # `wezterm_panes` / `pane_sessions`, already enumerated and driven.
+    # deliberately not driven into the three states. The pane list its join reads is
+    # `jump.py`'s `wezterm_panes`, already enumerated and driven; the join itself runs from
+    # the target session (registry -> pid -> tty) and names its miss rather than folding a
+    # failed read into "no pane".
     ("manager-wake.py", "wake"),
+    # added 2026-11-15 — `manager-wake.py`'s `_pid_tty`, the `ps -o tty=` read behind the
+    # target-session pane join and the `HEADLESS` verdict. It keeps the three states apart:
+    # `None` when `ps` failed, `""` when the pid holds no terminal, the tty name otherwise.
+    # The split is load-bearing: `""` is what licenses `HEADLESS` and `None` is retried as
+    # `tty-unreadable`, so a failed read can never excuse a missed wake as headless.
+    ("manager-wake.py", "_pid_tty"),
     # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is

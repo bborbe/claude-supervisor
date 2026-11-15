@@ -17,10 +17,11 @@ knowing their tier (the detached loop) need not know it.
 
 Resolution, in order:
 
-  1. the subject's manager session id — the newest
-     `~/.claude/state/worker-manager/<sid>.json` whose `subject` matches and whose
-     `branch` matches the tier (`goal` / `topic` / `fleet`). The file name is the
-     session id.
+  1. the subject's manager session id — the newest LIVE session among the union of
+     `~/.claude/state/worker-manager/<sid>.json` (whose `subject` and `branch` match)
+     and `~/.claude/state/sweep-gate/<branch>--<slug>.session` (the id `--arm` wrote).
+     Live = listed in `~/.claude/sessions/*.json` with a running pid. Registrations
+     that all name dead sessions are `NO-MANAGER`, never `NO-PANE`.
   2. that session's pane — `jump.py`'s `wezterm_panes` / `pane_sessions`, reused
      rather than duplicated: those two reads are already enumerated and driven by
      `transport-read-check.py`, and a second copy here would add a transport-read
@@ -34,6 +35,10 @@ swallowed-submit defect (`scripts/send-delivery-drill.py`): `send-text` reaching
 the pty is not proof the Enter submitted. After typing, the pane is re-read and
 the result is `WOKEN` only when the composer cleared or the session started
 working; a composer that still holds the prompt is `UNVERIFIED`, never a success.
+
+Every result line ends `session=<sid8> live=<yes|no|unknown>` (`session=-` when no
+registration names the subject), so a caller's ledger can tell a missed live manager
+from a dead registration.
 
 Exit status: 0 for every wake decision — woken, unverified, skipped, or no manager
 found. A non-zero here would make the detached loop read a quiet tick as FAILED,
@@ -53,12 +58,21 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GUARD = os.path.join(HERE, "pane-wake-guard.py")
 LIVENESS = os.path.join(HERE, "manager-liveness.py")
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
+# The `.session` markers `manager-liveness.py --arm` writes — same env override as that
+# script's STATE_DIR, so a test or drill isolating one isolates both.
+SESSION_MARKER_DIR = os.path.expanduser(
+    os.environ.get("MANAGER_LIVENESS_STATE_DIR", "~/.claude/state/sweep-gate")
+)
+# Claude Code's session registry — `<pid>.json` per running session.
+SESSIONS_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
+)
 VALID_BRANCHES = ("goal", "topic", "fleet")
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PROMPT_GLYPH = "❯"
@@ -107,9 +121,12 @@ def _jump():
 def _ts(value):
     """Parse an RFC3339 `resolved_at`; `None` when absent or unparseable."""
     try:
-        return datetime.fromisoformat(str(value))
+        ts = datetime.fromisoformat(str(value))
     except (TypeError, ValueError):
         return None
+    # A naive stamp is read as UTC, so it compares with the aware marker mtimes rather
+    # than raising TypeError mid-resolution.
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
 def _newer(a, b):
@@ -119,21 +136,39 @@ def _newer(a, b):
     return b is None or a > b
 
 
-def resolve_manager_session(subject, tier):
-    """(session_id, branch) for the subject's manager, or (None, None).
+def _base_slug(subject):
+    """`manager-liveness.py`'s `base_slug`, so the marker path is the one `--arm` wrote."""
+    return re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")
 
-    Newest `resolved_at` wins. `tier` may be `auto` to match any branch; otherwise
-    it must equal the registration's `branch`. The `vault` field is deliberately NOT
-    a filter: the state files carry the old vault name (`Personal`) while the live
-    vault is `private-personal`, so a vault match would refuse every manager.
+
+def registered_candidates(subject, tier):
+    """[(ts, sid, branch)] — every registration naming the subject, from BOTH registries.
+
+    1. `~/.claude/state/worker-manager/<sid>.json` — written when a session resolves its
+       subject (`docs/subject-resolution.md` § Recording); `ts` is its `resolved_at`.
+    2. `~/.claude/state/sweep-gate/<branch>--<slug>.session` — written by
+       `manager-liveness.py --arm` on every arm, from inside the manager's own session;
+       `ts` is the file's mtime, i.e. the last arm.
+
+    ⚠️ **Neither registry is complete on its own, so the union is the reading.** Measured
+    2026-11-15: the `.session` marker knew 11 of 12 live managers, while `worker-manager/`
+    had no registration for the live Development Pipeline Throughput manager at all — its
+    newest registration there named a session dead for 135 h, so every wake on that
+    subject read `NO-PANE` against a dead session while the real manager went unwoken.
+
+    The `vault` field is deliberately NOT a filter: the state files carry the old vault
+    name (`Personal`) while the live vault is `private-personal`, so a vault match would
+    refuse every manager.
     """
     want = (subject or "").strip().lower()
-    best = None
+    out = []
     for f in glob.glob(os.path.join(MANAGER_STATE, "*.json")):
         try:
             with open(f, encoding="utf-8") as fh:
                 d = json.load(fh)
         except Exception:
+            continue
+        if not isinstance(d, dict):
             continue
         if (d.get("subject") or "").strip().lower() != want:
             continue
@@ -145,33 +180,207 @@ def resolve_manager_session(subject, tier):
         sid = os.path.splitext(os.path.basename(f))[0]
         if not SESSION_ID_RE.match(sid):
             continue  # `last-<vault>.json` and other non-session records in this dir
-        ts = _ts(d.get("resolved_at"))
-        if best is None or _newer(ts, best[0]):
-            best = (ts, sid, branch)
-    if not best:
-        return None, None
-    return best[1], best[2]
+        out.append((_ts(d.get("resolved_at")), sid, branch))
+    base = _base_slug(want)
+    if base:
+        for branch in (VALID_BRANCHES if tier == "auto" else (tier,)):
+            marker = os.path.join(SESSION_MARKER_DIR, f"{branch}--{base}.session")
+            try:
+                with open(marker, encoding="utf-8") as fh:
+                    sid = fh.read().strip()
+                mtime = os.path.getmtime(marker)
+            except OSError:
+                continue
+            if not SESSION_ID_RE.match(sid):
+                continue
+            out.append((datetime.fromtimestamp(mtime, tz=timezone.utc), sid, branch))
+    return out
+
+
+def _pid_alive(pid):
+    """False only when the pid provably does not exist; an unreadable pid is not death."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (TypeError, ValueError, OSError):
+        return True
+    return True
+
+
+def live_session_ids(registry_dir=None):
+    """Session ids Claude Code's registry lists with a running pid, or None when unreadable.
+
+    `~/.claude/sessions/<pid>.json` exists while a session runs; its `pid` is checked too,
+    because a session killed hard leaves its file behind. `None` is "cannot tell", never
+    "nothing is live" — the caller degrades to newest-registration and says so.
+    """
+    directory = registry_dir or SESSIONS_DIR
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    live = set()
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        sid = rec.get("sessionId") or rec.get("session_id")
+        if sid and _pid_alive(rec.get("pid")):
+            live.add(sid)
+    return live
+
+
+def _pid_tty(pid):
+    """The pid's controlling tty (`ttys012`), `""` when it has none, None when unreadable."""
+    try:
+        r = subprocess.run(["ps", "-o", "tty=", "-p", str(int(pid))],
+                           capture_output=True, text=True, timeout=5)
+    except (TypeError, ValueError, OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    tty = r.stdout.strip()
+    return "" if tty in ("", "??", "?") else tty
+
+
+def is_headless(session_id, registry_dir=None):
+    """True only when BOTH reads agree the session runs without a terminal.
+
+    `entrypoint: sdk-cli` alone is not proof: a tab opened from a headless leg inherits
+    `CLAUDE_CODE_ENTRYPOINT` and registers `sdk-cli` while owning a pane. The pid having
+    no controlling tty is the second, independent read; an unreadable tty is not headless.
+    """
+    live = [r for r in _registry_records(session_id, registry_dir) if _pid_alive(r.get("pid"))]
+    if not live:
+        return False
+    return all(r.get("entrypoint") == "sdk-cli" and _pid_tty(r.get("pid")) == "" for r in live)
+
+
+def _newest(rows):
+    best = None
+    for row in rows:
+        if best is None or _newer(row[0], best[0]):
+            best = row
+    return best
+
+
+def resolve_manager_session(subject, tier):
+    """(session_id, branch, live) for the subject's manager.
+
+    Among every registration in both registries (`registered_candidates`), the NEWEST
+    LIVE session wins and `live` is True. A dead registration never outranks a live one,
+    however recent: a manager that died after re-registering is exactly the case that
+    typed wakes into nothing.
+
+    - registrations exist, none live -> (newest dead sid, branch, False): the caller
+      reports `NO-MANAGER` naming that session, never `NO-PANE`.
+    - no registration at all          -> (None, None, False).
+    - the registry is unreadable      -> (newest sid, branch, None): liveness unknown, so
+      the wake proceeds on recency as before and the pane lookup is the gate.
+    """
+    cands = registered_candidates(subject, tier)
+    if not cands:
+        return None, None, False
+    live = live_session_ids()
+    if live is None:
+        best = _newest(cands)
+        return best[1], best[2], None
+    alive = _newest([c for c in cands if c[1] in live])
+    if alive:
+        return alive[1], alive[2], True
+    dead = _newest(cands)
+    return dead[1], dead[2], False
+
+
+def live_word(live):
+    """The `live=` field value: `yes` / `no` / `unknown`."""
+    return {True: "yes", False: "no"}.get(live, "unknown")
+
+
+# Reasons a pane lookup can miss that a second read may not repeat; anything else is a
+# standing fact about the session and is reported on the first read.
+TRANSIENT_MISSES = ("wezterm-unreadable", "tty-unreadable")
+PANE_RETRY_DELAY_S = 2.0
+
+
+def _registry_records(session_id, registry_dir=None):
+    """Every registry record carrying `session_id` — a resumed session can leave a stale twin."""
+    directory = registry_dir or SESSIONS_DIR
+    out = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            continue
+        if isinstance(rec, dict) and (rec.get("sessionId") or rec.get("session_id")) == session_id:
+            out.append(rec)
+    return out
+
+
+def find_pane(session_id):
+    """(pane_id, None) for the pane whose tty the session's own pid holds, else (None, reason).
+
+    The join runs FROM the target session — registry record -> pid -> tty -> the pane with
+    that `tty_name` — rather than through `jump.py`'s `pane_sessions` map, which keys
+    `{tty: session}` with last-write-wins: any second registered session on the manager's
+    tty made the manager's pane resolve to that other session and the wake read `NO-PANE`.
+    The pane list itself is still `jump.py`'s `wezterm_panes`, the read
+    `transport-read-check.py` already enumerates and drives.
+
+    Reasons: `wezterm-unreadable` (the pane list failed), `no-registry-entry` (no
+    `~/.claude/sessions` record carries the id), `tty-unreadable` (`ps` failed for every
+    pid), `no-tty` (the pid holds no terminal), `tty-not-a-pane:<tty>` (the tty matches no
+    WezTerm pane).
+    """
+    pmap = _jump().wezterm_panes()
+    if pmap is None:
+        return None, "wezterm-unreadable"
+    records = _registry_records(session_id)
+    if not records:
+        return None, "no-registry-entry"
+    ttys, unreadable = [], 0
+    for rec in records:
+        tty = _pid_tty(rec.get("pid"))
+        if tty is None:
+            unreadable += 1
+        elif tty:
+            ttys.append(tty)
+    if not ttys:
+        return None, ("tty-unreadable" if unreadable == len(records) else "no-tty")
+    for pane, p in pmap.items():
+        if (p.get("tty_name") or "").replace("/dev/", "") in ttys:
+            return pane, None
+    return None, f"tty-not-a-pane:{ttys[0]}"
 
 
 def resolve_pane(session_id):
-    """The pane id whose tty belongs to `session_id`, or None.
+    """(pane_id, None) or (None, reason) — `find_pane`, retried once on a transient miss.
 
-    `None` means EITHER the pane read failed OR no pane matched — the caller types
-    nothing in both cases, so a transient read failure costs one skipped wake (the
-    next tick retries) and never a wrong one. The distinction is not carried because
-    the only consequence is "no wake this tick".
+    Measured 2026-11-14 17:26–17:32Z: four live managers, each heartbeating in its own
+    pane throughout, all read `NO-PANE` in one six-minute window and resolved again
+    afterwards. The failing read was never recorded, so the reason is now carried on
+    the result line, and a read that can fail transiently gets one retry before the
+    tick gives the wake up.
     """
-    jump = _jump()
-    pmap = jump.wezterm_panes()
-    if pmap is None:
-        return None
-    sessions = jump.pane_sessions(pmap)
-    if not sessions:
-        return None
-    for pane, sid in sessions.items():
-        if sid == session_id:
-            return pane
-    return None
+    pane, reason = find_pane(session_id)
+    if pane is None and reason in TRANSIENT_MISSES:
+        time.sleep(PANE_RETRY_DELAY_S)
+        pane, reason = find_pane(session_id)
+    return pane, reason
 
 
 def read_state(subject, branch):
@@ -276,26 +485,43 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
-    sid, branch = resolve_manager_session(args.subject, args.tier)
+    # Every result line ends `session=<sid8> live=<yes|no|unknown>`, so the caller's ledger
+    # can record WHICH session a wake resolved and whether it was alive — a `NO-PANE` on a
+    # live manager and one on a dead registration are different defects.
+    sid, branch, live = resolve_manager_session(args.subject, args.tier)
     if not sid:
-        print(f"NO-MANAGER subject={args.subject!r} tier={args.tier}")
+        print(f"NO-MANAGER subject={args.subject!r} tier={args.tier} session=- live=no")
+        return 0
+    tail = f"session={sid[:8]} live={live_word(live)}"
+    if live is False:
+        # Registrations exist, but every one names a dead session: there is no manager to
+        # wake, and saying `NO-PANE` would blame the pane lookup for a missing manager.
+        print(f"NO-MANAGER subject={args.subject!r} tier={args.tier} {tail}")
         return 0
     if branch not in VALID_BRANCHES:
-        print(f"NO-MANAGER subject={args.subject!r} (unexpected branch {branch!r})")
+        print(f"NO-MANAGER subject={args.subject!r} (unexpected branch {branch!r}) {tail}")
         return 0
 
-    pane = resolve_pane(sid)
+    pane, miss = resolve_pane(sid)
     if not pane:
-        print(f"NO-PANE session={sid[:8]} subject={args.subject!r}")
+        if live and is_headless(sid):
+            # A live manager running headless (`claude --print`, no tty) has no pane BY
+            # CONSTRUCTION, so no pane-wake can ever reach it. Named apart from `NO-PANE`,
+            # which is a pane lookup that missed a session that has one — measured
+            # 2026-11-15: the live Development Pipeline Throughput manager was a headless
+            # `--resume`, and every wake on it was lost under `NO-PANE`.
+            print(f"HEADLESS subject={args.subject!r} {tail}")
+            return 0
+        print(f"NO-PANE reason={miss} subject={args.subject!r} {tail}")
         return 0
 
     verdict = guard(pane, read_state(args.subject, branch))
     if not verdict.startswith("wake"):
-        print(f"SKIP {verdict} pane={pane} session={sid[:8]}")
+        print(f"SKIP {verdict} pane={pane} {tail}")
         return 0
 
     prompt = f"/supervisor:{branch}-drive --interval {args.interval}m"
-    print(wake(pane, prompt, args.dry_run))
+    print(f"{wake(pane, prompt, args.dry_run)} {tail}")
     return 0
 
 
