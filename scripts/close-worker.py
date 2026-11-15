@@ -549,6 +549,22 @@ def is_future(value, today):
     return parsed > defer_date.as_now(today)
 
 
+def _defer_expired(value, today):
+    """True when `value` parses to an instant strictly before the start of `today`.
+
+    Strictly before, not `<=`. A defer of exactly local midnight today is still *today*,
+    and that is the same boundary the vault-side metric probe uses (`defer_date < today`).
+    Reusing `defer_state`'s `due` here would name that boundary case expired while the
+    probe does not count it — two instruments disagreeing again, which is the defect this
+    change exists to remove.
+
+    Silent on an unparseable value on purpose: `is_future` has already reported it to
+    stderr on the call immediately above, and a second report reads as two defects.
+    """
+    parsed, _ = defer_date.parse_defer_date(value)
+    return parsed is not None and parsed < defer_date.as_now(today)
+
+
 def task_verdict(task, today):
     """`(refusal, detail)` when the task does not permit a close, else `None`."""
     if task is None:
@@ -569,6 +585,17 @@ def task_verdict(task, today):
     defer = fm.get("defer_date")
     if is_future(defer, today):
         return None
+    if _defer_expired(defer, today):
+        # The park lapsed. Without this branch the detail reads identically to a task that
+        # was never deferred at all — both end in "a future defer_date" — so a reader
+        # cannot tell "you deferred it and the date passed" from "you never set one".
+        return (
+            "task-not-terminal",
+            f"{os.path.basename(path)} is status {status or '(none)'!r} with an EXPIRED "
+            f"defer_date {defer!r} (earlier than today, {today.isoformat()}); the task is "
+            f"neither deferred nor running. A close needs a terminal status "
+            f"({'/'.join(sorted(TERMINAL))}), a re-defer to a future date, or a hold with a reason",
+        )
     return (
         "task-not-terminal",
         f"{os.path.basename(path)} is status {status or '(none)'!r} with "
