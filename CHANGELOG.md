@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.314.0
 
 - feat: goal and topic loops tick Success Criteria / Definition of Done / Completion Gate boxes on an inline citation they resolved this tick (merged PR, release tag, completed task on the goal tier, completed goal on the topic tier). `commands/steps/goal-closure.md` § Step 0 is the single home, replacing the "close, never certify" rule that left goal and topic boxes with no owner. Each tier ticks only pages it owns: a goal loop ticks its goal and only those tasks whose liveness reads `ABSENT`; a topic loop ticks its topic page. Once all tracked work is terminal, unevidenced boxes raise one `ack` notice per page, recorded in `# Progress`, instead of a silent `OPEN` every tick.
 - feat: closure Step 0b (goal branch, subject only) unlinks the goal's non-terminal linked tasks before it closes, after the tracked set is examined, and records them in `# Progress`. It uses each task's raw `goals:` entry, because `vault-cli goal complete` compares raw entries and never matches `'[[<goal>]]'`. A started task whose liveness reads `LIVE`/`UNKNOWN`, a failed unlink or an unsafe task name holds the close.
