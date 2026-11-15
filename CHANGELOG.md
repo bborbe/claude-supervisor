@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: an operator-set flag counts as approval at every reader — `flag_provenance.is_approved()` (`approved_at` or an `operator`/`legacy` flag) drives `approved-not-started.py`, the open leg's `waiting approval` guard, `/supervisor:open` Gate 1 and the goal sweep's `waiting-approval` cell; nothing writes `approved_*` from a flag any more, so the `--flagged` batch drops its approve pass and the obsolete `check-open-approve-ordering.py` checker is retired
+- docs: workers and managers are told flagged rows open and reopen automatically, so a session with nothing doable before a later date sets `defer_date` and closes to free its slot
+
 ## v0.313.4
 
 - fix: **an unowned gate no longer wakes every manager when no Fleet Manager is live.** `route_to_fleet()` returned the emit path whenever no live Fleet Manager resolved, so a `producer_kind: cron` gate with no session id — or any `unowned` gate — was handed to every manager's arm. It now distinguishes the two cases the old `if not self_id or not fleet` collapsed: an **unreadable** registry (`UNREADABLE`) still fails open, but a **readable** registry with no Fleet Manager suppresses the `unowned` class and counts it in a new `dropped(unowned-no-fleet)` bucket on the `LIVENESS` line, so the fallback is never silent. `dead-manager` and `claim-dead` are a separate residual and keep their fail-open emit.

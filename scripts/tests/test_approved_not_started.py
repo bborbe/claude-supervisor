@@ -156,6 +156,37 @@ class Collect(unittest.TestCase):
         rows = self._collect([])
         self.assertEqual([r["name"] for r in rows], ["Build claude-interactive"])
 
+    def test_an_operator_flag_is_the_approval(self):
+        """Ruling 2026-11-15: a flagged row is approved — no `approved_at` is written."""
+        task_file(
+            self.dir,
+            "Flagged",
+            "status: in_progress\nphase: todo\nflag: true\nflag_set_by: operator\n"
+            "flag_set_at: 2026-11-15T09:00:00+01:00",
+        )
+        rows = self._collect([])
+        self.assertEqual([r["name"] for r in rows], ["Flagged"])
+        self.assertEqual(rows[0]["approved_at"], "2026-11-15T09:00:00+01:00")
+
+    def test_a_flag_dead_worker_row_is_orphaned(self):
+        task_file(
+            self.dir,
+            "Flagged-died",
+            "status: in_progress\nphase: execution\nflag: true\nflag_set_by: operator\n"
+            "claude_session_id: dead-1",
+        )
+        rows = self._collect([])
+        self.assertEqual([(r["name"], r["class"]) for r in rows], [("Flagged-died", "orphaned")])
+
+    def test_an_agent_set_flag_is_not_an_approval(self):
+        task_file(
+            self.dir,
+            "Agent-flagged",
+            "status: in_progress\nphase: todo\nflag: true\nflag_set_by: claude-session-1",
+        )
+        task_file(self.dir, "Bare-flag", "status: in_progress\nphase: todo\nflag: true")
+        self.assertEqual(self._collect([]), [])
+
     def test_approved_with_a_live_session_is_excluded(self):
         """A recorded id is not an owner -- it must be probed, not trusted."""
         task_file(

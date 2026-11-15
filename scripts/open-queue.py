@@ -529,7 +529,10 @@ def guards(block, today, attention_dir=None, name=None, index=None):
     """
     if block is None:
         return "unreadable task file"
-    if (field(block, "phase") or "").strip() == "todo":
+    # ⚠️ An operator-set flag IS the approval (ruling 2026-11-15, `flag_provenance.
+    # is_approved()`): a flagged `todo` row is approved, not in the inbox, and the worker's
+    # entry path moves its phase on. An agent-set or absent setter still waits here.
+    if (field(block, "phase") or "").strip() == "todo" and not is_flagged(block):
         return "waiting approval"
     # ⚠️ **Ahead of every DERIVED guard — `blocked_by` and `defer_date` — but after the two
     # that describe the row's own state rather than a derivation.** A stop is the operator's

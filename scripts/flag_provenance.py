@@ -82,3 +82,37 @@ def flag_refusal(block, kind):
     if scalar(block, "flag_set_by") in OPENING_ACTORS:
         return None
     return "agent-set-flag"
+
+
+def is_approved(block, kind="task"):
+    """Is this row approved — by `vault-cli task approve`, or by the operator's own flag?
+
+    Operator ruling 2026-11-15, verbatim: *"we should not set the approved fields. We
+    should handle flag tasks as they are approved."* An operator-set flag (`flag_admits()`)
+    IS the approval at every reader; nothing writes `approved_at` / `approved_by` from it.
+    `approved_at` stays sufficient on its own, so every row approved the old way still is.
+    An agent-set or unattributed flag approves nothing.
+    """
+    if block is None:
+        return False
+    if scalar(block, "approved_at"):
+        return True
+    return flag_admits(block, kind)
+
+
+def approval_instant(block, kind="task"):
+    """The raw timestamp the approval took effect at — None when the row is not approved.
+
+    `approved_at` when present; else, for an operator-flagged row, `flag_set_at` — the
+    same single write that recorded the flag's provenance. A `legacy` flag predates that
+    field and returns `""`: approved, with no recorded instant (the caller picks its
+    fallback rather than this module inventing a clock).
+    """
+    if block is None:
+        return None
+    approved = scalar(block, "approved_at")
+    if approved:
+        return approved
+    if flag_admits(block, kind):
+        return scalar(block, "flag_set_at") or ""
+    return None

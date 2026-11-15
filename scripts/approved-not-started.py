@@ -86,6 +86,11 @@ FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
 
+# The one approval predicate — `approved_at`, or an operator-set flag (ruling 2026-11-15).
+# Loaded by path, like every sibling: the scripts are not a package.
+sys.path.insert(0, HERE)
+import flag_provenance  # noqa: E402
+
 
 def frontmatter(text):
     """Return the frontmatter block, or '' when the file has none."""
@@ -232,9 +237,19 @@ def collect(tasks_dir, live, now):
             continue
         if not block:
             continue
-        approved = parse_iso(field(block, "approved_at"))
-        if approved is None:
+        # ⚠️ Approved means `approved_at` OR an operator-set flag — `flag_provenance` owns
+        # the rule (2026-11-15). A flag-approved row's instant is `flag_set_at`; a `legacy`
+        # flag carries none, so it falls back to the file's mtime rather than to `now`,
+        # which would rank it newest forever.
+        instant = flag_provenance.approval_instant(block, "task")
+        if instant is None:
             continue
+        approved = parse_iso(instant)
+        if approved is None:
+            if field(block, "approved_at"):
+                continue  # an unparseable approval record is not an approval
+            approved = datetime.fromtimestamp(
+                os.path.getmtime(os.path.join(tasks_dir, entry)), timezone.utc)
         if (field(block, "status") or "") not in LIVE_STATUSES:
             continue
         sid = (field(block, "claude_session_id") or "").strip().lower()

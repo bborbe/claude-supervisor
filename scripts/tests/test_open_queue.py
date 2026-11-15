@@ -358,13 +358,29 @@ class OpenQueueTest(unittest.TestCase):
 
     # -- the guards, each with a control row ------------------------------
 
-    def test_phase_todo_is_refused_and_the_control_row_still_opens(self):
-        task_file(self.tasks, "inbox", "status: in_progress\nphase: todo\npriority: 1\nflag: true\n")
+    def test_an_operator_flagged_todo_row_is_approved_and_opens(self):
+        # Ruling 2026-11-15: "handle flag tasks as they are approved" — the operator's
+        # flag is the approval, so a flagged `todo` row is not in the inbox.
+        task_file(self.tasks, "flagged-todo", "status: in_progress\nphase: todo\npriority: 1\nflag: true\n")
         task_file(self.tasks, "control", "status: in_progress\nphase: planning\npriority: 2\nflag: true\n")
-        rows, skipped = self.collect(["inbox", "control"])
+        rows, skipped = self.collect(["flagged-todo", "control"])
 
-        self.assertEqual([r["name"] for r in rows], ["control"])
-        self.assertEqual(skipped, [{"name": "inbox", "reason": "waiting approval"}])
+        self.assertEqual(skipped, [])
+        opened, _ = oq.select(rows, live=0, target=30)
+        self.assertEqual([r["name"] for r in opened], ["flagged-todo", "control"])
+
+    def test_phase_todo_without_an_operator_flag_still_waits(self):
+        task_file(self.tasks, "agent-flag", "status: in_progress\nphase: todo\nflag: true\n",
+                  provenance="claude-session-1")
+        task_file(self.tasks, "unflagged", "status: in_progress\nphase: todo\n")
+        task_file(self.tasks, "control", "status: in_progress\nphase: planning\nflag: true\n")
+        rows, skipped = self.collect(["agent-flag", "unflagged", "control"])
+
+        self.assertEqual(
+            sorted(skipped, key=lambda s: s["name"]),
+            [{"name": "agent-flag", "reason": "waiting approval"},
+             {"name": "unflagged", "reason": "waiting approval"}],
+        )
         opened, _ = oq.select(rows, live=0, target=30)
         self.assertEqual([r["name"] for r in opened], ["control"])
 
