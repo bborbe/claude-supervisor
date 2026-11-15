@@ -483,20 +483,12 @@ def act(args):
         print(f"{state['restarts']} restarts with no progress")
         return 0
 
-    # ⚠️ **The store's suppression is OPEN-scoped, so a `leave it` is not remembered for us.**
-    # Once the card is answered the same dedup key posts a NEW item, and without this the
-    # operator is asked again every round — the exact failure the key generation was supposed
-    # to prevent and does not. The decline has to live in our own store, scoped to the
-    # episode: a restart starts a new generation, which is when asking again is correct.
-    # ⚠️ **Anchored on the task page's mtime, not the restart generation.** A generation
-    # comparison has no way out of the gen-0 case: a decline recorded before any restart
-    # leaves `declined == restarts == 0` and the cap reset never runs, because it needs a
-    # `progress_at` only a restart sets — so the leg goes permanently quiet on that row.
-    # The page moving is the real "this is a new episode" signal, and it exists from round 1.
-    # ⚠️ The flag and the mtime are BOTH needed. `declined_at` alone loses the decline when
-    # the task page cannot be resolved at answer time (`stamp is None`), and the operator is
-    # then re-asked every round — the failure this branch exists to prevent, reachable
-    # through an unreadable page rather than through a stale generation.
+    # ⚠️ The store's suppression is OPEN-scoped, so a `leave it` must live in our own store —
+    # otherwise the operator is re-asked every round, the failure the key generation does not
+    # prevent. ⚠️ Anchored on the task page's mtime, not the restart generation: a generation
+    # comparison has no way out of the gen-0 case, where `declined == restarts == 0` and the
+    # cap reset never runs, leaving the leg permanently quiet. ⚠️ The flag and the mtime are
+    # BOTH needed: `declined_at` alone loses the decline when the page cannot be resolved.
     if state.get("declined"):
         declined_at = state.get("declined_at")
         if declined_at is None or stamp is None or stamp <= declined_at:
