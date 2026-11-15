@@ -100,10 +100,9 @@ lacking a key a step needs refuses, and that step records `--not-run`.
 
 **The source this leg reads is `session-holds.py` itself**, keyed on the session's
 `claude_session_id` stamp — the full id, never the 8-char display handle this file renders.
-⚠️ **Call it; never re-read its file.** It resolves the store itself (`SUPERVISOR_SESSION_HOLDS`
-when set, else `~/.claude/state/session-holds.json`) and answers the pane-derived Hold window
-too, so an inline `json.load` disagrees with it wherever a fixture or test points the store
-elsewhere:
+⚠️ **Call it; never re-read its file** — it resolves the store (`SUPERVISOR_SESSION_HOLDS`,
+else `~/.claude/state/session-holds.json`) and the pane-derived Hold window, so an inline
+`json.load` disagrees with it wherever a fixture points the store elsewhere:
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
@@ -115,13 +114,12 @@ Exit **0** → the reason on stdout (`hold-window` for a pane in the Hold window
 window-derived) and take **no** act on it. Exit **1** → clear, proceed. Exit **2** → heldness is
 **unknown**, not clear: render `⏸️ HELD? — unknown · <id8>` and take no act either. ⚠️ **Run
 this before the act, not after**: `restart-worker.py` refuses a held target itself
-(`held-session`), but the resume and the nudge have no such backstop — here this read is the
-only one.
+(`held-session`); the resume and the nudge have no backstop but this read.
 
 ## 1. Restart a lapsed topic manager
 
-The topic tier has no keep-alive of its own, so a lapsed topic manager stayed lapsed,
-unreported. This leg is the missing rung: **restart is not open**, so resuming one that already
+The topic tier has no keep-alive of its own, so a lapsed topic manager stayed lapsed. This
+leg is the missing rung: **restart is not open**, so resuming one that already
 owns its subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 
 **Population — every topic page carrying a session id.** Read the vault's topic directory, not
@@ -384,8 +382,12 @@ rationale: `commands/steps/output-shape.md` item 14.
 
 ## 4b. Stood-down close
 
-§ 1 correctly declines to restart a `STOPPED` manager and nothing else acts on it. Run
+§ 1 declines to restart a `STOPPED` manager and nothing else acts on it. Run
 `<plugin root>/commands/steps/keepalive-stood-down.md` (absolute; never search for it).
+
+## 4c. Wake misses
+
+Run `<plugin root>/commands/steps/wake-misses.md`; report only.
 
 ## 5. Record why a half did not run — and never leave the sweep's seed standing
 
