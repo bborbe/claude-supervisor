@@ -447,6 +447,28 @@ class OpenQueueTest(unittest.TestCase):
         opened, _ = oq.select(rows, live=0, target=30)
         self.assertEqual([r["name"] for r in opened], ["emptylist"])
 
+    def test_empty_list_blocked_by_does_not_scan_the_next_key(self):
+        """An inline `[]` is the whole answer — the scan must not run on.
+
+        Scanning past it reads the next key's indented list (`tags:`, `depends_on:`)
+        as a blocker and refuses a row that has none.
+
+        ⚠️ **Kept alongside the computed verdict, not replaced by it.** The selection path
+        now resolves through `blocked_by_verdict` (`fm_wikilinks` / `fm_list_body`), a
+        different parser from `has_blocked_by`, so this next-key case has to be pinned
+        against the parser that actually runs — otherwise a `[]` followed by a list-shaped
+        key reads as a blocker again, one parser further in.
+        """
+        task_file(
+            self.tasks,
+            "nextkey",
+            "status: in_progress\nflag: true\nblocked_by: []\ntags:\n    - '[[Task]]'\n    - '[[Other]]'\n",
+        )
+        rows, skipped = self.collect(["nextkey"])
+
+        self.assertEqual([r["name"] for r in rows], ["nextkey"])
+        self.assertEqual(skipped, [])
+
     def test_completed_blockers_do_not_hold_the_row(self):
         """A blocker that reads `completed` is DONE — the row is not blocked on it.
 
