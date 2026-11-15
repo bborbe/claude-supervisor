@@ -215,8 +215,10 @@ def manager_tier(liveness, row: dict, sessions: dict, slugs: set, now: float):
             verdict, detail = liveness.classify(cand, now)
         except Exception:  # an unreadable record is not an OK reading
             continue
-        if verdict == "OK":
-            return True, f"--state OK ({cand}: {detail})"
+        # `WORKING` and `IDLE` are managers too: the exit a park nudge demands would close
+        # the pane that is their only wake path.
+        if verdict in ("OK", "WORKING", "IDLE"):
+            return True, f"--state {verdict} ({cand}: {detail})"
     return False, ""
 
 

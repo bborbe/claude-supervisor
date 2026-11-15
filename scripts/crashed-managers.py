@@ -126,7 +126,9 @@ POST_TIMEOUT = 60
 # detail) — and `IDLE` means a round and that work signal are both old while the gate is still
 # watching, i.e. armed and woken but producing nothing. Nothing here cards it; the topic tier
 # is what acts on a slot that produces nothing.
-CADENCE_STATES = ("OK", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
+# `WORKING` (no round, but the transcript moved) is not a lapse either.
+CADENCE_STATES = ("OK", "WORKING", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID",
+                  "WRONG-BRANCH")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a

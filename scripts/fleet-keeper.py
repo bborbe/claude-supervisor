@@ -101,7 +101,8 @@ KEEPALIVE = os.path.join(HERE, "fleet-keepalive.py")
 LIVENESS = os.path.join(HERE, "session-liveness.py")
 MANAGER_LIVENESS = os.path.join(HERE, "manager-liveness.py")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
-MANAGER_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID")
+# ⚠️ `WORKING` and `IDLE` are running loops; a word missing here reads as an unreadable probe.
+MANAGER_STATES = ("OK", "WORKING", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID")
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_FLEET_KEEPER_DIR") or "~/.claude/state/fleet-keeper"
