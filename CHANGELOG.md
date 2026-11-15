@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.316.0
 
 - feat: **the rebase agent's repo coverage is configuration, not code.** `scripts/rebase-agent.py` carried the set as the `DEFAULT_REPOS` constant, so adding a repo meant editing the script and shipping a release. It now reads `repos.txt` — one `owner/name` per line, `#` comments and blank lines skipped — via a new `--repos-file` flag (default `/config/repos.txt`), deriving each clone path with `expanduser` and keeping the park thresholds as code defaults. The cluster CronJob's clone loop reads the same file, so a repo added there is cloned before the sweep runs; a repo named only to the script has no clone, `fetch_master` fails, and its row renders `UNKNOWN — queue could not be read`. A missing, empty or malformed set is exit `2` and never the clean-queue line — the same false negative the `--repo` guard already refuses, since an empty list used to read as "nothing is behind" when the truth is "nothing was examined". `docs/rebase-agent.md` § *The repo set* now describes the file rather than a constant, and `scripts/tests/test_rebase_agent.py` gains `LoadReposTest` pinning the ways the file can be wrong. The Mac's launchd path keeps working: `launchd/com.bborbe.rebase-agent.plist` passes `--repos-file` as an absolute path, because the default is container-only and launchd expands nothing.
 
