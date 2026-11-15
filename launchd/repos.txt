@@ -1,0 +1,15 @@
+# The rebase agent's repo set for a Mac-side run. One `owner/name` per line; `#` comments
+# and blank lines are skipped.
+#
+# Install to `~/.config/rebase-agent/repos.txt` — launchd/com.bborbe.rebase-agent.plist
+# passes that absolute path, because launchd expands neither `~` nor any variable.
+#
+# The cluster CronJob does not read this file: its copy lives in `bborbe/nuke`'s
+# `rebase-agent-repos` ConfigMap. Both halves read the same format, so the two stay in
+# step by being edited the same way, not by sharing a path across machines.
+#
+# The set is explicit, never "every repo". The conflict class exists only where a release
+# cut renames `## Unreleased` in a CHANGELOG that open branches also edit — a repo without
+# that convention cannot produce the conflict, so sweeping it would rebase for nothing.
+bborbe/claude-supervisor
+bborbe/vault-cli
