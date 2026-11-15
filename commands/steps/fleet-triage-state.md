@@ -387,8 +387,7 @@ script literally, which is what lets it exit 1. A literal `'` closes the single-
 it as `'\''`, and treat a name needing that as unreadable.
 
 Exit 0 is safe; **exit 1 means do not run the query** — report the name as unreadable and
-continue with the next manager. Same gate, same reasoning, and the same single-quoting, as
-`commands/steps/goal-closure.md:98-101`. ⚠️ **This is the only place the gate runs for a
+continue with the next manager. Same gate and quoting as `commands/steps/goal-closure.md:98-101`. ⚠️ **This is the only place the gate runs for a
 subject**, because Step 4 no longer arms anything itself: `manager-liveness.py --arm` is the
 manager's own verb, and running it from here would fake an arm on a loop that never ticked
 (`commands/steps/fleet-triage-act.md` § STUCK item 4). **Only once this exits 0** is the
@@ -442,20 +441,20 @@ value is "not this vault", so the loop continues and an unmatched subject still 
 
 `UNRESOLVED` means the subject has no page in any registered vault — report it as unread and
 **do not** run the quiet check. Otherwise the printed path is the vault root the check needs.
-(`scripts/resolve-folders.py` is not usable here: it takes no arguments and resolves the
-**current session's** vault from cwd, not a subject's.)
+(`scripts/resolve-folders.py` resolves the **current session's** vault, not a subject's.)
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-quiet.py" \
   --subject '<subject>' --vault '<the absolute vault root from above>'
 ```
 
-It exits 2 with a reason on stderr and writes nothing when it cannot read — **a failed read is
-never an auto-quiet verdict**: report the manager as unread and leave the loop alone.
+Exit 2 (reason on stderr, nothing written) is a failed read — **never an auto-quiet
+verdict**: report the manager as unread and leave the loop alone.
 
 | Reading | Cause | Is it a finding? |
 |---|---|---|
 | `OK` | loop armed | no |
+| `WORKING` / `IDLE` | mid-turn, no round / armed, no round, no work | **no** — never drive a re-arm or restart |
 | `STOPPED` + subject page reads `status: completed` / `aborted` | the subject is **terminal** | **no** — a loop on a closed subject is the bug |
 | `STOPPED` + subject page reads `status: hold` | a **pause**, not a closure — see `commands/steps/goal-closure.md` | **no** — a `hold` subject never reports `CLOSE` and never authorises a stop, so an armed loop on one is correct, not a defect |
 | `STOPPED` + `manager-quiet.py` reports `stood-down` for the subject | **auto-quiet** | **no** — re-arming without adding work just reproduces the stand-down. The lever is the quiet threshold, not the marker |
@@ -464,7 +463,8 @@ never an auto-quiet verdict**: report the manager as unread and leave the loop a
 | `STALE` inside one observed period | round duration exceeded the declared interval | **no** — see the calibration note below |
 | `WRONG-BRANCH` | the record is on the tier its detail names | **no** — re-probe there; never drive a re-arm |
 | exit **3**, empty stdout | no record, no page: a mistyped or abbreviated name | **no** — report it unresolved, never `UNARMED` |
-| `INVALID` | a record **exists and cannot be read** — the manager's state is unknown, a probe failure, not a fact about the fleet | **no** — report the manager as unread and leave the loop alone. ⚠️ **Never read `INVALID` as a lapse** — the script says the two "must never be collapsed" (`scripts/manager-liveness.py:366-374`), because `UNARMED` means *no manager ever armed this subject* while `INVALID` means *we could not tell* |
+| `INVALID` | a record **exists and cannot be read** — the manager's state is unknown, a probe failure, not a fact about the fleet | **no** — report the manager as unread and leave the loop alone. ⚠️ **Never a lapse**: `UNARMED` = never armed, `INVALID` = could not tell (`classify` docstring) |
+| `MISS` (`wake-misses.py`) | last gate wake reached no manager | **yes — `NO-LOOP`** (`steps/wake-misses.md`) |
 
 ⚠️ **`STALE` is arithmetic, not a death verdict.** The constant has one home —
 `scripts/manager-liveness.py:90` (`SLACK = 180`) — and is not restated here, and a

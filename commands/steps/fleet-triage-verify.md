@@ -90,6 +90,7 @@ Fleet triage — <YYYY-MM-DD HH:MM>
   ────────────────────────────────────────────────────────
   sessions 28 · accounted for 28 · unclassified 0
   managers 7 · armed 5 · terminal 1 · auto-quiet 1
+  wakes measured 18 · unmeasured 0 · stale misses 0
 
   RESULT: ✅ ALL GOOD — every session is working, closed, or waiting with a named reason.
 ```
@@ -116,8 +117,11 @@ the broken read rather than being excused by it. ⚠️ Never count `unverified`
 `NO-LOOP == 0`, and `accounted for == sessions` (every live session landed in exactly one row —
 an unclassified session is a hole in the sweep, not a clean bill).
 
-**`NO-LOOP` counts only § 3.6's one real case** — a manager with a live, non-terminal subject
-carrying runnable work and no loop. Terminal subjects and auto-quiet stand-downs are counted
+**`NO-LOOP` counts only § 3.6's two real cases** — a manager with a live, non-terminal subject
+carrying runnable work and no loop, and a subject whose last actionable gate wake missed (a
+`MISS` line from `wake-misses.py`: `NO-MANAGER`, `NO-PANE`, `HEADLESS`, or a failed wake run),
+each subject counted once. Print `wake-misses.py`'s `measured` / `unmeasured` counts beside it;
+`measured=0` means no wake was checked, and the line says so rather than reading green. Terminal subjects and auto-quiet stand-downs are counted
 separately on the managers line and never make the verdict red. A run that reports a finished
 goal as "manager without a loop" has replaced one wrong number with another.
 
@@ -125,10 +129,11 @@ When any of the four zero-counters is non-zero, **or `accounted for` ≠ `sessio
 block prints with the failure list instead of the green line:
 
 ```
-  RESULT: ⚠️ 3 THINGS OFF
+  RESULT: ⚠️ 4 THINGS OFF
     1. STUCK — <label> (<sid-prefix>): idle 41m, 3 open boxes, nothing outside the fleet blocking
     2. UNCARDED — <label> (<sid-prefix>): parked on "pick — 1. …" with no board card
     3. FINISHED-OPEN — <label> (<sid-prefix>): task completed, 0 open boxes, pid 5120 still alive
+    4. NO-LOOP — <subject>: last gate wake NO-MANAGER at <ts>, session <sid8> live=no
 ```
 
 ⚠️ **Never print the green line when a count is non-zero.** A summary that says "all good"

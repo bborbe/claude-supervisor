@@ -1579,13 +1579,15 @@ class GateDrivenLiveness(unittest.TestCase):
         self.stale_arm()
         self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
 
-    def test_a_dead_gate_reads_ok_gate_down_not_stale(self):
-        """A dead gate must not turn into an uncapped restart storm across the tier."""
+    def test_a_dead_gate_reads_idle_gate_down_not_stale_and_not_ok(self):
+        """A dead gate must not turn into an uncapped restart storm across the tier — and
+        it must not read OK either: no round and no work ran, and nothing will wake the
+        manager while the gate is down. IDLE is never restarted, so the storm stays shut."""
         self.stale_arm()
         self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 4000)
         self.heartbeat("some-other-subject.heartbeat", 4000)
         state, detail = self.m.classify(self.s, time.time())
-        self.assertEqual("OK", state)
+        self.assertEqual("IDLE", state)
         self.assertIn("gate-down", detail)
 
     def test_an_expired_sleep_with_a_fresh_gate_heartbeat_stays_stale(self):
@@ -1722,17 +1724,19 @@ class WorkSignal(unittest.TestCase):
         self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
         self.heartbeat("some-other-subject.heartbeat", 5)
 
-    def test_a_round_free_but_working_goal_reads_ok(self):
-        """FALSE STALE — the direction the record used to miss entirely.
+    def test_a_round_free_but_working_goal_reads_working_not_stale_and_not_ok(self):
+        """FALSE STALE — the direction the record used to miss entirely — without a false OK.
 
         Cadence far past the limit, no round, gate down (no heartbeat written): pre-fix
         this read STALE and `topic-keepalive.py` would restart a working manager. The
-        transcript moved, so it is working, and it reads OK.
+        transcript moved, so it is working: it must not read STALE (no mid-turn restart),
+        and it must not read OK either (no round ran). It reads WORKING, which no restart
+        path acts on.
         """
         s = self.arm_old(age=5000, session=self.SID)
         self.transcript(self.SID, 30)
         state, detail = self.m.classify(s, time.time())
-        self.assertEqual("OK", state)
+        self.assertEqual("WORKING", state)
         self.assertRegex(detail, r"work=\d+s")
         self.assertIn("working (no round", detail)
 
@@ -1782,6 +1786,82 @@ class WorkSignal(unittest.TestCase):
         self.assertRegex(working_detail, r"work=\d+s")
         self.assertIn("work=none", armed_detail)
         self.assertNotEqual(working_detail, armed_detail)
+
+
+class DeclaredBound(unittest.TestCase):
+    """The observed period never stretches the limit past `DECLARED_K × declared`.
+
+    A manager that stops rounding teaches the record its own silence: every long gap
+    raises the p90 and the limit follows. Measured 2026-11-15 on The Attention Board goal
+    (declared 900 s, gap median 51 030 s): limit 127 755 s, so 18 h with no round read OK.
+    """
+
+    SUBJECT = "The Attention Board Shows Managers by Default and Learns From Misrouted Cards"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+        self.addCleanup(lambda: os.environ.pop("MANAGER_GATE_LOOP_STATE_DIR", None))
+        self.addCleanup(lambda: os.environ.pop("MANAGER_TRANSCRIPT_PROJECTS_DIR", None))
+
+    def record(self, branch, gaps, declared, age):
+        """Write a `.arms` ring with these gaps and a `.cadence` of `declared` aged `age`."""
+        s = self.m.slug(self.SUBJECT, branch)
+        now = time.time()
+        epochs = [now - age]
+        for g in reversed(gaps):
+            epochs.insert(0, epochs[0] - g)
+        with open(self.m.path(s, "arms"), "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{int(e)} {declared}\n" for e in epochs))
+        p = self.m.path(s, "cadence")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(f"{declared}\n")
+        os.utime(p, (now - age, now - age))
+        return s
+
+    def test_k_is_the_measured_value(self):
+        self.assertEqual(5, self.m.DECLARED_K)
+
+    def test_a_runaway_period_is_bounded_and_the_silent_manager_is_stale(self):
+        # The real shape: 900 s declared, gaps of half a day, 64 455 s since the last round.
+        s = self.record("topic", [51030] * 11, 900, 64455)
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("STALE", state, detail)
+        self.assertIn("limit=4680s", detail)
+        self.assertIn("period=4500s(bounded 5x declared)", detail)
+        self.assertRegex(detail, r"observed=\d+s")
+
+    def test_the_attention_board_shape_reads_idle_when_the_gate_watches_it(self):
+        # SC5's verification reading: a goal manager the gate still wakes reads IDLE.
+        s = self.record("goal", [51030] * 11, 900, 64455)
+        gate = os.path.join(self.m.GATE_LOOP_STATE_DIR, "vault")
+        os.makedirs(gate, exist_ok=True)
+        for name in (f"{self.m.base_slug(self.SUBJECT)}.heartbeat", "other.heartbeat"):
+            with open(os.path.join(gate, name), "w", encoding="utf-8") as fh:
+                fh.write("0 x rc=0\n")
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("IDLE", state, detail)
+        self.assertNotEqual("OK", state)
+
+    def test_the_subject_k_was_measured_from_is_left_untouched(self):
+        # The Fleet Manager's real gaps, read 2026-11-15. Its observed period (3905 s)
+        # sits under 5 × 900 = 4500 s, so the bound does not bind: the limit is exactly
+        # what it was before the bound existed, and the bound adds no lapse here.
+        gaps = [1552, 1556, 1556, 1557, 1560, 1562, 1562, 1569, 1676, 4534, 34145]
+        s = self.record("topic", gaps, 900, 1600)
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("OK", state, detail)
+        self.assertIn("limit=4085s period=3905s(observed)", detail)
+        self.assertNotIn("bounded", detail)
+
+    def test_a_period_inside_the_bound_is_left_alone(self):
+        s = self.record("topic", [1560] * 11, 900, 1600)
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("OK", state, detail)
+        self.assertIn("period=1560s(observed)", detail)
+        self.assertNotIn("bounded", detail)
 
 
 class SessionMarker(unittest.TestCase):
