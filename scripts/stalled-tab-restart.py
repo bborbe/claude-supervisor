@@ -59,10 +59,8 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_STALLED_TAB_STATE", "~/.claude/state/stalled-tab")
 )
 
-#: Two restarts with no progress between them is the cap. Deliberately different from
-#: `worker-keepalive.py`'s `RESUME_CAP` of 3: the store shape and the reset rule are reused,
-#: but a stalled tab is a LIVE session where a resume target is a dead one, so the second
-#: restart already carries more evidence than a third resume would.
+#: Two restarts with no progress is the cap — deliberately below `worker-keepalive.py`'s
+#: `RESUME_CAP` of 3, because a stalled tab is LIVE where a resume target is dead.
 RESTART_CAP = 2
 
 #: The card's two options, as literals because the answer is compared against them. The
