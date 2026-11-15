@@ -49,6 +49,10 @@ SECTIONS = (
 #: The flag refusals that must never be a STOP inside the command.
 FLAG_REFUSALS = ("goal-unflagged",)
 
+#: A `topic-spawn.py … --topic-open … --hand-run` call, matched on the call itself — never on
+#: a backtick placement, which the prose does not hold still.
+HAND_RUN_CALL = re.compile(r"topic-spawn\.py[^`\n]*--topic-open[^`\n]*--hand-run")
+
 #: (c) The upstream gates, as `(file, literal that must be present)`.
 UPSTREAM = (
     ("scripts/topic-keepalive.py", 'print("open-unflagged")'),
@@ -85,17 +89,16 @@ def main():
     if not any("--hand-run" in call for call in calls):
         failures.append("Step 2C never passes --hand-run — it refuses an unflagged topic "
                         "the operator named")
-    # (d) Each arm is judged by the sentence that carries it.
-    sentences = re.split(r"(?<=\.)\s+", topic)
-    for sentence in sentences:
-        if "--hand-run" in sentence and "`--topic-open --hand-run`" not in sentence \
-                and "drop `--hand-run`" not in sentence:
+    # (d) A `--hand-run` call belongs to the `None` arm only. Each call is judged by the
+    # sentence that carries it: that sentence must name `None` and must not name `UNKNOWN`.
+    for sentence in re.split(r"(?<=\.)\s+", topic):
+        if not HAND_RUN_CALL.search(sentence):
             continue
-        if "`--topic-open --hand-run`" in sentence and "`None`" not in sentence:
+        if "`None`" not in sentence or "`UNKNOWN`" in sentence:
             failures.append("Step 2C passes --hand-run outside the `None` arm — a keep-alive "
                             "resume could open an unflagged topic fresh")
     if not re.search(r"`UNKNOWN`/`AMBIGUOUS`[^\n]{0,200}drop `--hand-run`[^\n]{0,120}"
-                     r"`topic-unflagged`[^\n]{0,20}STOP", topic):
+                     r"`topic-unflagged`[^\n]{0,60}STOP", topic):
         failures.append("Step 2C's UNKNOWN/AMBIGUOUS arm does not keep the flag check "
                         "(drop --hand-run, STOP on topic-unflagged) — an undecidable "
                         "resume would open an unflagged topic fresh")
