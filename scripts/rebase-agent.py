@@ -196,17 +196,36 @@ def load_repos(path):
     except OSError as error:
         raise ValueError(f"repo set could not be read from {path}: {error}") from error
 
-    repos = []
+    repos, seen = [], set()
     for line in lines:
         entry = line.split("#", 1)[0].strip()
         if not entry:
             continue
-        if entry.count("/") != 1 or " " in entry:
+        # Both halves must be non-empty, neither may be a traversal segment, and no
+        # whitespace of any kind may survive: `bborbe/` would derive the workspaces
+        # directory itself as the clone path and `bborbe/..` its parent, so a set that
+        # "looks" valid would sweep a directory that is not a repo. The clone loop reads
+        # the same file and derives its target the same way, so a shape this rejects is a
+        # shape that loop would have acted on.
+        owner, _, name = entry.partition("/")
+        if (
+            "/" in name
+            or not owner
+            or not name
+            or owner in (".", "..")
+            or name in (".", "..")
+            or any(char.isspace() for char in entry)
+        ):
             raise ValueError(
                 f"{path}: {entry!r} is not owner/name — the clone loop reads the same "
                 "file and derives its target directory from the name after the slash"
             )
-        name = entry.split("/", 1)[1]
+        if entry in seen:
+            raise ValueError(
+                f"{path}: {entry!r} is listed twice — a duplicate sweeps the same repo "
+                "twice and emits duplicate rows"
+            )
+        seen.add(entry)
         repos.append({
             "repo": entry,
             "path": os.path.expanduser(f"~/Documents/workspaces/{name}"),

@@ -545,11 +545,26 @@ class LoadReposTest(unittest.TestCase):
         self.assertIn(missing, str(caught.exception))
 
     def test_malformed_entry_is_refused_not_silently_skipped(self):
-        for bad in ("bborbe", "bborbe/vault-cli/extra", "bborbe/ vault-cli"):
+        for bad in (
+            "bborbe",                 # no slash at all
+            "bborbe/vault-cli/extra",  # three segments
+            "/vault-cli",             # empty owner — derives the workspaces dir
+            "bborbe/",                # empty name — same directory, no repo
+            "bborbe/..",              # traversal — derives the workspaces parent
+            "../vault-cli",           # traversal on the owner side
+            "bborbe/ vault-cli",      # space
+            "bborbe/vaul\tt-cli",     # tab, mid-line — a trailing one is just stripped
+        ):
             with self.subTest(entry=bad):
                 with self.assertRaises(ValueError) as caught:
                     ra.load_repos(self.write(bad + "\n"))
                 self.assertIn("owner/name", str(caught.exception))
+
+    def test_a_duplicate_is_refused(self):
+        """A duplicate sweeps the same repo twice and emits duplicate rows and cards."""
+        with self.assertRaises(ValueError) as caught:
+            ra.load_repos(self.write("bborbe/vault-cli\nbborbe/vault-cli\n"))
+        self.assertIn("twice", str(caught.exception))
 
     def test_an_unreadable_set_exits_two_and_never_prints_the_clean_line(self):
         buf, err = io.StringIO(), io.StringIO()

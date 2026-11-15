@@ -37,7 +37,10 @@ read by `--repos-file` (default `/config/repos.txt`). Adding a repo is an edit t
 never a release of this script. The cluster CronJob's clone loop reads the same file, so a
 repo added there is cloned before the sweep runs; a repo named only to this script has no
 clone, `fetch_master` fails, and its row renders `UNKNOWN — queue could not be read` rather
-than sweeping. The current contents:
+than sweeping.
+
+The file is the source of truth, not this page. The rows below explain *why* each of the two
+current entries earns its place — the rationale is the part that does not live in the file:
 
 | Repo | Why it is in the set |
 |---|---|
@@ -53,10 +56,20 @@ render as "nothing is behind" when the truth is "nothing was examined".
 interval. A slash command cannot satisfy "detected within one poll interval with no human
 starting the run", because it is human-started by construction.
 
+⚠️ **The Mac job needs its own repo set, and launchd expands nothing.** The plist passes
+`--repos-file /Users/bborbe/.config/rebase-agent/repos.txt` as an absolute path — the
+script's default is the cluster pod's `/config/repos.txt`, which does not exist on macOS,
+so a job that omitted the flag would exit `2` on every tick before sweeping.
+
 ```bash
+mkdir -p ~/.config/rebase-agent
+cp launchd/repos.txt ~/.config/rebase-agent/repos.txt     # then edit it
 cp launchd/com.bborbe.rebase-agent.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.rebase-agent.plist
 ```
+
+The cluster CronJob does **not** read that file — its copy is the `rebase-agent-repos`
+ConfigMap in `bborbe/nuke`. Same format, same parser, one file per machine.
 
 Output goes to `~/.local/state/claude-supervisor/rebase-agent/latest.json` (plus one
 timestamped copy per run) and to `~/Library/Logs/rebase-agent.log`.
