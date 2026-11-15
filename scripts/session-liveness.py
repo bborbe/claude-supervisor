@@ -806,8 +806,19 @@ def coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
 def safe_coverage_report(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     """`coverage_report()` guarded so no exception can escape `main()` as exit 1.
 
-    Same invariant `safe_coverage()` carries: a diagnostic that cannot be taken is UNKNOWN
-    (exit 2), never a crash wearing ABSENT's exit code.
+    ⚠️ **Same invariant `check()` carries, and for the same reason.** `coverage_report()`
+    reaches the registry through `_identity()`, which `exec_module`s a sibling file with no
+    guard — so a missing or unparseable `session-identity.py` raises straight out of it, and
+    `main()` returning is the only thing between that and `sys.exit(1)`. One is this file's
+    ABSENT code, which every caller reads as "not live, resume is authorised"; a diagnostic
+    that cannot be taken is UNKNOWN (exit 2), never a crash wearing ABSENT's exit code.
+
+    ⚠️ **One guard, not two.** This replaces `safe_coverage()`, which wrapped the older
+    `(verdict, line)` reader: with `--coverage` now reading the richer report, keeping both
+    would have left two functions enforcing one invariant, and the day one of them drifted
+    the difference would be invisible from the call site. `coverage()` stays as the thin
+    `(verdict, line)` view over `coverage_report()`, so a caller that only wants the line
+    still has one.
     """
     try:
         return coverage_report(endpoint, registry_dir, timeout)
@@ -816,28 +827,6 @@ def safe_coverage_report(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT
             type(exc).__name__,
             exc,
         ), None
-
-
-def safe_coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
-    """`coverage()` guarded so no exception can escape `main()` as exit 1.
-
-    ⚠️ **Same invariant `check()` carries, and for the same reason.** `coverage()` reaches the
-    registry through `_identity()`, which `exec_module`s a sibling file with no guard — so a
-    missing or unparseable `session-identity.py` raises straight out of it, and `main()`
-    returning is the only thing between that and `sys.exit(1)`. One is this file's ABSENT code,
-    which every caller reads as "not live, resume is authorised"; a diagnostic that cannot be
-    taken is UNKNOWN (exit 2), never a crash wearing ABSENT's exit code. The suite already
-    treats an unimportable sibling as a real case (`load_from()` isolates exactly that), so
-    leaving this path unguarded while `check()` is guarded end-to-end was an oversight rather
-    than a decision.
-    """
-    try:
-        return coverage(endpoint, registry_dir, timeout)
-    except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
-        return UNKNOWN, "UNKNOWN — the stamp-coverage measurement could not be taken: %s: %s" % (
-            type(exc).__name__,
-            exc,
-        )
 
 
 def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
@@ -909,7 +898,7 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
 
 
 def safe_unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
-    """`unstamped()` guarded — see `safe_coverage` for why no exception may escape `main()`."""
+    """`unstamped()` guarded — see `safe_coverage_report` for why no exception may escape `main()`."""
     try:
         return unstamped(endpoint, registry_dir, timeout)
     except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller

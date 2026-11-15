@@ -412,8 +412,12 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         # nothing — and treating it as coverage would suppress a real goal-manager crash. The
         # topic's own cadence is the only thing that says the loop is actually running.
         topic_stem = entry[: -len(".md")]
+        # ⚠️ `LAPSED` belongs in this set for the same reason `STOPPED` does: the session is
+        # alive and writing, but its arm file is past the hard cap, so no round is coming and
+        # it covers nothing. Counting it as coverage is how a dead goal-manager loop is
+        # suppressed by a live-looking topic manager.
         if cadence_state(topic_stem, "topic") in (
-            "STOPPED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
+            "STOPPED", "LAPSED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
         ):
             continue
         return True
