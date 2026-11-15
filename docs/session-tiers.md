@@ -170,7 +170,8 @@ are kept alive; they are just not kept by a session.
 
 ### Owner
 
-**Owner:** a manager owns a subject only when its session reads `LIVE` and its loop reads `OK` or `STALE`.
+**Owner:** a manager owns a subject only when its session reads `LIVE` and its loop reads `OK`, `WORKING`, `IDLE` or `STALE`.
+`WORKING` (no round, but the transcript moved) and `IDLE` (armed, no round and no work) still hold the subject, so no second writer is opened for them.
 A loop reading `STOPPED`, `SLEEPING`, `UNARMED` or `INVALID`, or a probe that cannot answer,
 is **not** an owner: the session may still run, but nothing runs the round that would keep its
 workers alive. The session is read with `scripts/session-liveness.py --check`, the loop with
@@ -185,7 +186,7 @@ was deferred to a goal round that had stopped, and nothing kept it. The resolver
 three words — `owner`, `not-owner`, `cannot-tell` — and a caller chooses its ACTION from those,
 never a second ownership verdict from the raw facts:
 
-- **`owner`** — session `LIVE` **and** loop `OK` or `STALE`.
+- **`owner`** — session `LIVE` **and** loop `OK`, `WORKING`, `IDLE` or `STALE`.
 - **`not-owner`** — loop `STOPPED` (a deliberate stand-down, whatever the session reads),
   session `ABSENT`, or no session recorded on the page. This is the only answer that licenses a
   caller to hand the subject to another keeper.

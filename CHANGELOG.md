@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: `docs/session-tiers.md` § Owner names `WORKING` and `IDLE` as owner loop states, matching `owner.py` since v0.319.0. `scripts/tests/test_owner.py` pins `WORKING` in the live-armed and exhaustive ownership tests, and pins `WORKING` / `IDLE` in the every-documented-state mapping, so a word dropped from `LOOP_STATES` fails a test instead of reading as a probe failure.
+
 ## v0.319.1
 
 - fix: `/supervisor:fleet-triage` § 3.6 gives `WORKING` and `IDLE` their own row (not a finding, never a re-arm drive or restart). Before, neither word had a row, so a mid-turn manager could be read as a lapse and driven to re-arm. The keep-alive actor and `topic-keepalive.py` now name `WORKING` as an owner state.
