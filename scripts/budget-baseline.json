@@ -8,9 +8,9 @@
     "agents/goal-sweep-reader.md": 168247,
     "commands/fleet-loop.md": 4914,
     "commands/goal-drive.md": 10191,
-    "commands/goal-status.md": 47046,
+    "commands/goal-status.md": 47038,
     "commands/open.md": 85624,
-    "commands/steps/round-tail.md": 32452,
+    "commands/steps/round-tail.md": 32437,
     "commands/worker-drive.md": 50059
   }
 }
