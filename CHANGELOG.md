@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.319.1
 
 - fix: `/supervisor:fleet-triage` § 3.6 gives `WORKING` and `IDLE` their own row (not a finding, never a re-arm drive or restart). Before, neither word had a row, so a mid-turn manager could be read as a lapse and driven to re-arm. The keep-alive actor and `topic-keepalive.py` now name `WORKING` as an owner state.
 
