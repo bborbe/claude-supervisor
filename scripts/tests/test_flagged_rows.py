@@ -729,6 +729,18 @@ class BlockedBy(unittest.TestCase):
     def test_an_absent_field_is_empty(self):
         self.assertEqual(fr.blocked_by_of(page("flag: true")), [])
 
+    def test_a_completed_blocker_is_resolved_and_an_open_or_missing_one_stays(self):
+        # 2026-11-15: every listed blocker counted forever, so a flagged task whose
+        # prerequisites had all completed was skipped on every tick.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        for name, status in (("Done One", "completed"), ("Open One", "in_progress")):
+            with open(os.path.join(d, name + ".md"), "w", encoding="utf-8") as h:
+                h.write("---\nstatus: %s\n---\n" % status)
+        block = page("blocked_by:\n    - '[[Done One]]'\n    - '[[Open One]]'\n    - '[[Missing One]]'")
+        self.assertEqual(fr.blocked_by_of(block, d), ["[[Open One]]", "[[Missing One]]"])
+        self.assertEqual(fr.blocked_by_of(page("blocked_by: '[[done one]]'"), d), [])
+
 
 class RegistryProbe(unittest.TestCase):
     """A failed `--list` is not an empty fleet, and a `⚙ `-prefixed label is not absent.
