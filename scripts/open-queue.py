@@ -59,7 +59,11 @@ the round's act:
     ⚠️ **This leg only.** `/supervisor:open --flagged` (`flagged-rows.eligible()`) is the
     operator naming rows to open and does not apply this guard — nor the task tier's
     `stopped:` field, nor `prior_wait()`. Same boundary, same reason.
-  * **a `blocked_by`** — the row names a dependency that is not met.
+  * **a `blocked_by`** — the row names a dependency that is not met, as COMPUTED, never
+    as declared: `manager-predispatch.blocked_by_verdict()` resolves every entry against
+    the tasks directory, so a row whose blockers have all completed is admitted. Holding
+    on the raw array's presence reports a done dependency as an outstanding one — the
+    defect measured 2026-11-15 on `Rebuild Nuke Cluster - 2026W46-sun`.
   * **a future `defer_date`** — defer-UNTIL, not a due date: the row is deliberately
     parked, and `next-focus.py` reads the same distinction.
   * **a declared wait** — `prior_wait()` reads the session's own `Stop` records; see its
@@ -517,7 +521,8 @@ def prior_wait(block, attention_dir, now_s=None):
     return None
 
 
-def guards(block, today, attention_dir=None, name=None, index=None):
+def guards(block, today, attention_dir=None, name=None, index=None,
+           tasks_dir=None, task_index=None):
     """The reason this row may not open, or None when it may.
 
     The first failing guard is the reason reported, so the operator is told one thing
@@ -526,6 +531,10 @@ def guards(block, today, attention_dir=None, name=None, index=None):
     `name` + `index` carry the SUBJECT tier: the task's own title and the vault's link
     graph, from which its goal and topic are resolved. Both are optional so a caller that
     only wants the row's own guards (a test of `is_stopped`, say) need not build an index.
+
+    `tasks_dir` + `task_index` make the BLOCKER verdict computable — see the `blocked`
+    branch below. `tasks_dir` is optional for the same reason: without it the blocker
+    read falls back to the row's own declaration, which fails toward holding.
     """
     if block is None:
         return "unreadable task file"
@@ -553,7 +562,25 @@ def guards(block, today, attention_dir=None, name=None, index=None):
     if name is not None and index is not None and stopped_subject_of(name, index):
         return "subject stood down"
     if has_blocked_by(block):
-        return "blocked"
+        # ⚠️ **`blocked_by` is a DECLARATION, not a verdict — hold on the computed one.**
+        # A vault accumulates rows whose named blockers have since completed, and the raw
+        # array still lists them; holding on its presence alone reports such a row as
+        # blocked on a dependency that is already done. Measured 2026-11-15:
+        # `Rebuild Nuke Cluster - 2026W46-sun` was held by the fleet round while both of
+        # its blockers read `completed` and `vault-cli task get … blocked` returned empty.
+        #
+        # `manager-predispatch.blocked_by_verdict()` is the ONE resolver — every entry
+        # evaluated, and an entry whose file is missing, unreadable or statusless counts
+        # as unmet, so it fails toward holding. `manager-quiet.py` already holds on its
+        # answer; this leg reads the same function rather than a second opinion.
+        #
+        # `tasks_dir` absent means the verdict is not computable (a caller testing
+        # `is_stopped`, say). Keep the declaration read there: it is the old behaviour and
+        # it fails in the safe direction — never toward opening a row nothing verified.
+        if tasks_dir is None:
+            return "blocked"
+        if _predispatch.blocked_by_verdict(block, tasks_dir, task_index)["blocked"]:
+            return "blocked"
     state, detail = defer_date.defer_state(field(block, "defer_date"), today)
     if state == "invalid":
         # A value this script cannot vouch for is NOT "due now": read as deferred, and
@@ -646,10 +673,15 @@ def collect(tasks_dir, today, approved_json=None, attention_dir=None, topics_dir
 
     rows = []
     skipped = []
+    # Built ONCE: `blocked_by_verdict()` resolves one entry per blocker, so a `listdir`
+    # inside it would be O(rows x blockers) full scans of a tasks directory that runs to
+    # thousands of files (`manager-predispatch.task_index` records the same measurement).
+    task_index = _predispatch.task_index(tasks_dir)
     for entry in entries:
         name = entry["name"]
         block = blocks[name]
-        reason = guards(block, today, attention_dir, name=name, index=index)
+        reason = guards(block, today, attention_dir, name=name, index=index,
+                        tasks_dir=tasks_dir, task_index=task_index)
         if reason:
             skipped.append({"name": name, "reason": reason})
             continue
