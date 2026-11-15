@@ -63,6 +63,8 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 GUARD = os.path.join(HERE, "pane-wake-guard.py")
 LIVENESS = os.path.join(HERE, "manager-liveness.py")
+# The three state paths below are Claude Code's per-user state, expanded per user at run
+# time — the same location on every install, not a path on one author's machine.
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
 # The `.session` markers `manager-liveness.py --arm` writes — same env override as that
 # script's STATE_DIR, so a test or drill isolating one isolates both.
