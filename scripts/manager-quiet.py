@@ -279,13 +279,13 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
         # cannot read is not one it can rule the row out on, so the row stays runnable —
         # and the reason is said rather than swallowed, so the garbage is still visible.
         print(f"manager-quiet: {detail} — not counted as a defer", file=sys.stderr)
-    # ⚠️ The deferred read sits ABOVE the unapproved-phase read, and that order is the
-    # fix: a `phase: todo` row with a future `defer_date` is quiet for TWO reasons, and
-    # returning on the phase alone dropped the date the stand-down line needs. Measured
-    # 2026-11-07: the only quiet row carried `defer_date: "2026-11-14"` and the line read
-    # `reopen on no named trigger` — the one case `round-quiet.md` says a reader cannot
-    # act on. Only a FUTURE date is named here; a due or absent one still falls through
-    # to the phase branch, so an unapproved row never becomes runnable.
+    # ⚠️ The deferred read sits ABOVE the unapproved-phase read, and that order is
+    # load-bearing: a `phase: todo` row with a future `defer_date` is quiet for TWO
+    # reasons, and returning on the phase alone drops the date the stand-down line needs.
+    # Measured 2026-11-07: the only quiet row carried `defer_date: "2026-11-14"` and the
+    # line read `reopen on no named trigger` — the one case `round-quiet.md` says a
+    # reader cannot act on. Only a FUTURE date is named here; a due or absent one still
+    # falls through to the phase branch, so an unapproved row never becomes runnable.
     if state == "deferred":
         return {
             "kind": "quiet",
