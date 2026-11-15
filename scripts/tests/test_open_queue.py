@@ -452,6 +452,12 @@ class OpenQueueTest(unittest.TestCase):
 
         Scanning past it reads the next key's indented list (`tags:`, `depends_on:`)
         as a blocker and refuses a row that has none.
+
+        ⚠️ **Kept alongside the computed verdict, not replaced by it.** The selection path
+        now resolves through `blocked_by_verdict` (`fm_wikilinks` / `fm_list_body`), a
+        different parser from `has_blocked_by`, so this next-key case has to be pinned
+        against the parser that actually runs — otherwise a `[]` followed by a list-shaped
+        key reads as a blocker again, one parser further in.
         """
         task_file(
             self.tasks,
@@ -462,6 +468,67 @@ class OpenQueueTest(unittest.TestCase):
 
         self.assertEqual([r["name"] for r in rows], ["nextkey"])
         self.assertEqual(skipped, [])
+
+    def test_completed_blockers_do_not_hold_the_row(self):
+        """A blocker that reads `completed` is DONE — the row is not blocked on it.
+
+        The raw `blocked_by` array still names it, which is why holding on the array's
+        presence reported a done dependency as an outstanding one. Measured 2026-11-15:
+        `Rebuild Nuke Cluster - 2026W46-sun` was held by the fleet round while both its
+        blockers read `completed` and `vault-cli task get … blocked` returned empty.
+        """
+        task_file(self.tasks, "gcdev", "status: completed\n")
+        task_file(self.tasks, "gcprod", "status: completed\n")
+        task_file(
+            self.tasks,
+            "ready",
+            "status: in_progress\nflag: true\n"
+            "blocked_by:\n    - '[[gcdev]]'\n    - '[[gcprod]]'\n",
+        )
+        rows, skipped = self.collect(["ready"])
+
+        self.assertEqual([r["name"] for r in rows], ["ready"])
+        self.assertEqual(skipped, [])
+        opened, _ = oq.select(rows, live=0, target=30)
+        self.assertEqual([r["name"] for r in opened], ["ready"])
+
+    def test_an_aborted_blocker_still_holds_the_row(self):
+        """`aborted` is terminal but NOT completed — it will never complete.
+
+        The canonical rule (`agents/goal-drive.md:183`) is that a task is blocked while
+        at least one named blocker is not `completed`, so this is the case that keeps the
+        computed verdict from degenerating into "any non-open blocker is fine".
+        """
+        task_file(self.tasks, "dropped", "status: aborted\n")
+        task_file(
+            self.tasks,
+            "held",
+            "status: in_progress\nflag: true\nblocked_by: '[[dropped]]'\n",
+        )
+        rows, skipped = self.collect(["held"])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(skipped, [{"name": "held", "reason": "blocked"}])
+
+    def test_a_partly_completed_blocked_by_still_holds(self):
+        """EVERY entry is evaluated — one open blocker holds the row.
+
+        A first-entry-only read lands a genuinely blocked row in the open set, which is
+        the spawn offer this whole leg exists to gate.
+        """
+        task_file(self.tasks, "doneone", "status: completed\n")
+        task_file(self.tasks, "openone", "status: in_progress\n")
+        task_file(
+            self.tasks,
+            "halfway",
+            "status: in_progress\nflag: true\n"
+            "blocked_by:\n    - '[[doneone]]'\n    - '[[openone]]'\n",
+        )
+        rows, skipped = self.collect(["halfway"])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(skipped, [{"name": "halfway", "reason": "blocked"}])
+
 
     def test_empty_key_does_not_read_the_next_line_as_its_value(self):
         """`\\s*` matches `\\n`, so an empty key would swallow the line below it.
