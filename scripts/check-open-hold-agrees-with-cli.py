@@ -71,8 +71,25 @@ def disagreements(held, blocked_of):
     return [name for name in held if not blocked_of(name)]
 
 
-def held_by_open_leg(tasks_dir):
-    """The names `open-queue.py` skipped with reason `blocked`."""
+def false_admits(admitted, blocked_of):
+    """The admitted rows the CLI DOES consider blocked — the other direction.
+
+    A one-directional check cannot tell a correct pair of implementations from two that
+    both say "not blocked": it only ever asks whether a held row is really blocked. This
+    asks the converse — a row the leg opens while the CLI reports an unmet dependency is
+    the same defect mirrored, and it is the one that spawns a worker onto blocked work.
+    """
+    return [name for name in admitted if blocked_of(name)]
+
+
+def open_leg_sets(tasks_dir):
+    """`(held, admitted)` — the names `open-queue.py` skipped as `blocked`, and selected.
+
+    ⚠️ **The JSON shape is pinned, not probed.** `open-queue.py --json` emits an object
+    with `selected` and `skipped` arrays; a `.get(…, [])` default would turn any shape
+    change into two empty sets, and both directions below would then pass vacuously —
+    the exact failure this check exists to catch, one layer down. Refuse the shape.
+    """
     try:
         proc = subprocess.run(
             [sys.executable, OPEN_QUEUE, "--tasks-dir", tasks_dir, "--json"],
@@ -92,7 +109,15 @@ def held_by_open_leg(tasks_dir):
         payload = json.loads(proc.stdout)
     except ValueError as exc:
         raise SystemExit("check-open-hold: open-queue.py --json is not JSON — %s" % exc)
-    return [row["name"] for row in payload.get("skipped", []) if row.get("reason") == "blocked"]
+    if not isinstance(payload, dict) or not isinstance(payload.get("selected"), list) \
+            or not isinstance(payload.get("skipped"), list):
+        raise SystemExit(
+            "check-open-hold: open-queue.py --json did not carry `selected` and `skipped` "
+            "lists — the read shape changed and this check's comparison would be empty"
+        )
+    held = [row["name"] for row in payload["skipped"] if row.get("reason") == "blocked"]
+    admitted = [row["name"] for row in payload["selected"]]
+    return held, admitted
 
 
 def cli_blocked_map(vault):
@@ -150,20 +175,30 @@ def fixture():
                      "Docker Registry GC (prod) - 2026W46-sat"):
             with open(os.path.join(tasks, name + ".md"), "w", encoding="utf-8") as handle:
                 handle.write("---\nstatus: completed\n---\n")
+        # ⚠️ **`approved_at` AND `flag` are both load-bearing, not decoration.**
+        # `open-queue.py` does not read the task directory itself — it calls
+        # `approved-not-started.py` (predicate: `approved_at`, or an operator-set flag),
+        # and then `select()` admits only rows whose flag is truthy. A fixture row
+        # carrying neither never enters the payload, so `guards()` never sees it and the
+        # regression direction below passes VACUOUSLY: it would report "the current code
+        # does not hold it" for a row the queue never considered. Caught in review
+        # 2026-11-15 on this very script — hence the explicit vacuity check in `main()`.
         with open(os.path.join(tasks, row + ".md"), "w", encoding="utf-8") as handle:
             handle.write(
                 "---\nstatus: in_progress\n"
+                "approved_at: '2026-11-15T09:00:00+00:00'\n"
+                "flag: true\nflag_set_by: operator\n"
                 "blocked_by:\n"
                 "    - '[[Docker Registry GC (dev) - 2026W46-sat]]'\n"
                 "    - '[[Docker Registry GC (prod) - 2026W46-sat]]'\n"
                 "---\n"
             )
-        held_now = held_by_open_leg(tasks)
+        held_now, admitted_now = open_leg_sets(tasks)
         block = open_queue.read_frontmatter(tasks, row)
         # The PRE-FIX selection predicate: presence, never resolution.
         held_before = [row] if open_queue.has_blocked_by(block) else []
     # The measured CLI answer for that shape — every blocker completed, so nothing blocks.
-    return held_now, disagreements(held_before, lambda name: False)
+    return held_now, admitted_now, row, disagreements(held_before, lambda name: False)
 
 
 def main(argv=None):
@@ -180,11 +215,20 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.fixture:
-        held_now, flagged = fixture()
+        held_now, admitted_now, row, flagged = fixture()
         if held_now:
             print(
                 "check-open-hold: REGRESSION — the current selection path still holds %s, "
                 "whose blockers all read `completed`." % ", ".join(held_now),
+                file=sys.stderr,
+            )
+            return 2
+        if row not in admitted_now:
+            print(
+                "check-open-hold: FIXTURE IS VACUOUS — %s never reached the admitted set, so "
+                "`not held` says nothing about the guard. Check the row still satisfies "
+                "`approved-not-started.py`'s predicate (approved_at, or an operator-set flag)."
+                % row,
                 file=sys.stderr,
             )
             return 2
@@ -196,10 +240,10 @@ def main(argv=None):
             )
             return 2
         print(
-            "check-open-hold: fixture ok — the row is admitted by open-queue.py, and the "
+            "check-open-hold: fixture ok — %s is admitted by open-queue.py, and the "
             "detector fires on %d row(s) of the pre-fix shape.\n"
             "  ⚠️ exit 1 here is the EXPECTED result of --fixture; never wire this into CI."
-            % len(flagged)
+            % (row, len(flagged))
         )
         for name in flagged:
             print("  HELD BUT UNBLOCKED: %s" % name)
@@ -208,20 +252,27 @@ def main(argv=None):
     if not args.tasks_dir or not args.vault:
         parser.error("live mode needs --tasks-dir and --vault (or pass --fixture)")
 
-    held = held_by_open_leg(args.tasks_dir)
+    held, admitted = open_leg_sets(args.tasks_dir)
     blocked_map = cli_blocked_map(args.vault)
-    flagged = disagreements(held, blocked_map.get)
-    if not flagged:
+    wrongly_held = disagreements(held, blocked_map.get)
+    wrongly_opened = false_admits(admitted, blocked_map.get)
+    if not wrongly_held and not wrongly_opened:
         print(
-            "check-open-hold: %d held row(s), all blocked by the CLI's computation too"
-            % len(held)
+            "check-open-hold: %d held and %d admitted row(s); both directions agree with "
+            "the CLI's computation" % (len(held), len(admitted))
         )
         return 0
-    print("check-open-hold: %d row(s) held while vault-cli reports nothing blocking them:"
-          % len(flagged), file=sys.stderr)
-    for name in flagged:
-        why = "absent from the listing" if name not in blocked_map else "blocked=false"
-        print("  %s  (%s)" % (name, why), file=sys.stderr)
+    if wrongly_held:
+        print("check-open-hold: %d row(s) held while vault-cli reports nothing blocking them:"
+              % len(wrongly_held), file=sys.stderr)
+        for name in wrongly_held:
+            why = "absent from the listing" if name not in blocked_map else "blocked=false"
+            print("  %s  (%s)" % (name, why), file=sys.stderr)
+    if wrongly_opened:
+        print("check-open-hold: %d row(s) admitted while vault-cli reports an unmet blocker:"
+              % len(wrongly_opened), file=sys.stderr)
+        for name in wrongly_opened:
+            print("  %s  (blocked=true)" % name, file=sys.stderr)
     return 1
 
 
