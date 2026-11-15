@@ -35,17 +35,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-#: The entrypoint a tab carries. A manager on this one is visible and reachable.
-INTERACTIVE = "cli"
-
 #: The entrypoint a headless session carries. A manager on this one is invisible.
 HEADLESS = "sdk-cli"
 
 #: The page kinds a manager owns. A task page's session is a worker, and a worker is
 #: headless by design (`docs/role-mode-matrix.md` Rule 1) — never a defect here.
 MANAGER_KINDS = ("topic", "goal")
-
-PROBE_TIMEOUT = 30
 
 
 def _load(name, filename):
