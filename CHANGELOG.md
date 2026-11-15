@@ -8,6 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: goal and topic loops tick Success Criteria / Definition of Done / Completion Gate boxes on an inline citation they resolved this tick (merged PR, release tag, completed task on the goal tier, completed goal on the topic tier). `commands/steps/goal-closure.md` § Step 0 is the single home, replacing the "close, never certify" rule that left goal and topic boxes with no owner. Each tier ticks only pages it owns: a goal loop ticks its goal and only those tasks whose liveness reads `ABSENT`; a topic loop ticks its topic page. Once all tracked work is terminal, unevidenced boxes raise one `ack` notice per page, recorded in `# Progress`, instead of a silent `OPEN` every tick.
+- feat: closure Step 0b (goal branch, subject only) unlinks the goal's non-terminal linked tasks before it closes, after the tracked set is examined, and records them in `# Progress`. It uses each task's raw `goals:` entry, because `vault-cli goal complete` compares raw entries and never matches `'[[<goal>]]'`. A started task whose liveness reads `LIVE`/`UNKNOWN`, a failed unlink or an unsafe task name holds the close.
+- fix: the topic tier no longer runs `vault-cli goal complete` on member goals. A member goal goes to its goal manager, which moves its open tasks out (Step 0b) before closing it, so a goal is no longer closed with its open tasks still linked.
+
 ## v0.313.5
 
 - fix: **a `CLOSERS` row names its store item id.** The row carried title, pane, link and class, so an answered item could not be traced from the digest: the store's key is the 32-char item id that `attention-ask.py poll` and `attention-answer.py` both take, and the pane is not it. `row()` gains a `store_ref` flag used only by the `last-closers` section; the id rides the **provenance** line (`… · item=<id>`), never `what` — `what` is capped at 60 chars and carries the closer's own words, which the routine-continue table reads verbatim. The first line's columns and the row's three-line height are unchanged, so the `[<pane>]` join and the digest's 40-line payload cap are unaffected, and a synthetic pane-free row (which owns no store item) renders exactly as before. Pinned by `test_who_needs_me.py::LastClosersSection::test_a_store_row_names_its_item_id`.
