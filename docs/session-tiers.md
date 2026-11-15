@@ -70,7 +70,9 @@ nothing new, while opening one decides who supervises. Four rules follow:
    a page no leg reads is inert, which is the defect `--topic-open` was added to remove.
 3. **An approved worker is opened automatically**, up to `spawn.maxWorkerSoft`.
 4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
-   round, not to fill a gap. Only restarted, or opened because it was flagged.
+   round, not to fill a gap. Only restarted, or opened because it was flagged — or opened by
+   the operator's own `/supervisor:open`, which checks no flag (ruling 2026-11-15: unflagged
+   never opens *automatically*; the automatic paths check the flag before they call it).
 
 ⚠️ **Rule 4 binds every tier.** The fleet tier removed its manager-proposal row on 2026-10-29
 (`commands/fleet-drive.md`: *"No manager-proposal row — the round does not propose managers for

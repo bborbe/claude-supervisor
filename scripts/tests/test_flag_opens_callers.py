@@ -9,15 +9,15 @@ Two halves, and both are needed:
     with the shared predicate on today's fixtures while carrying its own copy of the rule
     (`flagged-rows.refusals()` did exactly that, and agreed with it on tasks).
 
-⚠️ **`commands/open.md` is the sixth path, asserted here directly.** Its § Step 0.5
+⚠️ **`commands/open.md` is the fifth path, asserted here directly.** Its § Step 0.5
 selector is executable prose an agent runs, not an importable module, so it cannot call a
 Python function — but it does carry an `OPENING_ACTORS=` literal, and this file parses it
 and compares it to the shared constant. `scripts/check-resume-flag-clause.py` guards the
 same agreement from the command side; asserting it here too means a repoint of any of the
-six paths turns THIS file red, which is what the positive control needs.
+five paths turns THIS file red, which is what the positive control needs.
 
 ⚠️ **The positive control is run by hand at execution time:** repoint each path in turn and
-watch this file go red — six repoints, six reds. A claim quantified over six paths is not
+watch this file go red — five repoints, five reds. A claim quantified over five paths is not
 evidenced by one.
 
 Run: python3 -m unittest discover -s scripts/tests -p 'test_flag_opens_callers.py'
@@ -45,7 +45,6 @@ CALLERS = (
     ("open_queue", "open-queue.py"),
     ("topic_spawn", "topic-spawn.py"),
     ("topic_keepalive", "topic-keepalive.py"),
-    ("goal_open_gate", "goal-open-gate.py"),
 )
 
 #: The pages a path is asked about. `task` is strict, `goal`/`topic` tolerant, so each
@@ -84,7 +83,6 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
         queue = _load("open_queue", "open-queue.py")
         spawn = _load("topic_spawn", "topic-spawn.py")
         keepalive = _load("topic_keepalive", "topic-keepalive.py")
-        gate = _load("goal_open_gate", "goal-open-gate.py")
         shared = _load("flag_provenance", "flag_provenance.py")
 
         for kind in ("task", "goal", "topic"):
@@ -102,10 +100,6 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
                                          "topic-spawn disagreed on %r" % block)
                         self.assertEqual(keepalive.flagged(block, kind), want,
                                          "topic-keepalive disagreed on %r" % block)
-                    if kind == "goal":
-                        # `/supervisor:open --goal`'s OPEN gate — the fifth path's verdict.
-                        self.assertEqual(gate.flagged(block, kind), want,
-                                         "goal-open-gate disagreed on %r" % block)
 
     def test_the_control_rows_are_not_vacuous(self):
         """Guard against a table where every row refuses — that would pass the loop above
@@ -144,7 +138,7 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
         self.assertFalse(shared.flag_admits(page, "task"))
 
     def test_the_task_batch_selector_matches_the_shared_constant(self):
-        """`commands/open.md` § Step 0.5 — the sixth path, an executable-prose selector.
+        """`commands/open.md` § Step 0.5 — the fifth path, an executable-prose selector.
 
         Parsed rather than imported: the command file's `OPENING_ACTORS=` literal is what
         an agent actually runs, so that literal is the thing that must agree.
