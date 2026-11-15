@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.321.1
 
 - fix: **`restart-worker.py --absent` reports a missing `vault-cli` as `environment-fault` / exit 3 instead of blaming the vault registration.** `resume_absent` resolved the cwd through `vault_configs()` before `resolve_launcher` was ever reached, and `vault_configs()` returns `None` when `find_vault_cli()` is `None` — so on a host with no `vault-cli` the run printed "the registration names vault 'X', which resolves to no existing directory" and exited **1**, sending the reader to inspect vault configuration when the real fault was the toolchain, and leaving exit 3 unreachable on the path whose whole job is bringing back a manager whose process is gone. The probe now runs at the top of `resume_absent`, ahead of the `not-absent` / `held-session` / `unknown-session-id` refusals, which is what the exit-code table already promised ("checked before every refusal"); those refusal tokens are unchanged, and `environment-fault` now outranks them on a degraded host. Guarded on `not os.environ.get("SUPERVISOR_VAULT_CONFIG")` exactly as `resolve_launcher` is — that override makes `vault_configs()` bypass `find_vault_cli()` entirely, so an unconditional probe would turn every drill and test run on a `vault-cli`-less host into exit 3. `docs/restart-worker.md` § `--absent` loses the sentence claiming exit 3 is unreachable there, and `resume_absent`'s docstring no longer says `held-session` outranks everything. Tests: four environment-fault cases plus the override-suppression case in `test_restart_worker.py::AbsentMode`.
 
