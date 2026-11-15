@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `scripts/wake-misses.py` reads the sweep gate's per-subject ledgers and lists every subject whose last actionable wake did not reach a manager (`NO-MANAGER`, `NO-PANE`, `HEADLESS`, or a failed wake run), with the resolved session and its `live=` value. A ledger written before the gate recorded wake outcomes counts as `unmeasured`, never as clean, and an unreadable state directory exits 2, never "0 misses".
+- feat: `/supervisor:fleet-triage` § 3.6 counts each `MISS` as `NO-LOOP`, so a subject whose manager is dead or headless is no longer missed by a check that starts from live manager sessions. The verify block prints the measured and unmeasured wake counts. The fleet keep-alive leg reports the same reading in its hand-back (`wake-misses=` and one `wake-miss:` line per subject), report-only.
+
 ## v0.315.1
 
 - fix: a goal whose only open box is the template DoD *"All linked tasks completed or moved out with a recorded reason"* now closes. Before this fix, that box stayed `[ ]` while any task was linked, so the goal never read `CLOSE` and closure Step 0b never ran. Step 0b now also runs when this box is the only open one, then ticks it as a `linked-task scan` (a new Step 0 evidence type) citing its own moved-out line. In `private-personal` on 2026-11-15, 6 in-progress goals carried the box.
