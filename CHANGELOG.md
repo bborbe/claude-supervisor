@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: a goal whose only open box is the template DoD *"All linked tasks completed or moved out with a recorded reason"* now closes. Before this fix, that box stayed `[ ]` while any task was linked, so the goal never read `CLOSE` and closure Step 0b never ran. Step 0b now also runs when this box is the only open one, then ticks it as a `linked-task scan` (a new Step 0 evidence type) citing its own moved-out line. In `private-personal` on 2026-11-15, 6 in-progress goals carried the box.
+
 ## v0.314.0
 
 - feat: goal and topic loops tick Success Criteria / Definition of Done / Completion Gate boxes on an inline citation they resolved this tick (merged PR, release tag, completed task on the goal tier, completed goal on the topic tier). `commands/steps/goal-closure.md` § Step 0 is the single home, replacing the "close, never certify" rule that left goal and topic boxes with no owner. Each tier ticks only pages it owns: a goal loop ticks its goal and only those tasks whose liveness reads `ABSENT`; a topic loop ticks its topic page. Once all tracked work is terminal, unevidenced boxes raise one `ack` notice per page, recorded in `# Progress`, instead of a silent `OPEN` every tick.

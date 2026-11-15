@@ -37,6 +37,7 @@ allowed evidence type that you resolved this tick:
 | release tag | `owner/repo@vX.Y.Z` | `gh -R owner/repo release view vX.Y.Z` exits 0 |
 | completed task (goal tier) | `[[Task Name]]` | `vault-cli task get "<task>" status --vault "<vault>"` reads `completed` |
 | completed goal (topic tier) | `[[Goal Name]]` | `vault-cli goal get "<goal>" status --vault "<vault>"` reads `completed` |
+| linked-task scan (goal tier, the linked-tasks box only) | `linked-task scan` + the `(loop): moved out` line's date, or `none open` | Step 0b step 1's scan, run this tick, finds no task still linked to the goal outside `completed`/`aborted` |
 
 Write the tick as `- [x] <unchanged box text> — evidence: <citation> (loop, YYYY-MM-DD)`, an
 inline citation on the same line. Never change the box's own text.
@@ -71,7 +72,17 @@ inline citation on the same line. Never change the box's own text.
 
 When the **subject** goal reads `CLOSE` on the goal branch, every task still linked to it that is
 not `completed` or `aborted` (`next`, `todo`, `in_progress`, `hold`, `backlog`) is moved out
-before the verb runs. Run it after the tracked set has been examined (see *What to do*), so a
+before the verb runs.
+
+⚠️ **The linked-tasks box.** The goal template's DoD carries *"All linked tasks completed or moved
+out with a recorded reason"*. That box stays `[ ]` while any task is linked, so a goal carrying it
+never reads `CLOSE` and this step would never run. Treat it as part of this step instead: when it is
+the **only** open box on the subject goal (match on `linked tasks completed or moved out`), run
+steps 1–4 below as if the goal read `CLOSE`. Then tick that box as a `linked-task scan` (Step 0
+table): re-run step 1's scan this tick; with nothing non-terminal left linked, write
+`— evidence: linked-task scan, moved out YYYY-MM-DD (loop, YYYY-MM-DD)`, or `none open` when
+nothing needed moving. The `(loop): moved out` line is the recorded reason. Then re-read with
+the reader (step 1 of *What to do*) and continue to the verb on `CLOSE`. Run it after the tracked set has been examined (see *What to do*), so a
 tracked task that itself closed this round is closed under the goal, not moved out. The topic
 tier never runs 0b: a member goal with open linked tasks is left to its goal manager.
 
