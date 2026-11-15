@@ -10,8 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: goal and topic loops tick Success Criteria / Definition of Done boxes on an inline citation they resolved this tick (merged PR, release tag, completed task, command output) — `commands/steps/goal-closure.md` § Step 0 is the single home, replacing the "close, never certify" rule that left goal and topic boxes with no owner; an unevidenced box raises one `closure-evidence-<slug>` card per page instead of a silent `OPEN` each tick
-- feat: closure step 0b unlinks open tasks from a goal before it closes, using each task's `goals:` entry as written, and records them in the goal's `# Progress`; `vault-cli goal complete` cannot catch these itself because it compares raw entries, so `'[[<goal>]]'` never matches the bare name
+- feat: goal and topic loops tick Success Criteria / Definition of Done / Completion Gate boxes on an inline citation they resolved this tick (merged PR, release tag, completed task on the goal tier, completed goal on the topic tier). `commands/steps/goal-closure.md` § Step 0 is the single home, replacing the "close, never certify" rule that left goal and topic boxes with no owner. Each tier ticks only pages it owns: a goal loop ticks its goal and only those tasks whose liveness reads `ABSENT`; a topic loop ticks its topic page. Once all tracked work is terminal, unevidenced boxes raise one `ack` notice per page, recorded in `# Progress`, instead of a silent `OPEN` every tick.
+- feat: closure Step 0b (goal branch, subject only) unlinks the goal's non-terminal linked tasks before it closes, after the tracked set is examined, and records them in `# Progress`. It uses each task's raw `goals:` entry, because `vault-cli goal complete` compares raw entries and never matches `'[[<goal>]]'`. A started task whose liveness reads `LIVE`/`UNKNOWN`, or a failed unlink, holds the close.
 
 ## v0.313.4
 

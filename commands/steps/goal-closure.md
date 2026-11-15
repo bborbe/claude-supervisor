@@ -8,84 +8,99 @@ user-invocable: false
 
 When: every tick, after the sweep
 
-Applies to the round's own subject and to every page in its tracked set, when every
-`# Success Criteria` box **and** every `# Definition of Done` box reads `[x]`.
+Applies to the round's own subject and to every page in its tracked set. Step 0 runs on open
+boxes every tick; steps 1–3 close a page once every closure box reads `[x]`.
 
 **A page closes on evidence. The loop may tick a box, but only with an inline citation it has
-resolved itself.**
+resolved itself this tick.**
 
-Workers tick only their own task boxes, so a goal's or topic's own SC/DoD boxes have no other
+Workers tick only their own task boxes, so a goal's or topic's own closure boxes have no other
 owner. Without this step, the reader would return `OPEN` on every tick and a goal whose work has
 shipped would stay open indefinitely. This step is the rule's single home; `commands/goal-loop.md`,
-`commands/topic-loop.md` and `commands/topic-drive.md` point here.
+`commands/topic-loop.md`, `commands/topic-drive.md` and `commands/steps/round-tail.md` point here.
 
 ## Step 0 — tick open boxes that carry resolvable evidence
 
-Before the reader runs, walk every open `[ ]` box in the page's closure sections
-(`# Success Criteria` + `# Definition of Done`, or `# Completion Gate` for a topic). Tick a box
-**only** when you hold an inline citation of one of the allowed evidence types **and** you
-resolved it this tick:
+**Which pages each tier ticks** — a page is ticked only by its own owner:
 
-| Evidence type | Citation written next to the box | Resolve it with |
+| Tier | Ticks | Never ticks |
+|---|---|---|
+| goal | its subject goal; a tracked task only when this round's liveness reading for it is `ABSENT` (`LIVE` = the worker owns its boxes; `UNKNOWN` fails closed) | another goal |
+| topic | its own topic page (`# Success Criteria` + `# Completion Gate`) | a member goal — that page is its goal manager's; a task |
+
+On each open `[ ]` box of a page the tier ticks, tick it **only** with an inline citation of an
+allowed evidence type that you resolved this tick:
+
+| Evidence type | Citation | Resolve it with |
 |---|---|---|
 | merged PR | `owner/repo#N` | `gh -R owner/repo pr view N --json state --jq .state` reads `MERGED` |
 | release tag | `owner/repo@vX.Y.Z` | `gh -R owner/repo release view vX.Y.Z` exits 0 |
-| completed task (goal tier only) | `[[Task Name]]` | `vault-cli task get "<task>" status --vault "<vault>"` reads `completed` |
+| completed task (goal tier) | `[[Task Name]]` | `vault-cli task get "<task>" status --vault "<vault>"` reads `completed` |
 | completed goal (topic tier) | `[[Goal Name]]` | `vault-cli goal get "<goal>" status --vault "<vault>"` reads `completed` |
-| command output | the command + its pasted output | re-run the command; the output still shows what the box claims |
-| operator answer | `card <item_id> (operator)` | `attention-ask.py poll <item_id>` reads `ANSWERED` with `tick it` |
 
-⚠️ **A task page whose worker is not provably gone is its worker's.** Run Step 0 on a tracked
-task only when this round's liveness reading for it is `ABSENT`. `LIVE` means the worker is
-working its own boxes. `UNKNOWN` fails closed. Either way, leave the task's boxes alone. The topic
-tier never reads a task file, so it cites goals, PRs, tags and commands, never tasks.
-
-Write the tick as `- [x] <unchanged box text> — evidence: <citation> (loop, YYYY-MM-DD)` — an
+Write the tick as `- [x] <unchanged box text> — evidence: <citation> (loop, YYYY-MM-DD)`, an
 inline citation on the same line. Never change the box's own text.
 
+- **Where a citation may come from.** Only from a link already on the page (the box line, its
+  `# Tasks` list, its `# Progress`, `# Results` or `# Pull Requests` section) or, on the goal tier,
+  from a tracked task. Never search the wider vault or GitHub for something that might fit.
 - **The evidence must match the box's claim, not just exist.** A merged PR proves only the
-  claim it implements. A `[[task]]` proves a box only when the task's own Success Criteria
-  restate that box's outcome. When you cannot match them, the box has no evidence.
-- **No resolvable citation → leave the box `[ ]`** and post **one** attention card per page:
-  `attention-ask.py post --dedup-key closure-evidence-<page-slug> --option "tick it" --option
-  "reword it" --option "file a task" --producer-id "<your session id>" --producer-kind session`,
-  listing every unevidenced box. The dedup key keeps it to one card per page across ticks, never
-  a silent `OPEN` round after round. On later ticks, poll the card. `tick it` ticks the listed
-  boxes citing the card. `reword it` and `file a task` leave the boxes open: append the answer to
-  the page's `# Progress` and stop re-posting until the page changes.
-- **No tick on evidence you did not resolve this tick**, and no tick to make a
-  close possible when the evidence is missing. Closure still follows the evidence; the loop now
-  records it instead of waiting for an owner that does not exist.
+  claim it implements. A `[[task]]` or `[[goal]]` proves a box only when its own Success Criteria
+  restate that box's outcome. If you cannot match them, the box has no evidence.
+- **Strip a wikilink alias** (`[[Name|alias]]` → `Name`) and run every page-sourced name,
+  `owner/repo` and tag through `closure-name-safe.py` (step 2 below, single-quoted) before it
+  reaches a command. On exit 1, the box has no evidence.
+- **No resolvable citation → leave the box `[ ]`.** Do not card a page whose work is still
+  running. Once nothing tracked can still produce evidence — every tracked task (goal tier) or
+  member goal (topic tier) reads `completed`/`aborted` — and boxes are still unevidenced, post
+  **one** notice, then record it on the page so later ticks do not re-post:
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py" post \
+    --mechanism ack --dedup-key "closure-evidence-<page-slug>" \
+    --payload "<page>: all tracked work is terminal but <n> closure box(es) have no evidence: <box texts>" \
+    --producer-id "<your session id>" --producer-kind manager
+  ```
+  Then append `- YYYY-MM-DD (loop): no evidence for <box texts> — notice <item_id>` to the page's
+  `# Progress`. Post again only when the set of unevidenced boxes differs from the last such
+  line. The operator ticks, rewords or files work on the page itself; the loop never reads an
+  answer.
+- **No tick on evidence you did not resolve this tick**, and no tick to make a close possible
+  when the evidence is missing.
 
-## Step 0b — move open linked tasks out before closing a goal
+## Step 0b — goal branch only: move open linked tasks out before the subject closes
 
-When the reader returns `CLOSE` for a goal, every task still linked to it at `next`, `todo` or
-`in_progress` is moved out **before** the verb runs. That way no open task is left pointing at a
-completed goal.
+When the **subject** goal reads `CLOSE` on the goal branch, every task still linked to it that is
+not `completed` or `aborted` (`next`, `todo`, `in_progress`, `hold`, `backlog`) is moved out
+before the verb runs. Run it after the tracked set has been examined (see *What to do*), so a
+tracked task that itself closed this round is closed under the goal, not moved out. The topic
+tier never runs 0b: a member goal with open linked tasks is left to its goal manager.
 
 ⚠️ **Do not rely on the verb to catch these tasks.** `vault-cli goal complete` compares each
 task's raw `goals:` entry with the goal name (`pkg/ops/goal_complete.go` `taskLinkedToGoal`).
 The usual link shape `- '[[<goal>]]'` never equals the bare name, so the verb passes over those
 tasks without refusing. Checked 2026-11-15 against vault-cli source.
 
-1. Find the linked tasks yourself. For each task file, check whether its `goals:` list carries
-   the goal as `[[<goal>]]` or as the bare `<goal>`.
-2. **Any open linked task whose liveness reading is `LIVE` or `UNKNOWN` blocks the close.** Do
-   not unlink a task a worker may be in the middle of. Report it as `closure: <goal> — CLOSE
-   held by live [[<task>]]` and close nothing this tick.
-3. For each remaining open one, unlink it with the entry **exactly as written** in that task's `goals:`
-   list: `vault-cli task remove "<task>" goals "<entry as written>" --vault "<vault>"`. The remove
-   verb matches the raw string, so `[[<goal>]]` and `<goal>` are different values. The task's own
-   `status` is untouched: it is unlinked, not closed.
+1. List the linked tasks yourself, and read each one's raw entry with
+   `vault-cli task get "<task>" goals --output json --vault "<vault>"`.
+2. **A worker that may be on the task holds the close.** If a linked task has a
+   `claude_session_id` and this round's liveness reading for it is `LIVE` or `UNKNOWN`, unlink
+   nothing, report `closure: <goal> — CLOSE held by live/unknown [[<task>]]`, and close nothing
+   this tick. A task with no `claude_session_id` was never started and does not hold.
+3. Unlink each remaining one with the entry **exactly as read**:
+   `vault-cli task remove "<task>" goals "<entry as read>" --vault "<vault>"`. The remove verb
+   matches the raw string, so `[[<goal>]]` and `<goal>` are different values. The task's own
+   `status` is untouched; it is unlinked, not closed. **If any remove fails**, report it
+   verbatim and close nothing this tick.
 4. Append one line to the goal's `# Progress`:
-   `- YYYY-MM-DD (loop): moved out at close — [[t1]] (<status>), [[t2]] (<status>) …`. Every
+   `- YYYY-MM-DD (loop): moved out at close — [[t1]] (<status>), [[t2]] (<status>) …`, so every
    task stays findable from the goal it left.
-5. Then run the verb (step 2 below). Never `--force`: this step is what makes a clean close
-   possible.
+5. Then run the verb (step 2 below). Never `--force`.
 
 ## What to do
 
-For the subject, then each page of the tracked set:
+For the subject, then each page of the tracked set: Step 0, then steps 1–3. **Exception on the
+goal branch:** when the subject goal reads `CLOSE`, hold its step 2 until every tracked page has
+been examined. Then run Step 0b, then the subject's step 2.
 
 1. **Read it with the reader script — never a whole-page count:**
    ```bash
@@ -242,7 +257,9 @@ arm says — which is why the topic row exists rather than the rule being restat
 ## What this step must never do
 
 - **No tick without an inline citation** you resolved this tick (Step 0). A tick with
-  no citation, or with one that does not resolve, is forbidden at every tier.
+  no citation, or with one that does not resolve, is forbidden at every tier. **No tick on a page
+  another owner holds** — a member goal on the topic tier, or a task whose liveness is not
+  `ABSENT`. Those pages may still be *closed* here once their boxes read `[x]`.
 - **Never set `status: completed` directly.** The verb writes it; nothing else may.
 - **Never close on a partial read.** A page whose DoD section is missing or empty is
   *unmeasurable*, not complete — report it as a gap. **The one exception is an absent DoD on
@@ -257,9 +274,11 @@ One line per page examined, and one for the round:
 
 ```
 closure: <page> — ticked <box> — evidence: <citation>   → resolved this tick
-closure: <page> — <n> unevidenced boxes                 → card closure-evidence-<slug>
-closure: <page> — moved out <n> open tasks              → listed in # Progress
-closure: <goal> — CLOSE held by live [[<task>]]         → nothing closed this tick
+closure: <page> — <n> unevidenced, work still running   → no notice yet
+closure: <page> — <n> unevidenced, all work terminal    → notice <item_id>, recorded in # Progress
+closure: <goal> — moved out <n> open tasks              → listed in # Progress
+closure: <goal> — CLOSE held by live/unknown [[<task>]] → nothing closed this tick
+closure: <goal> — unlink of [[<task>]] failed: <line>   → nothing closed this tick
 closure: <page> — <n> open (SC <a>, DoD <b>)            → not a candidate
 closure: <page> — TERMINAL (already <status>)           → skipped
 closure: <page> — UNMEASURABLE (<which section>)        → gap reported
