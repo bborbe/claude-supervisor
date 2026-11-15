@@ -16,6 +16,12 @@ Three regressions are silent:
       appears in the goal branch. The command still works; it just refuses the operator.
   (b) **The ceiling is dropped with the flag.** `--hand-run` skips the flag and nothing
       else; a call without `--topic-open` would skip the manager cap too.
+  (d) **`--hand-run` spreads to the resume arm.** Step 2C item 4 is reached two ways: from
+      `None` (no recorded id — only the operator's own open, since `topic-keepalive.py`
+      prints `open-unflagged` for an unflagged topic with no id) and from `UNKNOWN` /
+      `AMBIGUOUS` (a recorded id whose liveness could not be read — a keep-alive RESUME,
+      e.g. `agents/fleet-keepalive-actor.md`). A `--hand-run` on the second arm opens an
+      unflagged topic fresh, automatically, which is exactly what the rule forbids.
   (c) **An upstream gate disappears.** If `topic-keepalive.py` stopped printing
       `open-unflagged`, or `topic-spawn.py --goal` stopped refusing `goal-unflagged`, a
       round would hand `/supervisor:open` an unflagged subject and the command — which no
@@ -41,7 +47,7 @@ SECTIONS = (
 )
 
 #: The flag refusals that must never be a STOP inside the command.
-FLAG_REFUSALS = ("goal-unflagged", "topic-unflagged")
+FLAG_REFUSALS = ("goal-unflagged",)
 
 #: (c) The upstream gates, as `(file, literal that must be present)`.
 UPSTREAM = (
@@ -64,7 +70,7 @@ def main():
     text = COMMAND.read_text(encoding="utf-8")
     failures = []
 
-    for name, start, end in SECTIONS:
+    for name, start, end in SECTIONS[:1]:
         body = section(text, start, end)
         for token in FLAG_REFUSALS:
             if re.search(r"`%s`[^\n]{0,80}STOP" % re.escape(token), body):
@@ -76,10 +82,23 @@ def main():
     if not calls:
         failures.append("Step 2C no longer runs topic-spawn.py --topic-open — the manager "
                         "ceiling is unchecked on a topic open")
-    for call in calls:
-        if "--hand-run" not in call:
-            failures.append("Step 2C runs --topic-open without --hand-run — it refuses an "
-                            "unflagged topic the operator named: %s" % call.strip())
+    if not any("--hand-run" in call for call in calls):
+        failures.append("Step 2C never passes --hand-run — it refuses an unflagged topic "
+                        "the operator named")
+    # (d) Each arm is judged by the sentence that carries it.
+    sentences = re.split(r"(?<=\.)\s+", topic)
+    for sentence in sentences:
+        if "--hand-run" in sentence and "`--topic-open --hand-run`" not in sentence \
+                and "drop `--hand-run`" not in sentence:
+            continue
+        if "`--topic-open --hand-run`" in sentence and "`None`" not in sentence:
+            failures.append("Step 2C passes --hand-run outside the `None` arm — a keep-alive "
+                            "resume could open an unflagged topic fresh")
+    if not re.search(r"`UNKNOWN`/`AMBIGUOUS`[^\n]{0,200}drop `--hand-run`[^\n]{0,120}"
+                     r"`topic-unflagged`[^\n]{0,20}STOP", topic):
+        failures.append("Step 2C's UNKNOWN/AMBIGUOUS arm does not keep the flag check "
+                        "(drop --hand-run, STOP on topic-unflagged) — an undecidable "
+                        "resume would open an unflagged topic fresh")
 
     for rel, literal in UPSTREAM:
         source = (ROOT / rel).read_text(encoding="utf-8")

@@ -536,9 +536,11 @@ def main(argv: list[str]) -> int:
     # an unflagged subject never opens AUTOMATICALLY, but the operator's own
     # `/supervisor:open` opens what they name. Every automatic fresh open is gated upstream
     # of `open.md` — `topic-keepalive.py` prints `open-unflagged` instead of `open`, and
-    # `--goal` here refuses `goal-unflagged` — so the flag check inside `open.md` only ever
-    # fired on the operator's hand-run, refusing the one open the rule allows. The manager
-    # ceiling still binds a hand-run: the operator's intent does not create a slot.
+    # `--goal` here refuses `goal-unflagged`. `open.md` passes `--hand-run` only on its
+    # `None` arm (no recorded id), which no round reaches for an unflagged topic; its
+    # `UNKNOWN`/`AMBIGUOUS` arm — a keep-alive resume whose liveness could not be read —
+    # drops it, so an undecidable resume never opens an unflagged topic fresh. The manager
+    # ceiling binds a hand-run too: the operator's intent does not create a slot.
     if a.topic_open:
         if not a.hand_run and not flagged(frontmatter(topic_text), kind="topic"):
             return refuse(
