@@ -46,7 +46,9 @@ class VerdictTableTest(unittest.TestCase):
         # `IDLE` is the work-signal verdict — a round and the manager transcript's age both
         # old while a live gate watches — so the manager still HOLDS the subject (a second
         # writer must not be created for it); it is merely producing nothing.
-        for loop in ("OK", "IDLE", "STALE"):
+        # `WORKING` — no round inside the limit, but the transcript moved — is mid-turn on
+        # the subject, so it holds it too.
+        for loop in ("OK", "WORKING", "IDLE", "STALE"):
             self.assertEqual(("owner", "live-armed"),
                              self.o.verdict_of("LIVE", loop), loop)
 
@@ -92,15 +94,16 @@ class VerdictTableTest(unittest.TestCase):
 
     def test_no_state_other_than_live_and_armed_earns_owner(self):
         # The exhaustive statement of the definition: over every (session, loop) pair the two
-        # probes can produce, `owner` appears exactly for LIVE x {OK, IDLE, STALE} and nowhere
+        # probes can produce, `owner` appears exactly for LIVE x {OK, WORKING, IDLE, STALE} and nowhere
         # else. `IDLE` is in that set because the record's work signal makes "armed and
         # gate-watched but producing nothing" a manager that still holds its subject.
         sessions = ("LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED", "NONE")
-        loops = ("OK", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID",
+        loops = ("OK", "WORKING", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID",
                  "UNREADABLE", "NONE")
         owners = {(s, l) for s in sessions for l in loops
                   if self.o.verdict_of(s, l)[0] == "owner"}
-        self.assertEqual({("LIVE", "OK"), ("LIVE", "IDLE"), ("LIVE", "STALE")}, owners)
+        self.assertEqual({("LIVE", "OK"), ("LIVE", "WORKING"), ("LIVE", "IDLE"), ("LIVE", "STALE")},
+                         owners)
 
 
 class PageAndSessionTest(unittest.TestCase):
@@ -550,7 +553,10 @@ class CadenceTest(unittest.TestCase):
         self.assertEqual(self.k.PROBE_FAILED, self.k.loop_state("A Goal")[0])
 
     def test_every_documented_state_still_maps(self):
-        for state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID", "WRONG-BRANCH"):
+        # `WORKING` and `IDLE` included: missing from `LOOP_STATES`, a live `IDLE` owner read
+        # as a probe failure until 2026-11-15.
+        for state in ("OK", "WORKING", "IDLE", "STALE", "STOPPED", "UNARMED", "INVALID",
+                      "WRONG-BRANCH"):
             with self.subTest(state=state):
                 self._stub(stdout=f"{state}\tslug\tdetail\n")
                 self.assertEqual(state, self.k.loop_state("A Goal")[0])
