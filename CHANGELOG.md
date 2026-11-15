@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: goal and topic loops tick Success Criteria / Definition of Done boxes on an inline citation they resolved this tick (merged PR, release tag, completed task, command output) — `commands/steps/goal-closure.md` § Step 0 is the single home, replacing the "close, never certify" rule that left goal and topic boxes with no owner; an unevidenced box raises one `closure-evidence-<slug>` card per page instead of a silent `OPEN` each tick
+- feat: closure step 0b unlinks open tasks from a goal before it closes, using each task's `goals:` entry as written, and records them in the goal's `# Progress`; `vault-cli goal complete` cannot catch these itself because it compares raw entries, so `'[[<goal>]]'` never matches the bare name
+
 ## v0.313.4
 
 - fix: **an unowned gate no longer wakes every manager when no Fleet Manager is live.** `route_to_fleet()` returned the emit path whenever no live Fleet Manager resolved, so a `producer_kind: cron` gate with no session id — or any `unowned` gate — was handed to every manager's arm. It now distinguishes the two cases the old `if not self_id or not fleet` collapsed: an **unreadable** registry (`UNREADABLE`) still fails open, but a **readable** registry with no Fleet Manager suppresses the `unowned` class and counts it in a new `dropped(unowned-no-fleet)` bucket on the `LIVENESS` line, so the fallback is never silent. `dead-manager` and `claim-dead` are a separate residual and keep their fail-open emit.
