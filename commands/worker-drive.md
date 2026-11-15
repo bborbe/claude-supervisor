@@ -205,6 +205,8 @@ Both real levers in that session were found *after* the user pushed, never by th
 
 2. **Close**: `/vault-cli:sync-progress`, then `/vault-cli:session-close`, then `/exit`. The status stays `in_progress`; a deferred task is not `hold`, and neither is a task waiting on an operator decision — that is `in_progress` with its card open (`docs/worker-session-states.md` § Closed). The fleet round reaps the pane through `/supervisor:close`, which accepts a task deferred to a future `defer_date` (`task-not-terminal` refuses only a task that is neither terminal nor deferred).
 
+⚠️ **Closing loses nothing — the reopen is automatic.** A flagged task is reopened by `flagged-tick` once its `defer_date` passes (the flag is the approval); an unflagged one by its manager. The `defer_date` is the memory, the slot is the cost.
+
 **One doable item voids the park.** A step runnable today (a reload, a re-trigger, a criterion to reword) is driven first, and the park is re-tested afterwards. A wait at or under the park threshold stays live under its watcher. This is the one exception to § Rules' *never end the session*: the anchor is not terminal, but it is deferred, and holding a slot on a clock buys nothing the `defer_date` does not.
 
 ## Step 4 — Never ask for a non-fork

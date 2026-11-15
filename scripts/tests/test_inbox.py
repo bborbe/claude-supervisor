@@ -420,3 +420,19 @@ class RankTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OperatorFlagLeavesInboxTest(unittest.TestCase):
+    """Ruling 2026-11-15: an operator-flagged `todo` row is approved, not inbox work."""
+
+    def test_parse_marks_only_an_operator_flag(self):
+        cases = {
+            "flag: true\nflag_set_by: operator\n": True,
+            "flag: true\nflag_set_by: claude-1\n": False,
+            "flag: \"true\"\nflag_set_by: operator\n": False,
+            "": False,
+        }
+        for extra, want in cases.items():
+            with self.subTest(extra=extra):
+                fm, _ = inbox.parse("---\nstatus: in_progress\nphase: todo\n%s---\nbody\n" % extra)
+                self.assertIs(fm["_approved"], want)

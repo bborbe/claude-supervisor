@@ -44,7 +44,8 @@ stdin (JSON):
     goal_phase     str    — the subject goal's phase; two-way opens only at `execution`.
     rows[]         — this round's coverage rows: box, kind (sc|dod), order, driving,
                      proposal, door, door_reason, optional dup_of, blast_radius, rollback.
-    pending[]      — todo rows already on disk: task, planned_by, door, phase.
+    pending[]      — todo rows already on disk: task, planned_by, door, phase, and
+                     optional operator_flagged (true → already approved, never re-approved).
     cap            — {mode, live, soft} for the spawn mode a manager-opened row uses.
     card           — {open: bool} — whether the round's waiting-approval card is still open.
                      A box the operator turned down needs no skip list: it is closed by
@@ -98,6 +99,10 @@ def decide(p):
     # Pending rows: only this step's own two-way rows may be approved by a manager.
     for t in p["pending"]:
         if t.get("phase") != "todo" or t.get("planned_by") != PLANNED_BY:
+            continue
+        # An operator-flagged row is already approved (ruling 2026-11-15): never
+        # write `approved_*` for it with a manager approve.
+        if t.get("operator_flagged"):
             continue
         if t.get("door") != "two-way" or p["goal_phase"] != "execution":
             continue

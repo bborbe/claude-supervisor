@@ -625,3 +625,32 @@ class NextFocusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OperatorFlagIsApprovalTest(unittest.TestCase):
+    """Ruling 2026-11-15: an operator flag is the approval, so a flagged `todo` row is
+    not parked as `needs_approval` — it gets its `/supervisor:open` action."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("next_focus_unit", SCRIPT)
+        cls.nf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.nf)
+
+    def row(self, extra):
+        fm = self.nf.frontmatter("---\nstatus: in_progress\nphase: todo\n%s---\nbody\n" % extra)
+        return self.nf.candidate("T", "task", fm, "weekly", "why")
+
+    def test_operator_flagged_todo_row_is_actionable(self):
+        row = self.row("flag: true\nflag_set_by: operator\n")
+        self.assertFalse(row["needs_approval"])
+        self.assertIn("action", row)
+
+    def test_agent_set_and_quoted_flags_still_need_approval(self):
+        for extra in ("flag: true\nflag_set_by: claude-1\n",
+                      "flag: \"true\"\nflag_set_by: operator\n", ""):
+            with self.subTest(extra=extra):
+                row = self.row(extra)
+                self.assertTrue(row["needs_approval"])
+                self.assertNotIn("action", row)
