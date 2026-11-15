@@ -168,6 +168,24 @@ class RoundLivenessStep(unittest.TestCase):
         self.assertEqual("IDLE", self.state(FULL, "goal"))
         self.assertIn(ARMED, self.run_block(FULL, "goal"))
 
+    def test_working_arms(self):
+        """WORKING must arm for the same reason IDLE must: it reads WORKING until a round
+        lands, and this is that round. A working manager that skipped the arm would never
+        read OK again."""
+        self.arm_old()
+        sid = "11111111-2222-3333-4444-555555555555"
+        for name in os.listdir(self.state_dir):
+            if name.endswith(".cadence"):
+                with open(os.path.join(self.state_dir, name[: -len(".cadence")] + ".session"),
+                          "w", encoding="utf-8") as fh:
+                    fh.write(sid + "\n")
+        proj = os.path.join(self.projects_dir, "proj")
+        os.makedirs(proj, exist_ok=True)
+        with open(os.path.join(proj, f"{sid}.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        self.assertEqual("WORKING", self.state(FULL, "goal"))
+        self.assertIn(ARMED, self.run_block(FULL, "goal"))
+
     def test_the_fallback_is_not_an_arm(self):
         # Pin the shape, not just the behaviour on today's states: any word the block does
         # not name must land on a non-arming branch.

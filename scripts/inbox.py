@@ -331,7 +331,9 @@ def live_slugs(now=None):
                     if f.endswith(".cadence")]
     except FileNotFoundError:
         return set()
-    return {s for s in cadences if ml.classify(s, now)[0] == "OK"}
+    # `WORKING` and `IDLE` are live owners (`owner.py` step 9): their subject's rows are
+    # theirs, never the residual's.
+    return {s for s in cadences if ml.classify(s, now)[0] in ("OK", "WORKING", "IDLE")}
 
 
 def scope(rows, subject, live):

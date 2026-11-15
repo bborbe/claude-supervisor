@@ -230,6 +230,15 @@ BRANCHES = ("goal", "topic", "fleet", "task")
 SLACK = 180  # seconds: the tick's own runtime plus ordinary jitter before a re-arm lands
 PERIOD_CAP = 2.5  # the p90 period estimate never exceeds this multiple of the median
 ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable percentile
+# The observed period never stretches the limit past this multiple of the DECLARED
+# cadence. Without the bound a manager that stops rounding teaches the record its own
+# silence: The Attention Board goal declared 900 s, its gaps grew to a 51 030 s median,
+# and its limit followed them to 127 755 s, so 18 h with no round read `OK` (2026-11-15).
+# Measured 2026-11-15 as the largest p90-gap ÷ declared ratio among the subjects ticking
+# at their cadence that day: the Fleet Manager (declared 900 s; steady gaps 1552-1676 s,
+# p90 4534 s → 5.04) and Development Pipeline Throughput (1.12). 5 × 900 + SLACK = 4680 s
+# still covers the Fleet Manager's measured 4534 s. The bound only ever lowers a limit.
+DECLARED_K = 5
 EXIT_STALE = 10
 # `--state` for a subject that resolves no record under any branch and no page: a refusal,
 # distinct from argparse's 2 so a caller can tell "unresolvable name" from "bad flags".
@@ -1360,7 +1369,11 @@ def work_age(s: str, now: float):
 
 
 def classify(s: str, now: float) -> tuple:
-    """(state, detail) for one subject: OK, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
+    """(state, detail) for one subject: OK, WORKING, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
+
+    `OK` means a round ran inside the limit, and only that. Past the limit a moving
+    transcript reads `WORKING` and an armed manager that produced nothing reads `IDLE`;
+    neither is a lapse and nothing restarts either. Only `STALE` / `INVALID` are acted on.
 
     ⚠️ `UNARMED` and `INVALID` are different answers and must never be collapsed.
     `INVALID` means a record EXISTS and cannot be read — a probe failure, the
@@ -1413,8 +1426,19 @@ def classify(s: str, now: float) -> tuple:
     # ledger shows every production report landing at 1860-2040 s against a 900-960 s
     # cadence, and a planted-lapse probe took 681 s on a 300 s cadence. One period
     # plus SLACK reports the first missed re-arm instead.
+    #
+    # ⚠️ BOUNDED by `DECLARED_K × declared`. The observed period is learnt from the
+    # manager's own re-arms, so a manager that stops rounding stretches it: every long
+    # gap raises the p90 and the limit follows, until a manager silent for most of a day
+    # reads OK. The bound caps what the observation may excuse, and it only ever lowers.
     period = observed_period(s)
-    if period:
+    bound = DECLARED_K * interval
+    if period and period > bound:
+        # `period=` carries the BOUNDED value: `answer-path-check.py` sizes its reach window
+        # from that field, so the unbounded observation goes in a field of its own.
+        limit = bound + SLACK
+        basis = f"period={bound}s(bounded {DECLARED_K}x declared) observed={int(period)}s"
+    elif period:
         limit, basis = period + SLACK, f"period={int(period)}s(observed)"
     else:
         limit, basis = interval + SLACK, f"period={interval}s(reported)"
@@ -1429,9 +1453,13 @@ def classify(s: str, now: float) -> tuple:
         # A ROUND did not happen inside the limit — but a round is not the only thing a
         # manager does. `work` is the manager's transcript age, refreshed by ANY turn, so
         # this is the direction the record used to miss: a session working without a round
-        # read STALE and could be restarted mid-work. It reads OK now, on its own evidence.
+        # read STALE and could be restarted mid-work.
+        # ⚠️ WORKING, never OK. The work signal proves the session is alive and busy, so
+        # nothing may restart it mid-turn — but it is not running its loop, and `OK` said
+        # it was. WORKING is its own word so every reader can tell the two apart; every
+        # restart path acts on STALE / INVALID only, so it acts on neither.
         if work is not None and work <= limit:
-            return "OK", detail + f" working (no round; work {work}s ago)"
+            return "WORKING", detail + f" working (no round; work {work}s ago)"
         # Goal tier only: the detached sweep gate is its sole wake source, so an ageing
         # `.cadence` between gate wakes is expected, not a lapse. A fresh gate heartbeat
         # means the manager is watched; without it, STALE stands. An EXPIRED sleep marker
@@ -1452,7 +1480,9 @@ def classify(s: str, now: float) -> tuple:
                 # help, and reporting STALE here turns one dead gate into an uncapped
                 # restart storm across the tier. The gate's own stale watcher alerts on the
                 # outage; this reading names it without acting on it.
-                return "OK", detail + " gate-down (no gate tick in the window)"
+                # ⚠️ IDLE, never OK: no round and no work ran, and nothing will wake it
+                # while the gate is down. IDLE is never restarted, so the storm stays shut.
+                return "IDLE", detail + " gate-down (no gate tick in the window; no round, no work)"
         return "STALE", detail
     return "OK", detail
 
@@ -1567,9 +1597,11 @@ def main() -> int:
     mode.add_argument(
         "--state",
         action="store_true",
-        help="print ONE subject's state: OK / IDLE / STALE / STOPPED / SLEEPING / UNARMED / "
-             "INVALID / WRONG-BRANCH, with `work=` (the work signal) in the detail; "
-             "IDLE = armed and gate-watched but no round and no work; "
+        help="print ONE subject's state: OK / WORKING / IDLE / STALE / STOPPED / SLEEPING / "
+             "UNARMED / INVALID / WRONG-BRANCH, with `work=` (the work signal) in the detail; "
+             "WORKING = no round inside the limit but the manager's transcript moved "
+             "(never restarted); IDLE = armed but no round and no work, gate-watched or "
+             "gate-down (never restarted); "
              "exits 3 (stdout empty) for a subject with no record and no page",
     )
     mode.add_argument(
