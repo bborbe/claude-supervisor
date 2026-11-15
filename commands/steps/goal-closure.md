@@ -14,25 +14,31 @@ Applies to the round's own subject and to every page in its tracked set, when ev
 **A page closes on evidence. The loop may tick a box, but only with an inline citation it has
 resolved itself.**
 
-Operator decision 2026-11-15: *"yes topic + goal loops are allowed to tick"*. Before it, the
-rule was "close, but no loop ticks a box": workers tick only their own task boxes, so a goal's or topic's
-own SC/DoD boxes had no owner, the reader returned `OPEN` every tick, and goals whose work had
-shipped stayed open indefinitely. This step is the rule's single home; `commands/goal-loop.md`,
+Workers tick only their own task boxes, so a goal's or topic's own SC/DoD boxes have no other
+owner. Without this step, the reader would return `OPEN` on every tick and a goal whose work has
+shipped would stay open indefinitely. This step is the rule's single home; `commands/goal-loop.md`,
 `commands/topic-loop.md` and `commands/topic-drive.md` point here.
 
 ## Step 0 — tick open boxes that carry resolvable evidence
 
 Before the reader runs, walk every open `[ ]` box in the page's closure sections
 (`# Success Criteria` + `# Definition of Done`, or `# Completion Gate` for a topic). Tick a box
-**only** when you hold an inline citation of one of the four allowed evidence types **and** you
+**only** when you hold an inline citation of one of the allowed evidence types **and** you
 resolved it this tick:
 
 | Evidence type | Citation written next to the box | Resolve it with |
 |---|---|---|
 | merged PR | `owner/repo#N` | `gh -R owner/repo pr view N --json state --jq .state` reads `MERGED` |
 | release tag | `owner/repo@vX.Y.Z` | `gh -R owner/repo release view vX.Y.Z` exits 0 |
-| completed task | `[[Task Name]]` | `vault-cli task get "<task>" status --vault "<vault>"` reads `completed` |
+| completed task (goal tier only) | `[[Task Name]]` | `vault-cli task get "<task>" status --vault "<vault>"` reads `completed` |
+| completed goal (topic tier) | `[[Goal Name]]` | `vault-cli goal get "<goal>" status --vault "<vault>"` reads `completed` |
 | command output | the command + its pasted output | re-run the command; the output still shows what the box claims |
+| operator answer | `card <item_id> (operator)` | `attention-ask.py poll <item_id>` reads `ANSWERED` with `tick it` |
+
+⚠️ **A task page whose worker is not provably gone is its worker's.** Run Step 0 on a tracked
+task only when this round's liveness reading for it is `ABSENT`. `LIVE` means the worker is
+working its own boxes. `UNKNOWN` fails closed. Either way, leave the task's boxes alone. The topic
+tier never reads a task file, so it cites goals, PRs, tags and commands, never tasks.
 
 Write the tick as `- [x] <unchanged box text> — evidence: <citation> (loop, YYYY-MM-DD)` — an
 inline citation on the same line. Never change the box's own text.
@@ -42,8 +48,11 @@ inline citation on the same line. Never change the box's own text.
   restate that box's outcome. When you cannot match them, the box has no evidence.
 - **No resolvable citation → leave the box `[ ]`** and post **one** attention card per page:
   `attention-ask.py post --dedup-key closure-evidence-<page-slug> --option "tick it" --option
-  "reword it" --option "file a task"`, listing every unevidenced box. The dedup key keeps it to
-  one card per page across ticks, never a silent `OPEN` round after round.
+  "reword it" --option "file a task" --producer-id "<your session id>" --producer-kind session`,
+  listing every unevidenced box. The dedup key keeps it to one card per page across ticks, never
+  a silent `OPEN` round after round. On later ticks, poll the card. `tick it` ticks the listed
+  boxes citing the card. `reword it` and `file a task` leave the boxes open: append the answer to
+  the page's `# Progress` and stop re-posting until the page changes.
 - **No tick on evidence you did not resolve this tick**, and no tick to make a
   close possible when the evidence is missing. Closure still follows the evidence; the loop now
   records it instead of waiting for an owner that does not exist.
@@ -61,14 +70,17 @@ tasks without refusing. Checked 2026-11-15 against vault-cli source.
 
 1. Find the linked tasks yourself. For each task file, check whether its `goals:` list carries
    the goal as `[[<goal>]]` or as the bare `<goal>`.
-2. For each open one, unlink it with the entry **exactly as written** in that task's `goals:`
+2. **Any open linked task whose liveness reading is `LIVE` or `UNKNOWN` blocks the close.** Do
+   not unlink a task a worker may be in the middle of. Report it as `closure: <goal> — CLOSE
+   held by live [[<task>]]` and close nothing this tick.
+3. For each remaining open one, unlink it with the entry **exactly as written** in that task's `goals:`
    list: `vault-cli task remove "<task>" goals "<entry as written>" --vault "<vault>"`. The remove
    verb matches the raw string, so `[[<goal>]]` and `<goal>` are different values. The task's own
    `status` is untouched: it is unlinked, not closed.
-3. Append one line to the goal's `# Progress`:
+4. Append one line to the goal's `# Progress`:
    `- YYYY-MM-DD (loop): moved out at close — [[t1]] (<status>), [[t2]] (<status>) …`. Every
    task stays findable from the goal it left.
-4. Then run the verb (step 2 below). Never `--force`: this step is what makes a clean close
+5. Then run the verb (step 2 below). Never `--force`: this step is what makes a clean close
    possible.
 
 ## What to do
@@ -247,6 +259,7 @@ One line per page examined, and one for the round:
 closure: <page> — ticked <box> — evidence: <citation>   → resolved this tick
 closure: <page> — <n> unevidenced boxes                 → card closure-evidence-<slug>
 closure: <page> — moved out <n> open tasks              → listed in # Progress
+closure: <goal> — CLOSE held by live [[<task>]]         → nothing closed this tick
 closure: <page> — <n> open (SC <a>, DoD <b>)            → not a candidate
 closure: <page> — TERMINAL (already <status>)           → skipped
 closure: <page> — UNMEASURABLE (<which section>)        → gap reported
