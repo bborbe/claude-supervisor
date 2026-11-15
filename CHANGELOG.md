@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `manager-liveness.py --state` no longer reads `OK` for a manager with no round inside 5 × its declared cadence. The observed period still sets the limit, but it is capped at `DECLARED_K` (5) × declared, so a manager that stopped rounding can no longer stretch its own limit: The Attention Board goal (declared 900 s) had a 127 755 s limit and read `OK` after 18 h without a round. K was measured on 2026-11-15 as the largest p90-gap ÷ declared ratio among subjects ticking at their cadence (Fleet Manager 5.04). The cap only ever lowers a limit. A capped detail reads `period=<K×declared>s(bounded 5x declared) observed=<p90>s`.
+- feat: a manager past its limit whose transcript moved reads `WORKING`, not `OK`, and a goal manager past its limit while the sweep gate is down reads `IDLE`, not `OK`. No restart path acts on either. `owner.py` `LOOP_STATES` (which also lacked `IDLE`, so an `IDLE` owner used to read as an unreadable probe), `fleet-keeper.py`, `crashed-managers.py`, `inbox.py`, `park-nudge.py`, `propose-managers.py` and `answer-path-check.py` read `WORKING` and `IDLE` as live owners, and the round's arm allow-list arms on `WORKING`.
+
 ## v0.318.0
 
 - feat: `scripts/wake-misses.py` reads the sweep gate's per-subject ledgers and lists every subject whose last actionable wake did not reach a manager (`NO-MANAGER`, `NO-PANE`, `HEADLESS`, or a failed wake run), with the resolved session and its `live=` value. A ledger written before the gate recorded wake outcomes counts as `unmeasured`, never as clean, and an unreadable state directory exits 2, never "0 misses".

@@ -287,7 +287,9 @@ def check(session_id):
     state, reason, period = liveness_state(subject, branch)
     if state is None:
         return False, subject, branch, reason
-    if state != "OK":
+    # `WORKING` passes as `OK` always did for it: the session is live and mid-turn, so it
+    # is present to answer a park; it reads its own word only so no restart path acts on it.
+    if state not in ("OK", "WORKING"):
         if state == "IDLE":
             return False, subject, branch, (
                 f"this session's manager loop on {branch} '{subject}' reads IDLE, not OK — "
