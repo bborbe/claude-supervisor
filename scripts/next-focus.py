@@ -68,6 +68,11 @@ def _load(name, filename):
 #: `defer_date` is an instant, not a date — see `defer-date.py`.
 defer_date = _load("defer_date", "defer-date.py")
 
+#: The flag predicate — an operator flag IS the approval (ruling 2026-11-15). Read on
+#: the RAW block, because `frontmatter()` strips quotes and a
+#: quoted `flag: "true"` must not count.
+flag_provenance = _load("flag_provenance", "flag_provenance.py")
+
 PLAN_DIR = "60 Periodic Notes"
 CAP = 5
 PROPOSAL_CAP = 3
@@ -131,6 +136,8 @@ def frontmatter(text):
             pending = key if not value else None
             continue
         pending = None
+    # Internal key, never a frontmatter field: computed on the raw block (quotes intact).
+    out["_approved"] = flag_provenance.flag_admits(text[4:end], "task")
     return out
 
 
@@ -460,7 +467,9 @@ def candidate(name, kind, fm, source, why):
         "why": why,
         "phase": phase,
         "status": status,
-        "needs_approval": phase == "todo",
+        # An operator flag IS the approval (2026-11-15), so a flagged `todo` row is
+        # opened, not parked in the inbox.
+        "needs_approval": phase == "todo" and not (fm or {}).get("_approved"),
     }
     # A `todo` row carries NO action field at all — not an empty one. An empty action
     # reads as "acted on and found nothing to do"; the key's absence is the rule.

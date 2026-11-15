@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: an operator-set flag counts as approval at every reader — `flag_provenance.is_approved()` (`approved_at` or an `operator`/`legacy` flag) drives `approved-not-started.py`, the open leg's `waiting approval` guard, `/supervisor:open` Gate 1 and the goal sweep's `waiting-approval` cell; nothing writes `approved_*` from a flag any more, so the `--flagged` batch drops its approve pass and the obsolete `check-open-approve-ordering.py` checker is retired
+- feat: an operator-set flag counts as approval at every reader — `flag_provenance.is_approved()` (`approved_at` or an `operator`/`legacy` flag) drives `approved-not-started.py`, the open leg's `waiting approval` guard, `/supervisor:open` Gate 1, the goal tier's todo hold (`goal-drive`, `goal-spawn-reader`, `goal-sweep-reader`), `next-focus.py`'s `needs_approval`, `inbox.py`'s inbox set and `undriven-plan.py`'s manager approve; nothing writes `approved_*` from a flag any more, so the `--flagged` batch drops its approve pass and the obsolete `check-open-approve-ordering.py` checker is retired
 - docs: workers and managers are told flagged rows open and reopen automatically, so a session with nothing doable before a later date sets `defer_date` and closes to free its slot
 
 ## v0.313.4

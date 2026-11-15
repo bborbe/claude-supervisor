@@ -369,6 +369,15 @@ class OpenQueueTest(unittest.TestCase):
         opened, _ = oq.select(rows, live=0, target=30)
         self.assertEqual([r["name"] for r in opened], ["flagged-todo", "control"])
 
+    def test_a_yaml_inline_comment_does_not_hide_the_flag(self):
+        # vault-cli's YAML parser reads `flag: true  # note` as a real true; this side
+        # must agree, or work-on advances a row the queue does not count as approved.
+        task_file(self.tasks, "commented", "status: in_progress\nphase: todo\nflag: true  # set by hand")
+        rows, skipped = self.collect(["commented"])
+        self.assertEqual(skipped, [])
+        opened, _ = oq.select(rows, live=0, target=30)
+        self.assertEqual([r["name"] for r in opened], ["commented"])
+
     def test_phase_todo_without_an_operator_flag_still_waits(self):
         task_file(self.tasks, "agent-flag", "status: in_progress\nphase: todo\nflag: true\n",
                   provenance="claude-session-1")

@@ -236,11 +236,6 @@ Print it as `→ DIRECT`. The distinction that matters is **who drives the sessi
 ```
 FLAGGED BATCH — <vault> — <date> — <n> tasks
 
-approve  a monitoring task - 2026W38-sun
-approve  a routine task (my-vault) - 2026-09-20
-approve  a routine task - 2026W39
-         (a row already approved, or one not at `phase: todo`, prints nothing)
-
   #  task                                          role    mode
   1  a monitoring task - 2026W38-sun                  agent   headless      🏷️ filled now
   2  a routine task (my-vault) - 2026-09-20   agent   headless      (on disk, was interactive — normalised)
@@ -258,7 +253,7 @@ approve  a routine task - 2026W39
 ⚠️  Ordering is NOT auto-detected. Every ⛔ row is skipped;
     the rest open in the stable order printed above.
 
-Opened N · approved A · filled F fields · direct H (human) · yours Y (manager) · defaulted D fields · held K (blocked) · not ready R (readiness) · skipped S already opened.
+Opened N · filled F fields · direct H (human) · yours Y (manager) · defaulted D fields · held K (blocked) · not ready R (readiness) · skipped S already opened.
 ```
 
 **Readiness-gate every CREATE-bound row first, concurrently.** On both paths Gate 1 (Step 1.5) only verifies approval — `approved_at` or an operator-set flag — and never writes one. For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`; `— (pipeline contract)` (an ungated `task_type:` row, defined at Gate 2). A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 passes every row of this batch** — the selector admits only operator-flagged rows, and an operator flag **is** the approval. The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**

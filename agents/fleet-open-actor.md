@@ -84,7 +84,7 @@ without it the command falls back to the wezterm route, which opens a tab whatev
   § Step 0.5; `docs/fleet-surface.md` § Approval provenance owns the statement.
 - **Your only writes are this round's block payload and, only when the hand-back must be
   truncated, the refusal payload `<output_format>` names.** Nothing else on disk. ⚠️ **A command
-  you invoke writes its own page** — `/supervisor:open` approves and stamps the task pages it
+  you invoke writes its own page** — `/supervisor:open` stamps the task pages it
   opens; that is its write, not yours. ⚠️ **The spawn writes the ledger row** — `spawn_agent`
   records each worker in the spawn ledger; that is the server's write, not yours either.
 </constraints>

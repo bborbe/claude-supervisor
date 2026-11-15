@@ -52,7 +52,10 @@ def flag_set(block, kind):
     raw = _FLAG_LINE.search(block or "")
     if not raw:
         return False
-    value = raw.group(1).strip()
+    # A YAML comment is not part of the value: `flag: true  # note` loads as a real
+    # `true` in vault-cli's YAML parser, so reading it as a refusal here would let
+    # `task work-on` advance a row this predicate does not count as approved.
+    value = re.sub(r"\s+#.*$", "", raw.group(1)).strip()
     if kind == "task":
         # The strict branch cannot strip quotes: `flag: "true"` is a string, not True.
         if value.startswith(('"', "'")):
