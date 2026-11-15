@@ -12,7 +12,7 @@ import pathlib
 import tempfile
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 _HERE = pathlib.Path(__file__).resolve().parent
 
@@ -322,7 +322,7 @@ class TopicSpawnTest(unittest.TestCase):
 
     def test_hand_run_without_topic_open_is_a_usage_error(self):
         """`--hand-run` must never loosen the `--goal` path the topic tier's rounds use."""
-        with self.assertRaises(SystemExit) as raised:
+        with self.assertRaises(SystemExit) as raised, redirect_stderr(io.StringIO()):
             self.run_gate("--goal", "Delta", "--hand-run")
         self.assertEqual(2, raised.exception.code)
 
