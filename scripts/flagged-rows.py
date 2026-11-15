@@ -544,8 +544,44 @@ def refusals(kind, block):
     return [] if flag_provenance.flag_admits(block, kind) else ["agent-set-flag"]
 
 
-def blocked_by_of(block):
-    """The row's unresolved blockers, in either frontmatter shape, as a list."""
+def blocked_by_of(block, tasks_dir=None):
+    """The row's unresolved blockers, in either frontmatter shape, as a list.
+
+    With `tasks_dir`, a blocker whose task file there reads `status: completed` is
+    RESOLVED and dropped — the same rule `vault-cli`'s `blocked_by` uses (same-kind
+    lookup, exact name, `[[ ]]` stripped, case-insensitive). A blocker whose file is
+    missing or unreadable stays: "cannot verify it is done" is still blocked.
+    ⚠️ Without this every listed blocker counted forever, so a flagged task whose
+    prerequisites had all completed was skipped on every tick (2026-11-15: Rebuild
+    Nuke Cluster / Turn off fire, all four blockers completed hours earlier).
+    """
+    names = _listed_blockers(block)
+    if tasks_dir is None:
+        return names
+    return [n for n in names if not _blocker_completed(n, tasks_dir)]
+
+
+def _blocker_completed(name, tasks_dir):
+    """Does the blocker's task file read `status: completed`? False on any doubt."""
+    title = name.strip().strip("'\"")
+    if title.startswith("[[") and title.endswith("]]"):
+        title = title[2:-2]
+    title = title.split("|", 1)[0].strip().lower()
+    try:
+        entries = os.listdir(tasks_dir)
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.endswith(".md") and entry[:-3].lower() == title:
+            text = read_text(os.path.join(tasks_dir, entry))
+            fm = open_queue.frontmatter(text) if text else None
+            m = re.search(r"^status:[ \t]*(.*)$", fm or "", re.MULTILINE)
+            return bool(m) and m.group(1).strip().strip("'\"") == "completed"
+    return False
+
+
+def _listed_blockers(block):
+    """Every name under `blocked_by`, resolved or not."""
     match = re.search(r"^blocked_by:[ \t]*(.*)$", block, re.MULTILINE)
     if not match:
         return []
@@ -798,7 +834,7 @@ def row_for(vault, cfg, kind, path, ctx):
         "liveness": live,
         "branch": branch,
         "pane": pane,
-        "blocked_by": blocked_by_of(block),
+        "blocked_by": blocked_by_of(block, os.path.dirname(path) if kind == "task" else None),
         "refused": refused,
     }, None
 
