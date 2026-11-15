@@ -45,6 +45,8 @@ import sys
 import time
 from datetime import datetime
 
+# Claude Code's per-user state, expanded per user at run time — the same location on every
+# install, not a path on one author's machine.
 DEFAULT_STATE_DIR = os.path.expanduser(
     os.environ.get("SWEEP_GATE_LOOP_STATE_DIR", "~/.claude/state/sweep-gate-loop")
 )

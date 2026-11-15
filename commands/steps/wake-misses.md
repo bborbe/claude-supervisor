@@ -1,4 +1,10 @@
-## Wake misses: the subjects a session-based check never enumerates
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
+# Wake misses: the subjects a session-based check never enumerates
 
 Read by `/supervisor:fleet-triage` § 3.6 (`commands/steps/fleet-triage-state.md`) and by the
 fleet keep-alive leg (`agents/fleet-keepalive-actor.md` § 4c). Both used to start from live
