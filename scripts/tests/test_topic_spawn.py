@@ -12,7 +12,7 @@ import pathlib
 import tempfile
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 _HERE = pathlib.Path(__file__).resolve().parent
 
@@ -296,6 +296,35 @@ class TopicSpawnTest(unittest.TestCase):
         rc, out = self.run_gate("--topic-open")
         self.assertEqual(1, rc)
         self.assertEqual("manager-cap", out[0])
+
+    # --- --hand-run: the operator's own open skips the flag, never the cap -----------
+
+    def test_a_hand_run_opens_an_unflagged_topic(self):
+        """Operator ruling 2026-11-15: an unflagged subject never opens automatically, but
+        the operator's own /supervisor:open opens what they name."""
+        rc, out = self.run_gate("--topic-open", "--hand-run")
+        self.assertEqual(0, rc)
+        self.assertEqual("open-ok: A Topic", out[0])
+
+    def test_a_hand_run_opens_an_agent_flagged_topic(self):
+        """The operator naming the topic IS the approval; the agent's flag is irrelevant."""
+        self._flag_topic(setter="agent")
+        rc, out = self.run_gate("--topic-open", "--hand-run")
+        self.assertEqual(0, rc)
+
+    def test_a_hand_run_is_still_refused_at_the_fleet_ceiling(self):
+        """The operator's intent does not create a manager slot."""
+        ts.fleet_manager_count = lambda: 10
+        ts.fleet_manager_ceiling = lambda: 10
+        rc, out = self.run_gate("--topic-open", "--hand-run")
+        self.assertEqual(1, rc)
+        self.assertEqual("manager-cap", out[0])
+
+    def test_hand_run_without_topic_open_is_a_usage_error(self):
+        """`--hand-run` must never loosen the `--goal` path the topic tier's rounds use."""
+        with self.assertRaises(SystemExit) as raised, redirect_stderr(io.StringIO()):
+            self.run_gate("--goal", "Delta", "--hand-run")
+        self.assertEqual(2, raised.exception.code)
 
     # --- the flag gate's position among the other gates --------------------------
 

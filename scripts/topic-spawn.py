@@ -30,7 +30,8 @@ on it without parsing prose, and the exit code is non-zero for every one of them
                            its WORKERS are still opened by the fleet round's open leg.
   topic-unflagged        `--topic-open` only: the TOPIC page does not carry `flag: true`.
                            Same rule one tier up — a flagged topic is opened when the fleet
-                           manager ceiling admits another manager.
+                           manager ceiling admits another manager. Never printed under
+                           `--hand-run`, which is the operator's own open (see that flag).
   manager-cap            a bound is reached; the SECOND line names which:
                            goal-cap      — this topic already runs N goal managers
                            manager-cap   — the fleet-wide manager ceiling is reached
@@ -480,7 +481,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--topic-open", dest="topic_open", action="store_true",
                     help="may a manager be opened for this TOPIC page itself? (the topic "
                          "tier's flag gate)")
+    ap.add_argument("--hand-run", dest="hand_run", action="store_true",
+                    help="with --topic-open: the operator's own /supervisor:open — skip the "
+                         "flag check, keep the manager ceiling")
     a = ap.parse_args(argv)
+    if a.hand_run and not a.topic_open:
+        ap.error("--hand-run only qualifies --topic-open")
 
     # (1) The verb boundary, checked first: it is the refusal a caller most often gets
     # wrong, and it must not depend on any page resolving.
@@ -525,8 +531,18 @@ def main(argv: list[str]) -> int:
     # read by nothing: `open.md`'s
     # topic branch gates on `phase: todo` alone, so the ruling had no executable leg one tier
     # up from where it was already enforced.
+    #
+    # ⚠️ **`--hand-run` skips the flag check and nothing else.** Operator ruling 2026-11-15:
+    # an unflagged subject never opens AUTOMATICALLY, but the operator's own
+    # `/supervisor:open` opens what they name. Every automatic fresh open is gated upstream
+    # of `open.md` — `topic-keepalive.py` prints `open-unflagged` instead of `open`, and
+    # `--goal` here refuses `goal-unflagged`. `open.md` passes `--hand-run` only on its
+    # `None` arm (no recorded id), which no round reaches for an unflagged topic; its
+    # `UNKNOWN`/`AMBIGUOUS` arm — a keep-alive resume whose liveness could not be read —
+    # drops it, so an undecidable resume never opens an unflagged topic fresh. The manager
+    # ceiling binds a hand-run too: the operator's intent does not create a slot.
     if a.topic_open:
-        if not flagged(frontmatter(topic_text), kind="topic"):
+        if not a.hand_run and not flagged(frontmatter(topic_text), kind="topic"):
             return refuse(
                 REFUSE_TOPIC_UNFLAGGED,
                 f"<{a.topic}> is not flagged. Opening a topic manager is an open, and this "
