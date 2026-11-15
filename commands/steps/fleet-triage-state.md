@@ -454,6 +454,7 @@ verdict**: report the manager as unread and leave the loop alone.
 | Reading | Cause | Is it a finding? |
 |---|---|---|
 | `OK` | loop armed | no |
+| `WORKING` / `IDLE` | mid-turn, no round / armed, no round, no work | **no** — never drive a re-arm or restart |
 | `STOPPED` + subject page reads `status: completed` / `aborted` | the subject is **terminal** | **no** — a loop on a closed subject is the bug |
 | `STOPPED` + subject page reads `status: hold` | a **pause**, not a closure — see `commands/steps/goal-closure.md` | **no** — a `hold` subject never reports `CLOSE` and never authorises a stop, so an armed loop on one is correct, not a defect |
 | `STOPPED` + `manager-quiet.py` reports `stood-down` for the subject | **auto-quiet** | **no** — re-arming without adding work just reproduces the stand-down. The lever is the quiet threshold, not the marker |
@@ -462,7 +463,7 @@ verdict**: report the manager as unread and leave the loop alone.
 | `STALE` inside one observed period | round duration exceeded the declared interval | **no** — see the calibration note below |
 | `WRONG-BRANCH` | the record is on the tier its detail names | **no** — re-probe there; never drive a re-arm |
 | exit **3**, empty stdout | no record, no page: a mistyped or abbreviated name | **no** — report it unresolved, never `UNARMED` |
-| `INVALID` | a record **exists and cannot be read** — the manager's state is unknown, a probe failure, not a fact about the fleet | **no** — report the manager as unread and leave the loop alone. ⚠️ **Never read `INVALID` as a lapse** — the script says the two "must never be collapsed" (`scripts/manager-liveness.py:366-374`), because `UNARMED` means *no manager ever armed this subject* while `INVALID` means *we could not tell* |
+| `INVALID` | a record **exists and cannot be read** — the manager's state is unknown, a probe failure, not a fact about the fleet | **no** — report the manager as unread and leave the loop alone. ⚠️ **Never a lapse**: `UNARMED` = never armed, `INVALID` = could not tell (`classify` docstring) |
 | `MISS` (`wake-misses.py`) | last gate wake reached no manager | **yes — `NO-LOOP`** (`steps/wake-misses.md`) |
 
 ⚠️ **`STALE` is arithmetic, not a death verdict.** The constant has one home —

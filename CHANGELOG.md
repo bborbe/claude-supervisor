@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `/supervisor:fleet-triage` § 3.6 gives `WORKING` and `IDLE` their own row (not a finding, never a re-arm drive or restart). Before, neither word had a row, so a mid-turn manager could be read as a lapse and driven to re-arm. The keep-alive actor and `topic-keepalive.py` now name `WORKING` as an owner state.
+
 ## v0.319.0
 
 - fix: `manager-liveness.py --state` no longer reads `OK` for a manager with no round inside 5 × its declared cadence. The observed period still sets the limit, but it is capped at `DECLARED_K` (5) × declared, so a manager that stopped rounding can no longer stretch its own limit: The Attention Board goal (declared 900 s) had a 127 755 s limit and read `OK` after 18 h without a round. K was measured on 2026-11-15 as the largest p90-gap ÷ declared ratio among subjects ticking at their cadence (Fleet Manager 5.04). The cap only ever lowers a limit. A capped detail reads `period=<K×declared>s(bounded 5x declared) observed=<p90>s`.
