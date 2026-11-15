@@ -41,7 +41,7 @@ PAYLOAD
     ```
 
     A box the operator already turned down stays turned down — that is how a skip is never re-asked across rounds.
-- **`pending[]`** — every tracked task at `phase: todo` with its `task`, `planned_by`, `door` and `phase` frontmatter.
+- **`pending[]`** — every tracked task at `phase: todo` with its `task`, `planned_by`, `door` and `phase` frontmatter, plus `operator_flagged: true` when `flag: true` carries `flag_set_by` `operator`/`legacy` (such a row is already approved — ruling 2026-11-15 — and is never re-approved).
 - **`cap`** — `{"mode": "<the mode a manager-opened row spawns in>", "live": <worker-sessions.py --count>, "soft": <worker-target.py>}` — the same pair row 9 compares. ⚠️ **The per-mode axes (headless, interactive) are enforced by the wrapper at spawn**, not here: a row approved below this target can still be refused at the spawn, and row 6 reports that refusal as held. The limits hold either way.
 - **`card`** — `{"open": <the round's waiting-approval card is still unanswered>}`. `scripts/waiting-approval-state.py read --topic "<subject>"` yields only the recorded `card_item_id`, not a state, so `open` is the **poll** verdict:
 

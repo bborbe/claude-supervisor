@@ -148,12 +148,32 @@ def load_vaults():
     return sorted(out)
 
 
+def _flag_provenance():
+    """The one approval predicate, loaded by path like every sibling."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "flag_provenance", os.path.join(here, "flag_provenance.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+flag_provenance = _flag_provenance()
+
+
 def parse(text):
-    """(frontmatter dict, body). Frontmatter values are kept as raw strings."""
+    """(frontmatter dict, body). Frontmatter values are kept as raw strings.
+
+    `_approved` is an internal key, never a field: `flag_provenance.flag_admits()`
+    over the RAW block (quotes intact) — an operator flag IS the approval (ruling
+    2026-11-15); a quoted `flag: "true"` does not count. The flag, not
+    `is_approved()`: a `todo` row with only `approved_at` is an anomaly `work-on`
+    refuses, so it stays visible here.
+    """
     m = FM_RE.match(text)
     if not m:
         return {}, text
-    fm, key = {}, None
+    fm, key = {"_approved": flag_provenance.flag_admits(m.group(1), "task")}, None
     for line in m.group(1).splitlines():
         km = re.match(r"^([a-z_]+):\s*(.*)$", line)
         if km:
@@ -213,7 +233,8 @@ def scan(vaults, only=None, *, inbox_only=True):
     a caller resolving a name it already holds is not asking the inbox
     question, and answering it there is what made `/supervisor:ready` refuse
     every row it exists to ready. Ready's input is the *complement* of the
-    inbox — Gate 1 refuses `phase: todo` and proceeds only on approved rows —
+    inbox — Gate 1 refuses an unflagged `phase: todo` row and proceeds only on
+    approved ones (`approved_at`, or an operator flag) —
     so a resolver scoped to `phase: todo` resolves precisely the set ready
     must reject. Measured 2026-10-05.
     """
@@ -240,7 +261,9 @@ def scan(vaults, only=None, *, inbox_only=True):
                 skipped.append(f"{name}/{entry} ({e.__class__.__name__})")
                 continue
             fm, body = parse(text)
-            if inbox_only and (fm.get("phase") != "todo" or fm.get("status") in NOT_LIVE):
+            # An operator-flagged `todo` row is approved, so it is not inbox work.
+            if inbox_only and (fm.get("phase") != "todo" or fm.get("status") in NOT_LIVE
+                               or fm.get("_approved")):
                 continue
             title = entry[:-3]
             if inbox_only and is_recurring(fm, title):

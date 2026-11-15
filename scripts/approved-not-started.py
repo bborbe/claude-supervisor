@@ -15,9 +15,18 @@ direction, from the task files.
 
 What counts as "approved, not started"
 --------------------------------------
-A row is **approved** when its frontmatter carries `approved_at`. That field is written
-by `vault-cli task approve` — and only by it — in every vault, so it is the vault's own
-record of the operator's approval rather than a proxy inferred from `status`/`phase`.
+A row is **approved** when `flag_provenance.is_approved()` says so: its frontmatter
+carries `approved_at` (written by `vault-cli task approve`), **or** `flag: true` with
+`flag_set_by` `operator`/`legacy` — operator ruling 2026-11-15, *"we should not set the
+approved fields. We should handle flag tasks as they are approved."* Both are the vault's
+own record of the operator's decision, never a proxy inferred from `status`/`phase`. A
+flag-approved row's instant is `flag_set_at`; one without it (a `legacy` row) falls back
+to `created_date`, then to the file's mtime.
+
+⚠️ **A row with a future `defer_date` is still counted here**, exactly as an
+`approved_at` row always was: this script answers "approved and not started", and the
+open leg's own `deferred` guard is what keeps it shut — filtering here would erase that
+skip reason from the leg's tally.
 
 ⚠️ **This is deliberately NOT the runbook's "approved and unowned" clause.**
 `agents/goal-sweep-reader.md` forbids hard-coding *that* predicate, because the two
@@ -85,6 +94,20 @@ FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
+
+
+
+def _load(name, filename):
+    """Import a sibling script by path, like `open-queue.py` — never via `sys.path`."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The one approval predicate — `approved_at`, or an operator-set flag (ruling 2026-11-15).
+flag_provenance = _load("flag_provenance", "flag_provenance.py")
 
 
 def frontmatter(text):
@@ -232,9 +255,20 @@ def collect(tasks_dir, live, now):
             continue
         if not block:
             continue
-        approved = parse_iso(field(block, "approved_at"))
-        if approved is None:
+        # ⚠️ Approved means `approved_at` OR an operator-set flag — `flag_provenance` owns
+        # the rule (2026-11-15). A flag-approved row's instant is `flag_set_at`; one
+        # without it falls back to `created_date`, then the file's mtime — never to
+        # `now`, which would rank it newest forever. (mtime moves on every write, so
+        # it is the last resort, not the first.)
+        instant = flag_provenance.approval_instant(block, "task")
+        if instant is None:
             continue
+        approved = parse_iso(instant)
+        if approved is None:
+            if field(block, "approved_at"):
+                continue  # an unparseable approval record is not an approval
+            approved = parse_iso(field(block, "created_date")) or datetime.fromtimestamp(
+                os.path.getmtime(os.path.join(tasks_dir, entry)), timezone.utc)
         if (field(block, "status") or "") not in LIVE_STATUSES:
             continue
         sid = (field(block, "claude_session_id") or "").strip().lower()
