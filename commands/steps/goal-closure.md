@@ -55,8 +55,9 @@ inline citation on the same line. Never change the box's own text.
   `owner/repo` and tag through `closure-name-safe.py` (step 2 below, single-quoted) before it
   reaches a command. On exit 1, the box has no evidence.
 - **No resolvable citation → leave the box `[ ]`.** Do not card a page whose work is still
-  running, and never card the linked-tasks box: Step 0b produces its evidence. Once nothing tracked can still produce evidence — every tracked task (goal tier) or
-  member goal (topic tier) reads `completed`, `aborted`, `hold` or `backlog` — and boxes are still unevidenced, post
+  running, and never card the linked-tasks box: Step 0b produces its evidence. Once nothing
+  tracked can still produce evidence — every tracked task (goal tier) or member goal (topic tier)
+  reads `completed`, `aborted`, `hold` or `backlog` — and boxes are still unevidenced, post
   **one** notice, then record it on the page so later ticks do not re-post:
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py" post \
@@ -113,7 +114,7 @@ tasks without refusing. Checked 2026-11-15 against vault-cli source.
    `vault-cli task remove "<task>" goals "<that string>" --vault "<vault>"`. The remove verb
    matches the raw string, so `[[<goal>]]` and `<goal>` are different values. The task's own
    `status` is untouched; it is unlinked, not closed. **If any remove fails**, report it
-   verbatim and close nothing this tick.
+   verbatim, still run step 4 for the tasks already removed, and close nothing this tick.
 4. When step 3 moved at least one task, append one line to the goal's `# Progress`:
    `- YYYY-MM-DD (loop): moved out at close, goal criteria met — [[t1]] (<status>), [[t2]] (<status>) …`.
    It records the reason, and every task stays findable from the goal it left. Skip this step
