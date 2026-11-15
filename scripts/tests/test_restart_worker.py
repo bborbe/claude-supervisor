@@ -1251,7 +1251,7 @@ class AbsentMode(unittest.TestCase):
         with open(os.path.join(self.mgr, f"{self.SID}.json"), "w") as fh:
             json.dump(rec, fh)
 
-    def run_absent(self, *extra, dry=True, path=None, wezterm=None):
+    def run_absent(self, *extra, dry=True, path=None, wezterm=None, vault_cli=None):
         env = dict(os.environ)
         env.pop("SUPERVISOR_LAUNCHER", None)
         env.pop("SUPERVISOR_WEZTERM", None)
@@ -1263,11 +1263,92 @@ class AbsentMode(unittest.TestCase):
         env["PATH"] = path if path is not None else self.bin + os.pathsep + env.get("PATH", "")
         if wezterm is not None:
             env["SUPERVISOR_WEZTERM"] = wezterm
+        if vault_cli is not None:
+            env["SUPERVISOR_VAULT_CLI"] = vault_cli
         argv = [sys.executable, SCRIPT, self.SID, "--absent", "--sessions-dir", self.reg]
         if dry:
             argv.append("--dry-run")
         out = subprocess.run(argv + list(extra), capture_output=True, text=True, env=env)
         return out.returncode, out.stdout.strip().splitlines()
+
+    def run_absent_without_config(self, *extra, dry=True):
+        """`--absent` with NO vault-config override, so `vault-cli` itself must resolve.
+
+        `SUPERVISOR_VAULT_CONFIG` is the drill/test override that makes `vault_configs()`
+        bypass `find_vault_cli()` entirely. The environment-fault cases must clear it, or
+        they would exercise the override path and pass without the probe ever running.
+        """
+        env = dict(os.environ)
+        for key in ("SUPERVISOR_LAUNCHER", "SUPERVISOR_WEZTERM", "SUPERVISOR_VAULT_CONFIG"):
+            env.pop(key, None)
+        env["SUPERVISOR_WORKER_MANAGER_DIR"] = self.mgr
+        env["SUPERVISOR_SESSION_HOLDS"] = self.holds
+        env["SUPERVISOR_SESSION_EXIT_DIR"] = self.exits
+        env["SUPERVISOR_VAULT_CLI"] = os.path.join(self.dir, "no-vault-cli")
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        argv = [sys.executable, SCRIPT, self.SID, "--absent", "--sessions-dir", self.reg]
+        if dry:
+            argv.append("--dry-run")
+        out = subprocess.run(argv + list(extra), capture_output=True, text=True, env=env)
+        return out.returncode, out.stdout.strip().splitlines()
+
+    # -- the environment fault, and the precedence it now carries ----------------------------
+    #
+    # Regression 2026-11-15: with no `vault-cli`, `vault_configs()` returned `None` before
+    # `resolve_launcher` was ever reached, so the run printed "the registration names vault
+    # X, which resolves to no existing directory" and exited 1 — naming the registration
+    # when the real fault was the missing binary. Exit 3 was unreachable on this path.
+
+    def test_missing_vault_cli_is_an_environment_fault_not_a_vault_error(self):
+        """The defect itself: the first line must be the fault token, never the vault error."""
+        self.register()
+        code, lines = self.run_absent_without_config()
+        self.assertEqual(code, 3, lines)
+        self.assertEqual(lines[0], "environment-fault", lines)
+        self.assertIn("vault-cli not found", "\n".join(lines))
+        self.assertNotIn("resolves to no existing directory", "\n".join(lines))
+
+    def test_the_environment_fault_outranks_not_absent(self):
+        """A live session is `not-absent` normally; with no `vault-cli` the fault wins.
+
+        This is what pins the probe ABOVE the refusals. Moved below them, every other case
+        in this class still passes and only these three fail.
+        """
+        self.register()
+        with open(os.path.join(self.reg, "4242.json"), "w", encoding="utf-8") as fh:
+            json.dump({"sessionId": self.SID, "pid": 4242, "status": "idle",
+                       "kind": "interactive", "cwd": self.vault}, fh)
+        code, lines = self.run_absent_without_config()
+        self.assertEqual(code, 3, lines)
+        self.assertEqual(lines[0], "environment-fault", lines)
+
+    def test_the_environment_fault_outranks_held_session(self):
+        """A held session is `held-session` normally; with no `vault-cli` the fault wins."""
+        self.register()
+        with open(self.holds, "w", encoding="utf-8") as fh:
+            fh.write('{"version": 1, "holds": {"%s": {"reason": "operator: leave it"}}}'
+                     % self.SID)
+        code, lines = self.run_absent_without_config()
+        self.assertEqual(code, 3, lines)
+        self.assertEqual(lines[0], "environment-fault", lines)
+
+    def test_the_environment_fault_outranks_unknown_session_id(self):
+        """No manager registration is `unknown-session-id` normally; the fault wins instead."""
+        code, lines = self.run_absent_without_config()
+        self.assertEqual(code, 3, lines)
+        self.assertEqual(lines[0], "environment-fault", lines)
+
+    def test_the_config_override_suppresses_the_probe(self):
+        """`SUPERVISOR_VAULT_CONFIG` supplies the vault list, so no `vault-cli` is needed.
+
+        Without this guard the probe would turn every drill and test run on a
+        `vault-cli`-less host into exit 3 — the override exists precisely to avoid that.
+        """
+        self.register()
+        code, lines = self.run_absent(vault_cli=os.path.join(self.dir, "no-vault-cli"))
+        self.assertEqual(code, 0, lines)
+        self.assertNotIn("environment-fault", "\n".join(lines))
+        self.assertIn("would resume", "\n".join(lines))
 
     def write_task(self, status, defer=None, sid=None):
         tasks = os.path.join(self.vault, "25 Tasks")
