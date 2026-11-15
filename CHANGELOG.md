@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a `CLOSERS` row names its store item id.** The row carried title, pane, link and class, so an answered item could not be traced from the digest: the store's key is the 32-char item id that `attention-ask.py poll` and `attention-answer.py` both take, and the pane is not it. `row()` gains a `store_ref` flag used only by the `last-closers` section; the id rides the **provenance** line (`… · item=<id>`), never `what` — `what` is capped at 60 chars and carries the closer's own words, which the routine-continue table reads verbatim. The first line's columns and the row's three-line height are unchanged, so the `[<pane>]` join and the digest's 40-line payload cap are unaffected, and a synthetic pane-free row (which owns no store item) renders exactly as before. Pinned by `test_who_needs_me.py::LastClosersSection::test_a_store_row_names_its_item_id`.
+
 ## v0.313.4
 
 - fix: **an unowned gate no longer wakes every manager when no Fleet Manager is live.** `route_to_fleet()` returned the emit path whenever no live Fleet Manager resolved, so a `producer_kind: cron` gate with no session id — or any `unowned` gate — was handed to every manager's arm. It now distinguishes the two cases the old `if not self_id or not fleet` collapsed: an **unreadable** registry (`UNREADABLE`) still fails open, but a **readable** registry with no Fleet Manager suppresses the `unowned` class and counts it in a new `dropped(unowned-no-fleet)` bucket on the `LIVENESS` line, so the fallback is never silent. `dead-manager` and `claim-dead` are a separate residual and keep their fail-open emit.

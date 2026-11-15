@@ -2180,7 +2180,20 @@ def renders_headless(rec):
     return not rec.get("pane") and bool(rec.get("headless") or answer_handover(rec))
 
 
-def row(rec, pmap, what, registry=None):
+def row(rec, pmap, what, registry=None, store_ref=False):
+    """One feed row. `store_ref` adds the store item id to the provenance line.
+
+    ⚠️ The id rides the PROVENANCE line, never `what`. `what` is capped at 60
+    chars and carries the closer class plus the closer's own words, which the
+    routine-continue table reads verbatim — appending there would truncate the
+    closer, or worse, silently alter the text a test-3 blacklist scan runs over.
+    The first line's columns (`[pane] age name what`) are untouched, so the
+    `[<pane>]` join `gate-owner-filter.py` keys on still resolves, and the row
+    stays three lines, so the digest's 40-line payload cap is unaffected.
+
+    Absent stays absent: a synthetic pane-free row (`pane_free_closer_rows`)
+    owns no store item, and renders exactly as before.
+    """
     pane = rec.get("pane")
     headless = renders_headless(rec)
     if pane and is_routable(rec, pmap, registry):
@@ -2237,9 +2250,17 @@ def row(rec, pmap, what, registry=None):
     owner_line = ""
     if not pane and rec.get("session_id"):
         owner_line = f"\n         owner: {rec['session_id']}"
+    prov = provenance_of(rec)
+    # The store id is what a reader needs to trace an answered item — it is the
+    # key `attention-answer.py` and `attention-ask.py poll` both take, and
+    # without it a CLOSERS row names a session whose item cannot be found. Only
+    # a store-sourced record has one; a synthetic pane-free row has none and
+    # renders unchanged.
+    if store_ref and rec.get("store_item_id"):
+        prov = f"{prov} · item={rec['store_item_id']}"
     return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
             f"{one_line(name_of(rec, pmap, registry), 50):<50}  {one_line(what, 60)}\n"
-            f"         {provenance_of(rec)}\n"
+            f"         {prov}\n"
             f"         {jump}{owner_line}")
 
 
@@ -2736,7 +2757,8 @@ def main():
               f"  — last-turn closer and class (ask | routine | parked-wait | none)")
         for r in last_closers:
             print(row(r, pmap, f"{closer_class(r)}: "
-                               f"{closer_from_transcript(r) or 'no closer line'}", registry))
+                               f"{closer_from_transcript(r) or 'no closer line'}",
+                      registry, store_ref=True))
     if wanted("stuck"):
         print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
         for r in stuck:
