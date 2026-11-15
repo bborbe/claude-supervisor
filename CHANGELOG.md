@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: an operator-set flag counts as approval at every reader — `flag_provenance.is_approved()` (`approved_at` or an `operator`/`legacy` flag) drives `approved-not-started.py`, the open leg's `waiting approval` guard, `/supervisor:open` Gate 1, the goal tier's todo hold (`goal-drive`, `goal-spawn-reader`, `goal-sweep-reader`), `next-focus.py`'s `needs_approval`, `inbox.py`'s inbox set and `undriven-plan.py`'s manager approve; nothing writes `approved_*` from a flag any more, so the `--flagged` batch drops its approve pass and the obsolete `check-open-approve-ordering.py` checker is retired
+- docs: workers and managers are told flagged rows open and reopen automatically, so a session with nothing doable before a later date sets `defer_date` and closes to free its slot
+
 ## v0.314.0
 
 - feat: goal and topic loops tick Success Criteria / Definition of Done / Completion Gate boxes on an inline citation they resolved this tick (merged PR, release tag, completed task on the goal tier, completed goal on the topic tier). `commands/steps/goal-closure.md` § Step 0 is the single home, replacing the "close, never certify" rule that left goal and topic boxes with no owner. Each tier ticks only pages it owns: a goal loop ticks its goal and only those tasks whose liveness reads `ABSENT`; a topic loop ticks its topic page. Once all tracked work is terminal, unevidenced boxes raise one `ack` notice per page, recorded in `# Progress`, instead of a silent `OPEN` every tick.

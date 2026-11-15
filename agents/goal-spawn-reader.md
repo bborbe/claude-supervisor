@@ -78,7 +78,7 @@ not carry.
 
    | Gate | Condition | Line |
    |---|---|---|
-   | approval | `phase: todo` | `held: <task> · approval (phase todo)` |
+   | approval | `phase: todo` and not operator-flagged (`flag_provenance.flag_admits()`) | `held: <task> · approval (phase todo)` |
    | parked | `phase: human_review`, or `status: hold` / `backlog` | `held: <task> · not-parked (<phase or status>)` |
    | operator hold | a `session-holds.json` entry for the row's `claude_session_id` | `held: <task> · session-hold (<reason>)` |
    | role | `role: human` | `held: <task> · yours (role human)` |
