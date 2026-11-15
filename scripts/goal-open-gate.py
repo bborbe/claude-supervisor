@@ -31,9 +31,11 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-#: The goals folder, matching `scripts/topic-spawn.py`'s constant — one spelling, so a
-#: reader is never asked to know which script means which directory.
-GOALS_DIR = "24 Goals"
+#: The goals folder names, newest first — the same pair `scripts/open-queue.py`
+#: (`GOAL_DIRNAMES`) resolves. `private-family`, `private-starcitizen` and `private-boss`
+#: still carry `23 Goals`; a single hard-coded `24 Goals` would answer `goal-not-found` for
+#: every goal there, refusing a flagged goal as though it did not exist.
+GOAL_DIRNAMES = ("24 Goals", "23 Goals")
 
 
 def _load(name, filename):
@@ -63,8 +65,16 @@ def flagged(fm, kind="goal"):
 
 
 def goal_page(vault, goal):
-    """The goal page path. Exact `<goal>.md`, never a glob: two goals can share a prefix."""
-    return os.path.join(vault, GOALS_DIR, goal + ".md")
+    """The goal page path, or None when no goals folder holds it.
+
+    Exact `<goal>.md`, never a glob: two goals can share a prefix. The first folder in
+    `GOAL_DIRNAMES` that holds the page wins.
+    """
+    for dirname in GOAL_DIRNAMES:
+        page = os.path.join(vault, dirname, goal + ".md")
+        if os.path.isfile(page):
+            return page
+    return None
 
 
 def main(argv=None):
@@ -76,13 +86,16 @@ def main(argv=None):
 
     page = goal_page(args.vault, args.goal)
     try:
+        if page is None:
+            raise OSError("no goals folder holds the page")
         with open(page, encoding="utf-8") as handle:
             fm = frontmatter(handle.read())
     except OSError:
         # Not a flag verdict: the caller passed a name that is not a page here. Kept a
         # distinct token so a typo never reads as "the operator did not flag it".
         print("goal-not-found")
-        print("no page at %s" % page)
+        print("no page named %r under %s in %s"
+              % (args.goal, " or ".join(GOAL_DIRNAMES), args.vault))
         return 1
 
     if flagged(fm, "goal"):
@@ -91,8 +104,12 @@ def main(argv=None):
 
     reason = flag_provenance.flag_refusal(fm, "goal") or "not flagged"
     print("goal-unflagged: %s" % reason)
-    print("flag it first: vault-cli --vault %s goal set %r flag true --by operator"
-          % (os.path.basename(os.path.abspath(args.vault)), args.goal))
+    # ⚠️ The remedy names the Vault UI, never a CLI line. `vault-cli goal set` has no
+    # `--by` (only `task set` does), so `goal set <g> flag true` writes a flag with no
+    # `flag_set_by` — which `flag_admits()` refuses. Printing that command would hand the
+    # operator a fix that leaves the goal exactly as refused as before.
+    print("flag it first: toggle the goal's flag in the Vault UI — an operator-set flag. "
+          "`vault-cli goal set … flag true` records no setter, so it would still refuse.")
     return 1
 
 
