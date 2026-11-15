@@ -529,11 +529,8 @@ def act(args):
 
     verdict, answer = poll_card(item)
     if verdict in ("DECLINED", "HIDDEN"):
-        # ⚠️ **A terminal card must be SPENT, not re-polled.** Both terminals are the
-        # operator closing the card without answering; leaving `card_item` set makes every
-        # later round poll this same dead item, print `carded`, and never post a new card or
-        # restart — the leg wedges on that task forever, which is the silent no-op this file
-        # exists to prevent. Recorded as a decline so the row is not re-asked at once either.
+        # ⚠️ A terminal card must be SPENT, not re-polled: leaving `card_item` set makes every
+        # later round poll this dead item and never post or restart — the leg wedges forever.
         state["declined"] = True
         state["declined_at"] = stamp
         state["card_item"] = None

@@ -272,9 +272,8 @@ class Handover(Base):
                             "the same dedup key after a restart means the operator is never re-asked")
 
     def test_a_closed_card_is_spent_not_repolled(self):
-        """DECLINED/HIDDEN is the operator closing the card without answering. Leaving the
-        item set makes every later round poll the same dead item and never post again — the
-        leg wedges on that task forever."""
+        """DECLINED/HIDDEN closes the card without answering; leaving the item set wedges the
+        leg on that task forever."""
         self.patch_control(poll="DECLINED")
         self.run_leg()                       # posts
         self.run_leg()                       # polls, sees DECLINED, spends the card
