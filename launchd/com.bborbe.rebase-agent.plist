@@ -22,8 +22,16 @@
   The force-push stays the operator's by standing rule, so this is a report, not an action.
 
   Install:
+    mkdir -p ~/.config/rebase-agent
+    cp launchd/repos.txt ~/.config/rebase-agent/repos.txt    # then edit it
     cp launchd/com.bborbe.rebase-agent.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.rebase-agent.plist
+
+  ⚠️ THE REPO SET IS A FILE, and launchd does not read your shell — `~` does not expand
+  here, so `--repos-file` below is an absolute path. Without that file every tick exits 2
+  before any sweep, which reads in the log like a config error rather than a missing file.
+  The cluster CronJob carries its own copy in `bborbe/nuke`'s `rebase-agent-repos` ConfigMap;
+  this one is only for a Mac-side run.
 
   Reload after an upgrade:
     launchctl kickstart -k gui/$UID/com.bborbe.rebase-agent
@@ -41,6 +49,12 @@
     <array>
         <string>/usr/local/bin/python3</string>
         <string>/Users/bborbe/.claude/plugins/marketplaces/claude-supervisor/scripts/rebase-agent.py</string>
+        <!--
+          Absolute, because launchd expands nothing. The script's own default is the
+          cluster pod's `/config/repos.txt`, which does not exist on a Mac.
+        -->
+        <string>--repos-file</string>
+        <string>/Users/bborbe/.config/rebase-agent/repos.txt</string>
     </array>
 
     <!--

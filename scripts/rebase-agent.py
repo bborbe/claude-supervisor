@@ -161,27 +161,82 @@ LOCAL_BUNDLE_DIR = "/tmp"
 # The repo set is explicit, never "every repo". The conflict class exists only where a
 # release cut renames `## Unreleased` in a CHANGELOG that open branches also edit — a
 # repo without that convention cannot produce the conflict, so sweeping it would rebase
-# branches for nothing. `vault-cli` is here because it holds the exact pathology: two
-# open PRs, both CONFLICTING, both APPROVED.
-DEFAULT_REPOS = (
-    {
-        "repo": "bborbe/claude-supervisor",
-        # The pod's clone. `expanduser` is deliberate: HOME is /workspace in the pod, and
-        # pointing HOME at the volume is what makes the container layout match a laptop.
-        "path": os.path.expanduser("~/Documents/workspaces/claude-supervisor"),
-        # The auto-reviewer's park thresholds (MAX_ADDITIONS / MAX_CHANGED_FILES in
-        # github-pr-watcher) are deployment env, not repo config, so they cannot be
-        # read from here. These are the observed defaults and are marked unverified.
-        "max_additions": 2000,
-        "max_changed_files": 40,
-    },
-    {
-        "repo": "bborbe/vault-cli",
-        "path": os.path.expanduser("~/Documents/workspaces/vault-cli"),
-        "max_additions": 2000,
-        "max_changed_files": 40,
-    },
-)
+# branches for nothing. The set lives in a config file, not here: coverage is a
+# configuration question, so adding a repo must not be a release of this script.
+#
+# One `owner/name` per line, `#` comments and blank lines skipped. The CronJob's clone
+# loop reads the same file, so a repo added here is cloned before this script runs — a
+# repo known only to this file has no clone, `fetch_master` fails, and the row renders
+# UNKNOWN rather than sweeping.
+REPOS_FILE_DEFAULT = "/config/repos.txt"
+
+# The auto-reviewer's park thresholds (MAX_ADDITIONS / MAX_CHANGED_FILES in
+# github-pr-watcher) are deployment env, not repo config, so they cannot be read from
+# the repos file. These are the observed defaults and are marked unverified.
+MAX_ADDITIONS_DEFAULT = 2000
+MAX_CHANGED_FILES_DEFAULT = 40
+
+
+def load_repos(path):
+    """Read the repo set from `path`; return a tuple of cfg dicts.
+
+    `expanduser` on the derived clone path is deliberate: HOME is /workspace in the pod,
+    and pointing HOME at the volume is what makes the container layout match a laptop.
+    A clone path that skipped it would name a Mac path the pod cannot see, so every push
+    line would point at a file that does not exist.
+
+    A missing, empty or malformed set raises rather than returning `()`. An empty repo
+    list used to render the clean-queue line, reading as "nothing is behind" when the
+    truth is "nothing was examined" — the same false negative the `--repo` guard below
+    exists to prevent.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError as error:
+        raise ValueError(f"repo set could not be read from {path}: {error}") from error
+
+    repos, seen = [], set()
+    for line in lines:
+        entry = line.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        # Both halves must be non-empty, neither may be a traversal segment, and no
+        # whitespace of any kind may survive: `bborbe/` would derive the workspaces
+        # directory itself as the clone path and `bborbe/..` its parent, so a set that
+        # "looks" valid would sweep a directory that is not a repo. The clone loop reads
+        # the same file and derives its target the same way, so a shape this rejects is a
+        # shape that loop would have acted on.
+        owner, _, name = entry.partition("/")
+        if (
+            "/" in name
+            or not owner
+            or not name
+            or owner in (".", "..")
+            or name in (".", "..")
+            or any(char.isspace() for char in entry)
+        ):
+            raise ValueError(
+                f"{path}: {entry!r} is not owner/name — the clone loop reads the same "
+                "file and derives its target directory from the name after the slash"
+            )
+        if entry in seen:
+            raise ValueError(
+                f"{path}: {entry!r} is listed twice — a duplicate sweeps the same repo "
+                "twice and emits duplicate rows"
+            )
+        seen.add(entry)
+        repos.append({
+            "repo": entry,
+            "path": os.path.expanduser(f"~/Documents/workspaces/{name}"),
+            "max_additions": MAX_ADDITIONS_DEFAULT,
+            "max_changed_files": MAX_CHANGED_FILES_DEFAULT,
+        })
+
+    if not repos:
+        raise ValueError(f"repo set in {path} is empty — refusing to report a clean queue")
+    return tuple(repos)
+
 
 # A prod pin is the operator's approval, never a rebase candidate.
 PROD_PIN_PATTERNS = (
@@ -562,7 +617,7 @@ def transfer_refusal():
 def bundle_path(repo, number):
     """One file per repo AND PR.
 
-    `DEFAULT_REPOS` sweeps more than one repo into a single `REBASE_BUNDLE_DIR`, and PR
+    `load_repos` sweeps more than one repo into a single `REBASE_BUNDLE_DIR`, and PR
     numbers collide across them — 521 exists in both. Keying the name on the number alone
     would let one repo's bundle overwrite the other's between a sweep writing it and the
     operator pasting the line, which hands over the wrong commit with no error anywhere.
@@ -992,6 +1047,9 @@ def build_parser():
     parser.add_argument("--keep-scratch", action="store_true",
                         help="leave the scratch worktree in place for inspection")
     parser.add_argument("--state-dir", default=None)
+    parser.add_argument("--repos-file", default=REPOS_FILE_DEFAULT,
+                        help="the repo set, one owner/name per line "
+                             f"(default: {REPOS_FILE_DEFAULT})")
     parser.add_argument("--trigger", choices=TRIGGERS, default="manual",
                         help="what started this run, written into the record "
                              "(default: manual)")
@@ -1005,12 +1063,18 @@ def main(argv=None):
     if args.state_dir:
         STATE_DIR = args.state_dir
 
-    cfgs = [cfg for cfg in DEFAULT_REPOS if not args.repo or cfg["repo"] in args.repo]
+    try:
+        repos = load_repos(args.repos_file)
+    except ValueError as error:
+        print(f"repo set: {error}", file=sys.stderr)
+        return 2
+
+    cfgs = [cfg for cfg in repos if not args.repo or cfg["repo"] in args.repo]
     # A --repo outside the set filters cfgs to empty, and an empty row list used to
     # print the clean-queue line — reading as "nothing is behind" when the truth is
     # "this repo was never examined". Measured 2026-11-13 on bborbe/git-rest#81 and
     # bborbe/agent-task-executor#161, both CONFLICTING and both reported clean.
-    known = {cfg["repo"] for cfg in DEFAULT_REPOS}
+    known = {cfg["repo"] for cfg in repos}
     unknown_repos = [repo for repo in (args.repo or []) if repo not in known]
 
     rows, errors = [], []
