@@ -85,16 +85,18 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     page = goal_page(args.vault, args.goal)
-    try:
-        if page is None:
-            raise OSError("no goals folder holds the page")
-        with open(page, encoding="utf-8") as handle:
-            fm = frontmatter(handle.read())
-    except OSError:
-        # Not a flag verdict: the caller passed a name that is not a page here. Kept a
-        # distinct token so a typo never reads as "the operator did not flag it".
+    fm = None
+    if page is not None:
+        try:
+            with open(page, encoding="utf-8") as handle:
+                fm = frontmatter(handle.read())
+        except OSError:
+            fm = None
+    if fm is None:
+        # Not a flag verdict: the caller passed a name that is not a readable page here.
+        # Kept a distinct token so a typo never reads as "the operator did not flag it".
         print("goal-not-found")
-        print("no page named %r under %s in %s"
+        print("no readable page named %r under %s in %s"
               % (args.goal, " or ".join(GOAL_DIRNAMES), args.vault))
         return 1
 
