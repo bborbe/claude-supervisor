@@ -543,7 +543,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
    **The colour and the window are role signals, not decoration** — a manager comes up `orange` in `Managers` so it can never be read as a worker, which stays `pink` in `Agents` (§ 3.0).
 
-5. **Only when the manager branch cannot run** — `manager-launcher.py` exited non-zero, or the spawn failed — fall back to the goal's tasks:
+5. **Only when the manager branch cannot run** — `manager-launcher.py` exited non-zero, or the spawn failed — fall back to the goal's tasks (never on a `goal-unflagged` refusal, which STOPs):
    - List them — every task whose `goals:` frontmatter names this goal. **Frontmatter only.** A body-text `[[Goal]]` mention is not membership: grepping `[[goal]]` file-wide over one topic's five member goals returned 39 tasks where frontmatter returns 21, and two of the extras were `in_progress` under entirely different goals.
    - **one non-terminal task** → run the task branch (Step 2A) on it
    - **several** → list them with status/phase and ask which; never pick for the operator
