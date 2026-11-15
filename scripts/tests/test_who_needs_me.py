@@ -2778,6 +2778,26 @@ class LastClosersSection(unittest.TestCase):
         self.assertEqual(0, rc, err)
         self.assertIn("Last closers (1, headless=0)", out)
 
+    def test_a_store_row_names_its_item_id(self):
+        """SC2: the `CLOSERS` row must name the store item id.
+
+        The row names a session and a pane; the store's key is the item id. An
+        answered item that never closes is untraceable from the digest without
+        it — the id is what `attention-ask.py poll` and `attention-answer.py`
+        both take, and the pane is not it.
+        """
+        store_id = "a" * 32
+        records = [dict(self.RECORDS[0], store_item_id=store_id)]
+        panes = {"901": {"pane_id": 901, "title": "S"}}
+        with mock.patch.object(wnm, "last_assistant_text",
+                               lambda rec: self.TEXTS["lc-routine"]):
+            rc, out, err = run_feed(panes, records, argv=["--section", "last-closers"])
+        self.assertEqual(0, rc, err)
+        self.assertIn("item=" + store_id, out)
+        # The closer text is untouched: the routine-continue table reads it
+        # verbatim, and the id rides the provenance line instead.
+        self.assertIn("routine: nothing — I continue on step 1", out)
+
     def test_a_live_session_with_no_store_record_still_gets_a_row(self):
         """The pane-free channel: the registry is the population authority.
 
