@@ -210,12 +210,12 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `Operator answer, via supervisor:` when the operator answered here, `Manager answer, via
   supervisor:` for your own scope decision. Neither releases an irreversible or
   production-touching action.
-- **Close on complete evidence; tick only with an inline citation.** A member goal closes on its `# Success
-  Criteria` + `# Definition of Done`; **this topic closes on its `# Success Criteria` + its
+- **Close on complete evidence; tick only with an inline citation.** **This topic closes on its `# Success Criteria` + its
   `# Completion Gate`** — a topic is the only level carrying both sets
-  (`docs/session-progress.md:37`). When every box in both of a page's own sets reads `[x]`, the
-  round runs the tier's verb — `vault-cli goal complete "<goal>" --vault "<vault>"` or
-  `vault-cli topic complete "<topic>" --vault "<vault>"` — and quotes its verdict;
+  (`docs/session-progress.md:37`). When every box in both sets reads `[x]`, the round runs
+  `vault-cli topic complete "<topic>" --vault "<vault>"` and quotes its verdict. A member goal is
+  never closed from this tier — its goal manager closes it, after moving its open tasks out
+  (goal-closure.md § Step 0b);
   the execution, the terminal guard and the `--vault` contract live in
   `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are not restated here. ⚠️ **Tick a
   box only with an inline citation you resolved this tick** (goal-closure.md § Step 0); never

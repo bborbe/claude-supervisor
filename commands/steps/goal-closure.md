@@ -52,7 +52,7 @@ inline citation on the same line. Never change the box's own text.
   reaches a command. On exit 1, the box has no evidence.
 - **No resolvable citation → leave the box `[ ]`.** Do not card a page whose work is still
   running. Once nothing tracked can still produce evidence — every tracked task (goal tier) or
-  member goal (topic tier) reads `completed`/`aborted` — and boxes are still unevidenced, post
+  member goal (topic tier) reads `completed`, `aborted`, `hold` or `backlog` — and boxes are still unevidenced, post
   **one** notice, then record it on the page so later ticks do not re-post:
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py" post \
@@ -80,14 +80,18 @@ task's raw `goals:` entry with the goal name (`pkg/ops/goal_complete.go` `taskLi
 The usual link shape `- '[[<goal>]]'` never equals the bare name, so the verb passes over those
 tasks without refusing. Checked 2026-11-15 against vault-cli source.
 
-1. List the linked tasks yourself, and read each one's raw entry with
-   `vault-cli task get "<task>" goals --output json --vault "<vault>"`.
+1. List the linked tasks yourself. Run every task name through `closure-name-safe.py`
+   (single-quoted, step 2 below). A name that fails holds the close: report it and close
+   nothing this tick. Read each task's entries with
+   `vault-cli task get "<task>" goals --output json --vault "<vault>"`. The JSON `value` is the
+   list **comma-joined**, and goal names can contain commas, so never split it. Instead check
+   which exact string — `[[<goal>]]` or `<goal>` — occurs in `value`, and use that string.
 2. **A worker that may be on the task holds the close.** If a linked task has a
    `claude_session_id` and this round's liveness reading for it is `LIVE` or `UNKNOWN`, unlink
    nothing, report `closure: <goal> — CLOSE held by live/unknown [[<task>]]`, and close nothing
    this tick. A task with no `claude_session_id` was never started and does not hold.
-3. Unlink each remaining one with the entry **exactly as read**:
-   `vault-cli task remove "<task>" goals "<entry as read>" --vault "<vault>"`. The remove verb
+3. Unlink each remaining one with the string found in step 1:
+   `vault-cli task remove "<task>" goals "<that string>" --vault "<vault>"`. The remove verb
    matches the raw string, so `[[<goal>]]` and `<goal>` are different values. The task's own
    `status` is untouched; it is unlinked, not closed. **If any remove fails**, report it
    verbatim and close nothing this tick.
@@ -247,7 +251,7 @@ where there is none.
 | Branch | Examined | Contract |
 |---|---|---|
 | goal | the subject goal, then each task printed in `Tracked (N):` | SC + DoD |
-| topic | the topic page, then each goal in its `## Goals` list | topic page: SC + **Completion Gate**; member goals: SC + DoD |
+| topic | the topic page; each goal in its `## Goals` list is read and routed to its goal manager, never closed here | topic page: SC + **Completion Gate** |
 
 ⚠️ **Both tiers reach this step through a router row, and that row is what makes the claim
 true.** `commands/goal-drive.md` row 4c runs it on the goal branch; `commands/topic-drive.md`
@@ -259,7 +263,8 @@ arm says — which is why the topic row exists rather than the rule being restat
 - **No tick without an inline citation** you resolved this tick (Step 0). A tick with
   no citation, or with one that does not resolve, is forbidden at every tier. **No tick on a page
   another owner holds** — a member goal on the topic tier, or a task whose liveness is not
-  `ABSENT`. Those pages may still be *closed* here once their boxes read `[x]`.
+  `ABSENT`. Such a task may still be *closed* here once its boxes read `[x]`. A member goal is
+  never closed from the topic tier: it is routed to its goal manager, which runs Step 0b.
 - **Never set `status: completed` directly.** The verb writes it; nothing else may.
 - **Never close on a partial read.** A page whose DoD section is missing or empty is
   *unmeasurable*, not complete — report it as a gap. **The one exception is an absent DoD on

@@ -148,14 +148,14 @@ approval boundary, not a bug.
 - **Never classify a task.** This tier's rows are goals and their managers; the task buckets
   are the goal manager's, in `agents/goal-sweep-reader.md`.
 - **Never decide an operator gate.** You surface it; the operator answers it.
-- **Close on complete evidence; tick only with an inline citation.** This tier closes a member goal (SC + DoD)
-  and the topic page itself (**SC + `# Completion Gate`** — the topic's own contract, and the
+- **Close on complete evidence; tick only with an inline citation.** This tier closes only
+  the topic page itself (**SC + `# Completion Gate`** — the topic's own contract, and the
   reason the reader takes `--kind topic`) — never a task, which belongs to its goal's manager
   and which this tier never reads — through `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md`,
   which is the rule's only execution home and carries the verbs, the `--vault` contract and
   the terminal guard. ⚠️ **Tick only on a resolved citation (Step 0); never set `status` to close**
   — closure follows the evidence, and a close that would need
-  `--force` is one you do not make. A page you may not close (any box open) is routed to its
-  own manager, never closed from here.
+  `--force` is one you do not make. A member goal, closable or not, is routed to its own
+  manager (it runs Step 0b), never closed from here.
 - **Never claim an act the script reported it could not perform.** If a tool failed to bind,
   carry that through rather than smoothing it.
