@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.317.0
 
 - fix: `manager-wake.py` resolves a subject's manager from the union of `~/.claude/state/worker-manager/<sid>.json` and the `sweep-gate/<branch>--<slug>.session` marker `--arm` writes, and keeps only sessions live in `~/.claude/sessions/` (registry entry with a running pid). A dead registration never outranks a live one; when every registration is dead the result is `NO-MANAGER`, not `NO-PANE`. Previously the newest `worker-manager` record won regardless of liveness, so a subject whose live manager never wrote one (Development Pipeline Throughput) had every wake aimed at a session dead for 135 h.
 - fix: `manager-wake.py`'s pane lookup joins from the target session (registry → pid → tty → pane) instead of `jump.py`'s one-session-per-tty map, retries once on a transient read failure, and names the miss: `NO-PANE reason=wezterm-unreadable|no-registry-entry|tty-unreadable|no-tty|tty-not-a-pane:<tty>`. A live manager running headless (`sdk-cli` entrypoint and no controlling tty) reads `HEADLESS`, since no pane-wake can reach it.
