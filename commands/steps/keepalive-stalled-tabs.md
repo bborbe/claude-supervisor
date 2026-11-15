@@ -13,7 +13,7 @@ When: every tick — the eighth procedure in `commands/steps/keepalive.md`, reac
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
 F=$(python3 "$P/resolve-folders.py" --vault "<vault>" --require tasks_dir)
-python3 - "$vault" "$F" "$P/stalled-tab-restart.py" <<'PY'
+python3 - "<vault>" "$F" "$P/stalled-tab-restart.py" <<'PY'
 import json, os, subprocess, sys
 vault, f, script = sys.argv[1:4]
 if f.startswith("UNKNOWN"): sys.exit("folders: " + f)

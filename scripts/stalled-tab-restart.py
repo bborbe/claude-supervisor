@@ -528,6 +528,22 @@ def act(args):
         return 0
 
     verdict, answer = poll_card(item)
+    if verdict in ("DECLINED", "HIDDEN"):
+        # ⚠️ **A terminal card must be SPENT, not re-polled.** Both terminals are the
+        # operator closing the card without answering; leaving `card_item` set makes every
+        # later round poll this same dead item, print `carded`, and never post a new card or
+        # restart — the leg wedges on that task forever, which is the silent no-op this file
+        # exists to prevent. Recorded as a decline so the row is not re-asked at once either.
+        state["declined"] = True
+        state["declined_at"] = stamp
+        state["card_item"] = None
+        if not write_state(args.vault, args.task, state):
+            print("cannot-tell")
+            print("the closed card could not be recorded")
+            return 0
+        print("carded")
+        print(f"card {item} closed as {verdict}; not re-asked this episode")
+        return 0
     if verdict != "ANSWERED":
         print("carded")
         print(f"card {item} is {verdict}")

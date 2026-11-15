@@ -271,6 +271,19 @@ class Handover(Base):
         self.assertNotEqual(first_key, second_key,
                             "the same dedup key after a restart means the operator is never re-asked")
 
+    def test_a_closed_card_is_spent_not_repolled(self):
+        """DECLINED/HIDDEN is the operator closing the card without answering. Leaving the
+        item set makes every later round poll the same dead item and never post again — the
+        leg wedges on that task forever."""
+        self.patch_control(poll="DECLINED")
+        self.run_leg()                       # posts
+        self.run_leg()                       # polls, sees DECLINED, spends the card
+        before = len([a for a in self.calls("ask") if a[0] == "post"])
+        rc, lines = self.run_leg()           # the round after
+        self.assertIn("declined", lines[1])
+        after = len([a for a in self.calls("ask") if a[0] == "post"])
+        self.assertEqual(before, after, "the leg re-posted instead of staying declined")
+
     def test_declined_is_not_an_answer(self):
         self.patch_control(poll="DECLINED")
         rc, lines = self.run_leg_settled()
