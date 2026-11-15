@@ -241,12 +241,15 @@ leave the eight above unchanged:
 | `task-terminal` | the session's anchored task is already finished — the same guard and the same token as on the normal path, because this is the only resume this script performs for a headless worker and it is the path the 2026-11-11 incident took |
 
 An unresolvable vault or launcher **for this session** is an `❌ error:` operational failure
-(exit 1), never a refusal, and fires before anything is spawned. ⚠️ On this path a missing
-`vault-cli` does **not** produce the `environment-fault` (exit 3) row in the [exit-code
-table](#exit-codes): `vault_configs()` returns `None` before any launcher is resolved, so the
-run reports the exit-1 `❌ error:` above, naming the vault rather than the missing binary.
-Exit 3 stays reachable on the normal restart path, where the cwd comes from the registry
-entry rather than from `vault-cli`.
+(exit 1), never a refusal, and fires before anything is spawned.
+
+A missing `vault-cli` is a different fault: it is the caller's environment, not this
+session's state. This path reports it under the `environment-fault` token and exits **3**,
+exactly as the normal path does — and, per the [exit-code table](#exit-codes), that check
+runs **before every refusal**, so `environment-fault` outranks `not-absent`, `held-session`
+and `unknown-session-id` on a host with no `vault-cli`. The probe is suppressed when
+`SUPERVISOR_VAULT_CONFIG` names a vault list, so a drill or test that supplies its own
+config still runs on such a host.
 
 ## Which launcher the resume runs
 

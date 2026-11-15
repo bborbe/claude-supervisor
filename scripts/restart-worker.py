@@ -1467,9 +1467,28 @@ def resume_absent(sid, sessions_dir, dry_run):
     Refusals, each first-line token + exit 1, every one before the spawn:
       `not-absent`         a registry entry carries the id, or the registry is unreadable —
                            the process may be alive, and resuming it would run two copies
-      `held-session`       an operator hold; outranks everything, exactly as on the normal path
+      `held-session`       an operator hold; outranks every other refusal, exactly as on the
+                           normal path — the environment fault below still precedes it
       `unknown-session-id` no manager registration, so no vault to resume into
+
+    An `environment-fault` (exit 3, not a refusal) is checked FIRST, ahead of all three: a
+    caller with no `vault-cli` cannot resolve a vault at all, and the exit-code table promises
+    that check runs before every refusal. `SUPERVISOR_VAULT_CONFIG` suppresses it, as it
+    already does in `resolve_launcher` — a drill or test override must not become a fault.
     """
+    # Before the refusals and before `vault_configs()`: without `vault-cli` no vault resolves,
+    # and without this probe the run fails later naming the registration instead of the binary
+    # ("the registration names vault X, which resolves to no existing directory", exit 1).
+    # Guarded on `SUPERVISOR_VAULT_CONFIG` for the same reason `resolve_launcher` is: that
+    # override makes `vault_configs()` bypass `find_vault_cli()` entirely, so probing anyway
+    # would turn every drill and test run on a `vault-cli`-less host into exit 3.
+    if not os.environ.get("SUPERVISOR_VAULT_CONFIG") and find_vault_cli() is None:
+        print(ENV_FAULT)
+        print(f"🛑 environment fault (not a refusal): vault-cli not found on PATH "
+              f"({os.environ.get('PATH', '')}) nor at {', '.join(VAULT_CLI_LOCATIONS)} — "
+              f"no vault can be resolved, so {sid} cannot be resumed")
+        return 3
+
     # FIRST, before anything reads a record's fields: a file that is half-written, or valid
     # JSON that is not an object, must refuse with its token rather than crash `find_target`.
     bad = unparseable_registry_entries(sessions_dir or SESSIONS_DIR)
