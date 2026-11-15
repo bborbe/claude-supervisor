@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **a flagged task whose owning subject already has a live manager is held, not opened.** `scripts/flagged-rows.py`'s `resolve_branch()` gains `held-owner-live`: a task that would otherwise `create` a worker, whose resolved owner is a `goal` or `topic` (never the `fleet` sentinel) and whose `owner_live` probe answers `true`, is held instead of spawned — two sessions on one subject is the collision. `owner_live: null` (an unanswerable probe) still creates, for the same reason `unknown` outranks `create`; the fleet sentinel never holds, or the whole batch would stop. `commands/open.md` § Step 0.5 now reads the resolver's `owner_live` (it carried 0 references while the resolver carried 10) and renders `⛔ HOLD — owner <kind> "<name>" has a live manager`, distinct from the row-own `LIVE HERE` / `LIVE ELSEWHERE` verdicts; a manager opened earlier in the same run counts via the spawn ledger. Tests: `HeldOwnerLive` in `test_flagged_rows.py` and the branch enum in the row schema.
+
 ## v0.321.2
 
 - fix: name an expired `defer_date` as the close refusal reason — a task at `in_progress` with a lapsed defer now reports the expiry and the three exits instead of a message identical to one that was never deferred
