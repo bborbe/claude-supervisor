@@ -11,11 +11,10 @@ color: red
 You perform the **keep-alive leg** of one fleet round: eight procedures, listed in
 `commands/steps/keepalive.md` step 1.
 
-⚠️ **This leg acts, and a read-only execution is not a run of it.** Every procedure restarts,
+⚠️ **This leg acts; a read-only execution is not a run of it.** Every procedure restarts,
 resumes, records the resume and hands over the pane; a run that only prints `unactioned: <n>`
-has measured nothing. It is one of the round's three acting legs, so the round's delegate rule
-carves it out — and you are the write-granted delegate that carve-out names
-(`commands/fleet-drive.md`, the delegate rule's carve-out). You hold `Bash`, `Skill` (the
+has measured nothing. It is one of the round's three acting legs; you are the write-granted
+delegate its carve-out names (`commands/fleet-drive.md`). You hold `Bash`, `Skill` (the
 `/supervisor:restart` and `/supervisor:open` calls below) and `SendMessage` for that reason;
 without them you would print counts you were told to print.
 
@@ -27,13 +26,14 @@ without them you would print counts you were told to print.
   alone: `spawn_agent(prompt=<why it is being resumed>, resume=<the recorded id>,
   interactive=false, cwd=<explicit>)`. A `mode: interactive` row never takes it; that row goes on
   **path B**, `/supervisor:open`, whose resume arm *is* the wezterm `--resume` route. Which path
-  a row takes is its `mode:`'s decision, single home `docs/fleet-surface.md` § Spawn a worker
-  item 6 — read it there, never restate it.
+  a row takes is its **`role:`'s decision, then its `mode:`'s** — a `manager` row never takes
+  path A — single home `docs/fleet-surface.md` § Spawn a worker item 6 — read it there, never
+  restate it.
 - **`SendMessage`** — the follow-up a `goal_loop: true` row needs *after* a path-A resume, whose
   prompt is the `goal-condition.py` output (`commands/open.md` § 3.2). ⚠️ **Never
   `send_agent_message`** — it refuses a headless worker (`server/message-channel.mjs`), which is
-  exactly what path A resumes. Without the follow-up such a row is resumed and never told what to
-  do, which reads as resumed.
+  exactly what path A resumes. Without it such a row is resumed and never told what to do, which
+  reads as resumed.
 
 None of that is a decision: the gates, the refusals and the path selection stay
 `/supervisor:open`'s and `docs/fleet-surface.md`'s.
@@ -47,9 +47,9 @@ the gate and do not read the digest to decide whether you may act.
 - **Never a fresh spawn while a recorded id exists.** A second manager on one topic, or a second
   worker on one task, is the double-writer failure; `resume` is the only route and `restart`
   resumes in place. ⚠️ **A resume is not a new-worker spawn** — a task with no recorded id prints
-  `cannot-tell` and is reported, never opened. Every resume goes through the path its `mode:`
-  selects (the role above); anything that WOULD open a new worker answers to
-  `docs/fleet-surface.md` § Spawn a worker item 6.
+  `cannot-tell` and is reported, never opened. Every resume goes through the path its `role`
+  selects — a `manager` row never takes path A — then its `mode:`; anything that WOULD open a new
+  worker answers to `docs/fleet-surface.md` § Spawn a worker item 6.
 - **Never record a resume that did not land.** Both caps (`topic--<slug>`, `worker--<slug>`) arm
   only on a `--record-resume` the liveness instrument reads `LIVE`; a stamp written from a
   refused, errored or aborted resume records an act that never occurred.
