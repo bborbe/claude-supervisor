@@ -150,3 +150,37 @@ and do not card individual red rows.
 
 ⚠️ **A red row is a report, never a work item for this round** — the task that owns the gap
 fixes it.
+
+## The manager-mode reading
+
+Every tick runs `python3 $P/census-manager-mode.py --vault "<vault>"` and prints its lines. It
+is the detector for `docs/fleet-surface.md` § Spawn a worker item 6's other half — *"A manager
+row never resumes headless"* — which that block states and this reading observes. It reads and
+never acts.
+
+```
+<session-id> <subject> DEFECT manager-running-headless
+manager-mode census ok: 38 live session(s), none a headless manager
+```
+
+⚠️ **Why this reading exists at all.** A headless manager has no tab, no pane and therefore no
+jump link, and the Vault UI still renders its card as **Live** — so the board says it is running
+and offers nothing to click. Measured 2026-11-14 on `23 Topics/Development Pipeline Throughput.md`:
+the manager had been a tab for four spawns, came back headless, and the operator asked why the
+topic was not open. It **was** open and working, with nothing on screen to find. A condition that
+can only be found by an operator noticing a missing jump link is not reported at all.
+
+⚠️ **It joins two sources, and the join is the point.** `session-liveness.py --list --json`
+carries `sessionId` but **no `entrypoint`**, so the reading also reads the identity registry
+(`$SUPERVISOR_SESSIONS_DIR`, default `~/.claude/sessions`). A reading built on the liveness
+record alone matches nothing and prints a clean fleet forever.
+
+⚠️ **Only a topic or goal page counts.** A task page's session is a worker, and a worker is
+headless by design (`docs/role-mode-matrix.md` Rule 1) — flagging those would make the reading
+red on every healthy fleet.
+
+⚠️ **The exit code is three-way, and only one of them is a finding.** `0` clean; `1` at least
+one `DEFECT` line — the reading's own result, so the round carries on and prints the block;
+`2` the liveness probe, the registry or the vault could not be read, and the census says so on
+stderr rather than reporting a fleet with no headless managers. Render `2` as
+`manager-mode census: refused — <reason>`; a refusal and a clean fleet must never print the same.
