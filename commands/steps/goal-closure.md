@@ -9,7 +9,8 @@ user-invocable: false
 When: every tick, after the sweep
 
 Applies to the round's own subject and to every page in its tracked set. Step 0 runs on open
-boxes every tick; steps 1–3 close a page once every closure box reads `[x]`.
+boxes every tick; steps 1–3 close a page once every closure box reads `[x]` (or, for a goal,
+once Step 0b's linked-tasks case has ticked the last one).
 
 **A page closes on evidence. The loop may tick a box, but only with an inline citation it has
 resolved itself this tick.**
@@ -37,6 +38,7 @@ allowed evidence type that you resolved this tick:
 | release tag | `owner/repo@vX.Y.Z` | `gh -R owner/repo release view vX.Y.Z` exits 0 |
 | completed task (goal tier) | `[[Task Name]]` | `vault-cli task get "<task>" status --vault "<vault>"` reads `completed` |
 | completed goal (topic tier) | `[[Goal Name]]` | `vault-cli goal get "<goal>" status --vault "<vault>"` reads `completed` |
+| linked-task scan (goal tier, the linked-tasks box only) | `linked-task scan` + the `(loop): moved out` line's date, or `none open` | Step 0b step 1's scan, run this tick, finds no task still linked to the goal outside `completed`/`aborted` |
 
 Write the tick as `- [x] <unchanged box text> — evidence: <citation> (loop, YYYY-MM-DD)`, an
 inline citation on the same line. Never change the box's own text.
@@ -44,6 +46,8 @@ inline citation on the same line. Never change the box's own text.
 - **Where a citation may come from.** Only from a link already on the page (the box line, its
   `# Tasks` list, its `# Progress`, `# Results` or `# Pull Requests` section) or, on the goal tier,
   from a tracked task. Never search the wider vault or GitHub for something that might fit.
+  The one exception is the linked-tasks box (Step 0b): its evidence is the loop's own scan,
+  not a link.
 - **The evidence must match the box's claim, not just exist.** A merged PR proves only the
   claim it implements. A `[[task]]` or `[[goal]]` proves a box only when its own Success Criteria
   restate that box's outcome. If you cannot match them, the box has no evidence.
@@ -51,8 +55,9 @@ inline citation on the same line. Never change the box's own text.
   `owner/repo` and tag through `closure-name-safe.py` (step 2 below, single-quoted) before it
   reaches a command. On exit 1, the box has no evidence.
 - **No resolvable citation → leave the box `[ ]`.** Do not card a page whose work is still
-  running. Once nothing tracked can still produce evidence — every tracked task (goal tier) or
-  member goal (topic tier) reads `completed`, `aborted`, `hold` or `backlog` — and boxes are still unevidenced, post
+  running, and never card the linked-tasks box: Step 0b produces its evidence. Once nothing
+  tracked can still produce evidence — every tracked task (goal tier) or member goal (topic tier)
+  reads `completed`, `aborted`, `hold` or `backlog` — and boxes are still unevidenced, post
   **one** notice, then record it on the page so later ticks do not re-post:
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py" post \
@@ -65,15 +70,30 @@ inline citation on the same line. Never change the box's own text.
   line. The operator ticks, rewords or files work on the page itself; the loop never reads an
   answer.
 - **No tick on evidence you did not resolve this tick**, and no tick to make a close possible
-  when the evidence is missing.
+  when the evidence is missing. Step 0b's linked-tasks case is not an exception to this: it
+  creates the state the box describes (nothing open stays linked), then ticks on a scan of it.
 
 ## Step 0b — goal branch only: move open linked tasks out before the subject closes
 
-When the **subject** goal reads `CLOSE` on the goal branch, every task still linked to it that is
-not `completed` or `aborted` (`next`, `todo`, `in_progress`, `hold`, `backlog`) is moved out
-before the verb runs. Run it after the tracked set has been examined (see *What to do*), so a
-tracked task that itself closed this round is closed under the goal, not moved out. The topic
-tier never runs 0b: a member goal with open linked tasks is left to its goal manager.
+Step 0b runs on the goal branch's **subject** goal when it reads `CLOSE`, **or** when it is
+*linked-tasks-only* (defined below). Every task still linked to the goal that is not `completed`
+or `aborted` (`next`, `todo`, `in_progress`, `hold`, `backlog`) is moved out before the verb runs.
+Run it after the tracked set has been examined (see *What to do*), so a tracked task that itself
+closed this round is closed under the goal, not moved out. The topic tier never runs 0b: a
+member goal with open linked tasks is left to its goal manager.
+
+⚠️ **Linked-tasks-only.** The goal template's DoD carries *"All linked tasks completed or moved
+out with a recorded reason"*. That box stays `[ ]` while any task is linked, so without this case
+a goal carrying it never reads `CLOSE` and Step 0b never runs. A goal is linked-tasks-only when the
+reader prints `Success Criteria: … 0 open` and `Definition of Done: … 1 open`, **and** that one
+open DoD box, read from the page outside code fences, contains `linked tasks completed or moved
+out` (case-insensitive). For such a goal, run steps 1–4 below. Then, **only if none of them held
+or failed**, re-run step 1's scan this tick. When it finds nothing non-terminal still linked, tick
+the box as a `linked-task scan` (Step 0 table), with one of:
+- `— evidence: linked-task scan, moved out YYYY-MM-DD (loop, YYYY-MM-DD)` when step 3 moved tasks
+- `— evidence: linked-task scan, none open (loop, YYYY-MM-DD)` when there was nothing to move
+
+Then re-read with the reader and continue to the verb on `CLOSE`.
 
 ⚠️ **Do not rely on the verb to catch these tasks.** `vault-cli goal complete` compares each
 task's raw `goals:` entry with the goal name (`pkg/ops/goal_complete.go` `taskLinkedToGoal`).
@@ -94,17 +114,18 @@ tasks without refusing. Checked 2026-11-15 against vault-cli source.
    `vault-cli task remove "<task>" goals "<that string>" --vault "<vault>"`. The remove verb
    matches the raw string, so `[[<goal>]]` and `<goal>` are different values. The task's own
    `status` is untouched; it is unlinked, not closed. **If any remove fails**, report it
-   verbatim and close nothing this tick.
-4. Append one line to the goal's `# Progress`:
-   `- YYYY-MM-DD (loop): moved out at close — [[t1]] (<status>), [[t2]] (<status>) …`, so every
-   task stays findable from the goal it left.
+   verbatim, still run step 4 for the tasks already removed, and close nothing this tick.
+4. When step 3 moved at least one task, append one line to the goal's `# Progress`:
+   `- YYYY-MM-DD (loop): moved out at close, goal criteria met — [[t1]] (<status>), [[t2]] (<status>) …`.
+   It records the reason, and every task stays findable from the goal it left. Skip this step
+   when nothing was moved.
 5. Then run the verb (step 2 below). Never `--force`.
 
 ## What to do
 
 For the subject, then each page of the tracked set: Step 0, then steps 1–3. **Exception on the
-goal branch:** when the subject goal reads `CLOSE`, hold its step 2 until every tracked page has
-been examined. Then run Step 0b, then the subject's step 2.
+goal branch:** when the subject goal reads `CLOSE` or is linked-tasks-only (Step 0b), hold its
+step 2 until every tracked page has been examined. Then run Step 0b, then the subject's step 2.
 
 1. **Read it with the reader script — never a whole-page count:**
    ```bash
@@ -133,7 +154,7 @@ been examined. Then run Step 0b, then the subject's step 2.
    |---|---|---|
    | `TERMINAL` | the page already reads `completed`/`aborted` | **skip it** — nothing to close |
    | `UNMEASURABLE` | a section is absent, or carries no recognised box | report the gap, close nothing |
-   | `OPEN` | at least one box is open — for `--kind task`, anywhere on the page (`Whole page` line), since `vault-cli task complete` refuses on any open box | report which, close nothing |
+   | `OPEN` | at least one box is open — for `--kind task`, anywhere on the page (`Whole page` line), since `vault-cli task complete` refuses on any open box | report which, close nothing — except a subject goal that is linked-tasks-only, which goes to Step 0b |
    | `CLOSE` | both sections present, every box `[x]` — or an absent DoD on a grandfathered goal (see below) | step 2 |
 
    ⚠️ **The `Whole page` line prints on every `--kind task` run, `0 open` included.** It is
@@ -281,7 +302,9 @@ One line per page examined, and one for the round:
 closure: <page> — ticked <box> — evidence: <citation>   → resolved this tick
 closure: <page> — <n> unevidenced, work still running   → no notice yet
 closure: <page> — <n> unevidenced, all work terminal    → notice <item_id>, recorded in # Progress
+closure: <goal> — linked-tasks-only                     → Step 0b after the tracked set
 closure: <goal> — moved out <n> open tasks              → listed in # Progress
+closure: <goal> — ticked linked-tasks box — linked-task scan → re-read, verb on CLOSE
 closure: <goal> — CLOSE held by live/unknown [[<task>]] → nothing closed this tick
 closure: <goal> — unlink of [[<task>]] failed: <line>   → nothing closed this tick
 closure: <page> — <n> open (SC <a>, DoD <b>)            → not a candidate
