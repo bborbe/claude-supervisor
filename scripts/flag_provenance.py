@@ -44,7 +44,8 @@ def scalar(block, key):
     match = re.search(r"^%s:[ \t]*(.*)$" % re.escape(key), block, re.MULTILINE)
     if not match:
         return None
-    return match.group(1).strip().strip("\"'")
+    # A YAML inline comment is not part of the value (`flag_set_by: operator  # me`).
+    return re.sub(r"\s+#.*$", "", match.group(1)).strip().strip("\"'")
 
 
 def flag_set(block, kind):
