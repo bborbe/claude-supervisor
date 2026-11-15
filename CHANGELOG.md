@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.319.2
 
 - fix: **`flagged-rows.py` drops a `blocked_by` entry whose task is completed.** `blocked_by_of()` returned every listed name without checking it, so a flagged task stayed blocked forever once its prerequisites finished — `flagged-tick` skips any non-empty list (2026-11-15: Rebuild Nuke Cluster and Turn off fire, all four blockers completed hours earlier). A missing or unreadable blocker still counts as blocking, matching vault-cli's rule.
 
