@@ -529,7 +529,12 @@ def guards(block, today, attention_dir=None, name=None, index=None):
     """
     if block is None:
         return "unreadable task file"
-    if (field(block, "phase") or "").strip() == "todo":
+    # ⚠️ An operator-set flag IS the approval (ruling 2026-11-15): a flagged `todo` row is
+    # approved, not in the inbox, and the worker's entry path (`vault-cli task work-on`)
+    # moves its phase on. The test is the FLAG, deliberately not `is_approved()`: a `todo`
+    # row carrying `approved_at` and no flag is an anomaly `work-on` still refuses, so
+    # opening it would spawn a worker that stops at entry. Agent-set flags still wait.
+    if (field(block, "phase") or "").strip() == "todo" and not is_flagged(block):
         return "waiting approval"
     # ⚠️ **Ahead of every DERIVED guard — `blocked_by` and `defer_date` — but after the two
     # that describe the row's own state rather than a derivation.** A stop is the operator's

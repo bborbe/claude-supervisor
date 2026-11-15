@@ -457,7 +457,7 @@ class RunRecordTest(unittest.TestCase):
 
 
 class RepoSetTest(unittest.TestCase):
-    """A --repo outside DEFAULT_REPOS must never read as a clean queue.
+    """A --repo outside the configured set must never read as a clean queue.
 
     `cfgs` is filtered by the argument, so an out-of-set repo empties the list and the
     old code printed the clean-queue line — "nothing is behind" for a repo it never
@@ -465,10 +465,18 @@ class RepoSetTest(unittest.TestCase):
     bborbe/agent-task-executor#161, both CONFLICTING and both reported clean.
     """
 
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repos_file = os.path.join(self.tmp, "repos.txt")
+        with open(self.repos_file, "w", encoding="utf-8") as handle:
+            handle.write("bborbe/claude-supervisor\nbborbe/vault-cli\n")
+
     def test_out_of_set_repo_is_named_and_never_reported_clean(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = ra.main(["--repo", "bborbe/not-in-the-set",
+                          "--repos-file", self.repos_file,
                           "--state-dir", tempfile.mkdtemp()])
         out = buf.getvalue()
         self.assertNotIn(
@@ -484,6 +492,88 @@ class RepoSetTest(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             ra.render([])
         self.assertIn("no open PR is behind master", buf.getvalue())
+
+
+class LoadReposTest(unittest.TestCase):
+    """The repo set is configuration, so its failure modes are config failures.
+
+    Every case here is a way the file can be wrong that would otherwise render as a
+    clean queue — the same false negative the --repo guard exists to prevent, one layer
+    further out. A malformed line is worse than a missing one: the clone loop reads the
+    same file and derives its target directory from the name after the slash, so
+    `bborbe/vault-cli/extra` would clone to a path the sweep never looks at.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write(self, body):
+        path = os.path.join(self.tmp, "repos.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        return path
+
+    def test_one_repo_per_line_with_derived_path_and_default_thresholds(self):
+        repos = ra.load_repos(self.write("bborbe/claude-supervisor\nbborbe/vault-cli\n"))
+        self.assertEqual(
+            ["bborbe/claude-supervisor", "bborbe/vault-cli"],
+            [cfg["repo"] for cfg in repos],
+        )
+        self.assertEqual(
+            os.path.expanduser("~/Documents/workspaces/vault-cli"),
+            repos[1]["path"],
+            "the clone path must be expanduser'd — a literal tilde names no directory",
+        )
+        self.assertEqual(ra.MAX_ADDITIONS_DEFAULT, repos[0]["max_additions"])
+        self.assertEqual(ra.MAX_CHANGED_FILES_DEFAULT, repos[0]["max_changed_files"])
+
+    def test_comments_and_blank_lines_are_skipped(self):
+        repos = ra.load_repos(self.write(
+            "# the measured queue\n\nbborbe/vault-cli  # second\n\n"))
+        self.assertEqual(["bborbe/vault-cli"], [cfg["repo"] for cfg in repos])
+
+    def test_empty_file_refuses_rather_than_reporting_a_clean_queue(self):
+        with self.assertRaises(ValueError) as caught:
+            ra.load_repos(self.write("\n# only a comment\n"))
+        self.assertIn("empty", str(caught.exception))
+
+    def test_missing_file_names_the_path(self):
+        missing = os.path.join(self.tmp, "absent.txt")
+        with self.assertRaises(ValueError) as caught:
+            ra.load_repos(missing)
+        self.assertIn(missing, str(caught.exception))
+
+    def test_malformed_entry_is_refused_not_silently_skipped(self):
+        for bad in (
+            "bborbe",                 # no slash at all
+            "bborbe/vault-cli/extra",  # three segments
+            "/vault-cli",             # empty owner — derives the workspaces dir
+            "bborbe/",                # empty name — same directory, no repo
+            "bborbe/..",              # traversal — derives the workspaces parent
+            "../vault-cli",           # traversal on the owner side
+            "bborbe/ vault-cli",      # space
+            "bborbe/vaul\tt-cli",     # tab, mid-line — a trailing one is just stripped
+        ):
+            with self.subTest(entry=bad):
+                with self.assertRaises(ValueError) as caught:
+                    ra.load_repos(self.write(bad + "\n"))
+                self.assertIn("owner/name", str(caught.exception))
+
+    def test_a_duplicate_is_refused(self):
+        """A duplicate sweeps the same repo twice and emits duplicate rows and cards."""
+        with self.assertRaises(ValueError) as caught:
+            ra.load_repos(self.write("bborbe/vault-cli\nbborbe/vault-cli\n"))
+        self.assertIn("twice", str(caught.exception))
+
+    def test_an_unreadable_set_exits_two_and_never_prints_the_clean_line(self):
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = ra.main(["--repos-file", os.path.join(self.tmp, "absent.txt"),
+                          "--state-dir", tempfile.mkdtemp()])
+        self.assertEqual(2, rc, "a config failure is never a clean queue")
+        self.assertNotIn("no open PR is behind master", buf.getvalue())
+        self.assertIn("repo set", err.getvalue())
 
 
 class BoardTest(unittest.TestCase):
