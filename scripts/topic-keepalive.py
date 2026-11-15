@@ -8,14 +8,14 @@ Two independent signals are read every time, because neither answers the other's
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
   2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
-     → `OK` / `IDLE` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID`. This is the
+     → `OK` / `WORKING` / `IDLE` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID`. This is the
      signal a liveness probe structurally cannot give — a manager process can be alive with
      its loop unarmed after a missed re-arm. `STOPPED` is a deliberate stand-down and
      `SLEEPING` is a date-gated wait; both are left alone.
      ⚠️ **The record carries a WORK SIGNAL alongside round cadence, and `IDLE` is its
      verdict.** `--state`'s detail carries `work=<seconds>s` — the age of the manager's own
-     transcript, resolved from the session id `--arm` records — so `OK` means a round OR
-     work inside the limit (a manager working without a round is alive, not lapsed), while
+     transcript, resolved from the session id `--arm` records — so `OK` means a round inside
+     the limit, `WORKING` means work but no round (alive, not lapsed: never restarted), while
      `IDLE` means armed and gate-watched but neither: the gate tick alone no longer reads
      `OK`. `IDLE` is **not** restart-worthy — the gate is watching and will wake it, so a
      restart spends a full-context round on a manager that is merely idle — and it is not
@@ -33,7 +33,7 @@ Two independent signals are read every time, because neither answers the other's
 
 The first line of stdout is the verdict, one token:
 
-  jump            a live session with an armed loop (`OK` or `IDLE`) — hand the operator the pane
+  jump            a live session with an armed loop (`OK`, `WORKING` or `IDLE`) — hand the operator the pane
   open            no recorded id, and the goal carries the flag — `/supervisor:open --goal`
   open-unflagged  no recorded id and no flag — report it held; rule 4 forbids the open
   resume          recorded id, session ABSENT — resume with `/supervisor:open --goal`

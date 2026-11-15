@@ -369,7 +369,7 @@ its own `last_auto_resume` cap; this leg runs on the fleet tick with the `worker
 and both record only **after** the instrument confirms `LIVE`, so a check-then-act race lets two
 resumes land before either cap arms. The script asks `scripts/owner.py` about each
 goal the task declares — the ONE ownership definition (`docs/session-tiers.md` § Keep-alive) —
-so only a manager that is an **owner** (session `LIVE` **and** loop `OK`/`STALE`) returns `jump`,
+so only an **owner** (session `LIVE`, loop `OK`/`WORKING`/`IDLE`/`STALE`) returns `jump`,
 naming the evidence; a manager stood down with `/supervisor:stop` does not hold the row, and a
 `cannot-tell` is reported, never resumed.
 
