@@ -6,13 +6,7 @@ user-invocable: false
 
 # Keep alive — stalled tab workers
 
-When: every tick — the eighth procedure in `commands/steps/keepalive.md`, reached from
-`agents/fleet-keepalive-actor.md` § 4's *four worker mechanisms* note. ⚠️ **Dispatched from there
-and nowhere else:** a steps file no dispatch names never runs. The sweep classifies a tab worker
-`stalled` (`agents/fleet-sweep-reader.md:115`), but nothing acted on it — `scripts/restart-worker.py`
-refuses `busy-target`, and a stalled session is `busy`/`shell` **by definition**. The only lift is
-`--allow-busy-lapse`, which the operator ruled (2026-11-12) stays their own judgement. So this leg
-**reports and hands over**; `scripts/stalled-tab-restart.py` owns both halves and every guard.
+When: every tick — the eighth procedure in `commands/steps/keepalive.md`, reached from `agents/fleet-keepalive-actor.md` § 4's *four worker mechanisms* note. ⚠️ **Dispatched from there and nowhere else:** a steps file no dispatch names never runs. The sweep classifies a tab worker `stalled` (`agents/fleet-sweep-reader.md:115`), but `scripts/restart-worker.py` refuses `busy-target` and a stalled session is `busy`/`shell` **by definition**. The only lift is `--allow-busy-lapse`, which the operator ruled (2026-11-12) stays their own judgement — so this leg **reports and hands over**, and `scripts/stalled-tab-restart.py` owns every guard.
 
 ## Invoke it — one `python3` call, never a shell `for`
 
@@ -50,41 +44,23 @@ for sid, row in sorted(sessions.items()):
 PY
 ```
 
-⚠️ **A heredoc, not `python3 -c '…'`** — the comments hold apostrophes, which terminate a
-single-quoted `-c` string: the invocation died with a bash syntax error before the first row.
-⚠️ **The snapshot, not a sweep payload** — no producer emits rows with `class`/`mode`, so
-`stall_count >= 2` is the whole population test, and `restart-worker.py` refuses `headless-target`
-itself. ⚠️ **That counter is not the whole `stalled` verdict** (the reader also needs `--ages`
-reading `quiet`, which the snapshot lacks), so this population is a **superset** — safe, because
-the act is a card, not a restart. ⚠️ **One `python3` call, never a shell `for`** — `allowed-tools`
-grants fixed command prefixes, so a loop escalates a prompt every round.
+⚠️ **A heredoc, not `python3 -c '…'`** — the comments hold apostrophes, which terminate a single-quoted `-c` string: the invocation died with a bash syntax error before the first row. ⚠️ **The snapshot, not a sweep payload** — no producer emits rows with `class`/`mode`, so `stall_count >= 2` is the whole population test, and `restart-worker.py` refuses `headless-target` itself. ⚠️ **That counter is not the whole `stalled` verdict** (the reader also needs `--ages` reading `quiet`, which the snapshot lacks), so this population is a **superset** — safe, because the act is a card, not a restart. ⚠️ **One `python3` call, never a shell `for`** — `allowed-tools` grants fixed command prefixes, so a loop escalates a prompt every round.
 
 ## Act on the verdict — the script's first line
 
 | Verdict | Meaning | What you do |
 |---|---|---|
-| `restart` | The operator answered; the real restart ran | Report the `✅ killed pid …` line. The fresh session's id is **NEW** |
+| `restart` | The operator answered; the real restart ran | Report the `✅ killed pid …` line. The new session's id is **NEW** |
 | `carded` | Posted, or open and unanswered | Nothing — a second card is the duplicate the dedup key prevents |
-| `capped` | Two restarts, no progress; one escalation card posted | Nothing further, and never a third restart |
+| `capped` | Two restarts, no progress; one escalation posted | Nothing further, and never a third restart |
 | `held` | An operator hold — outranks everything | Nothing |
-| `skipped` | Another refusal token; **line 2 is the token** | Report it verbatim, leave the row for next round |
+| `skipped` | Another refusal; **line 2 is the token** | Report it verbatim, leave the row for next round |
 | `cannot-tell` | A probe could not decide | Report it and never act |
 
-⚠️ **This leg never passes `--allow-busy-lapse`** — the script's answered path is the only call site
-that does, reached only from the operator's `ANSWERED:`. ⚠️ **`--dry-run` on the unattended path is
-a control, not caution:** without it the script acts on any row reading `idle` at call time, making
-the forbidden unattended restart reachable through the sweep-to-call window.
+⚠️ **This leg never passes `--allow-busy-lapse`** — the script's answered path is the only call site that does, reached only from the operator's `ANSWERED:`. ⚠️ **`--dry-run` on the unattended path is a control, not caution:** without it the script acts on any row reading `idle` at call time, making the forbidden unattended restart reachable through the sweep-to-call window.
 
 ## Report the reading — in the leg's output, not yet a digest key
 
-One line per stalled row, then:
-`stalled-tabs: <n> seen · <restart> restarted · <carded> carded · <capped> capped · <held> held · <skipped> skipped · <cannot-tell> cannot-tell`
+One line per stalled row, then `stalled-tabs: <n> seen · <restart> restarted · <carded> carded · <capped> capped · <held> held · <skipped> skipped · <cannot-tell> cannot-tell`.
 
-⚠️ **All six verdicts carry a column** — a round whose rows are all held or undecidable would
-otherwise report none of them. ⚠️ **`fleet-legs.py`'s `LEGS` section is a separate contract** (its
-`KEYS`, the sweep's seed, `check-handback-keys.py` and six `test_fleet_legs.py` fixtures encode the
-four-key shape), so this reading stays in the leg's output and must **not** be written under another
-leg's key. ⚠️ **There is no card to extend** — `CLAUDE.md:135`: *"A stall is a duration, not an
-event, and it issues no attention card."* `manager-attention-watch.py` renders `stuck-tab:` as a
-gate **reason** plus an incident-ledger row, so this leg **creates** the card, keyed
-`stuck-tab:<slug>:<restarts>`; the reason and the card cannot both accumulate for one session.
+⚠️ **All six verdicts carry a column** — a round whose rows are all held or undecidable would otherwise report none of them. ⚠️ **`LEGS` is a separate contract** (`fleet-legs.py`'s `KEYS`, the sweep's seed, `check-handback-keys.py` and six `test_fleet_legs.py` fixtures encode the four-key shape), so this reading stays in the leg's output and must **not** go under another leg's key. ⚠️ **There is no card to extend** — `CLAUDE.md:135`: *"A stall is a duration, not an event, and it issues no attention card."* So this leg **creates** it, keyed `stuck-tab:<slug>:<restarts>`.
