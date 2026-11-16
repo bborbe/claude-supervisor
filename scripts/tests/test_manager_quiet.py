@@ -502,3 +502,75 @@ class TestOneTickIsNotOneCall(Base):
         r = self.tick(arm=False)
         self.assertEqual(r["consecutive_quiet"], 2)
         self.assertEqual(r["verdict"], "stood-down")
+
+
+class TestDeferredTodoRowNamesItsDate(Base):
+    """A `phase: todo` row with a FUTURE `defer_date` must name that date.
+
+    Found 2026-11-07 on the goal `Automatic Weekly AI Knowledge Sharing Task in Seibert
+    Personal`: the subject's only quiet row carried `defer_date: "2026-11-14"` and the
+    stand-down line read `reopen on no named trigger` — the one case `round-quiet.md`
+    says a reader cannot act on. `classify()` returned on the unapproved phase before it
+    read the defer, so the only reason a reader could act on was dropped.
+
+    The row must stay QUIET either way: naming the trigger must not smuggle an
+    unapproved row into the runnable set, and a date that has passed must not be
+    claimed as a reopen.
+    """
+
+    def _todo_with_defer(self, date):
+        self.task("Unapproved", phase="todo", extra='defer_date: "%s"\n' % date)
+
+    def test_a_future_defer_on_a_todo_row_names_the_date(self):
+        self._todo_with_defer("2026-10-22")
+        r = self.tick()
+        self.assertEqual(r["runnable"], [])
+        self.assertEqual(r["trigger"], "2026-10-22")
+
+    def test_the_row_stays_quiet_and_never_becomes_runnable(self):
+        self._todo_with_defer("2026-10-22")
+        for _ in range(3):
+            self.assertEqual(self.tick()["runnable"], [])
+
+    def test_a_past_defer_on_a_todo_row_still_names_no_trigger(self):
+        self._todo_with_defer("2026-10-01")
+        self.assertEqual(self.tick()["trigger"], "no named trigger")
+
+    def test_a_todo_row_with_no_defer_still_names_no_trigger(self):
+        self.task("Unapproved", phase="todo")
+        self.assertEqual(self.tick()["trigger"], "no named trigger")
+
+    def _argv(self):
+        return ["--subject", "AGoal", "--vault", self.vault,
+                "--today", "2026-10-15", "--state-dir", self.state]
+
+    def test_the_cli_line_names_the_date_on_stand_down(self):
+        self._todo_with_defer("2026-10-22")
+        self.tick()                                   # tick 1 — armed
+        self.arm()                                    # the next round arms before it reads
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.main(self._argv())                 # tick 2 — stood down
+        self.assertIn(
+            "Stood down: zero runnable tasks; reopen on 2026-10-22",
+            out.getvalue(),
+        )
+        self.assertNotIn("no named trigger", out.getvalue())
+
+
+class TestDeferParsersAreNotTheFault(Base):
+    """The quoted-scalar form parses, so the defect is the branch order, not the parser.
+
+    The defect fixture carries `defer_date: "2026-11-14"` (quoted). `defer-date.py` was
+    already proven to parse that exact string, so pinning it here stops a future reader
+    from "fixing" the parser instead of `classify()`.
+    """
+
+    def test_the_quoted_scalar_parses_states_and_displays(self):
+        parsed, reason = self.m.defer_date.parse_defer_date('"2026-11-14"')
+        self.assertIsNone(reason)
+        self.assertIsNotNone(parsed)
+        state, detail = self.m.defer_date.defer_state('"2026-11-14"', (2026, 10, 15))
+        self.assertEqual(state, "deferred")
+        self.assertEqual(detail, parsed)
+        self.assertEqual(self.m.defer_date.display('"2026-11-14"'), "2026-11-14")
