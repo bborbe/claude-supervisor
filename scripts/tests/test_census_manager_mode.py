@@ -139,6 +139,22 @@ class CensusManagerModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("REFUSED", result.stderr)
 
+    def test_unreadable_layout_refuses(self):
+        """A vault with no page directory must refuse, never read as a clean fleet.
+
+        `scan()` returns empty for a layout it does not recognise, so without the `page_dirs`
+        guard every live session reads as owning nothing and the census prints a clean fleet
+        from a wrong path — the refusal/clean conflation the exit codes exist to prevent.
+        """
+        self.write_registry(SID, "sdk-cli")
+        self.write_live(SID)
+        shutil.rmtree(self.vault / "23 Topics")
+        shutil.rmtree(self.vault / "25 Tasks")
+        result = self.run_census()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REFUSED", result.stderr)
+        self.assertIn("no topic, goal or task page directory", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

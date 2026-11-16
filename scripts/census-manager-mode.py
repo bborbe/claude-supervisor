@@ -114,6 +114,19 @@ def main(argv=None):
         print(f"manager-mode census REFUSED: vault not found: {args.vault}", file=sys.stderr)
         return 2
 
+    # An unrecognised layout has no pages to join, so every live session would read as owning
+    # nothing and the census would print a clean fleet from a wrong path — the refusal/clean
+    # conflation this file's exit codes exist to prevent. `keeper-census.py`'s own `_main`
+    # carries the same guard; `scan()` does not, so calling it directly would skip it.
+    if not CENSUS.page_dirs(args.vault):
+        print(
+            f"manager-mode census REFUSED: no topic, goal or task page directory under "
+            f"{args.vault}; a vault this script cannot read must not read as a fleet with no "
+            f"headless managers",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.live_json:
         try:
             with open(args.live_json, encoding="utf-8") as handle:
