@@ -742,7 +742,8 @@ def owner_liveness(owner, kind, name, ctx, vault):
     return subject_liveness(ctx, vault, owner["kind"], owner["name"]), True
 
 
-def resolve_branch(kind, role, sid, live, pane, chain_live, block):
+def resolve_branch(kind, role, sid, live, pane, chain_live, block,
+                   owner=None, owner_live=None):
     """The ordered predicate list — first match wins, so the set is a partition.
 
     `unknown` outranks everything: an unanswerable probe must never be folded into
@@ -751,6 +752,20 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block):
     `open-manager` keys on `chain_live is False` — the row's subject has NO live
     manager, proven rather than assumed. `None` (an unanswerable probe) does not
     fire it, for the same reason `unknown` outranks `create`.
+
+    `held-owner-live` is the TASK-tier gate: a task that would otherwise CREATE a
+    worker is held when its owning subject already has a live manager, because two
+    sessions on one subject is the collision this branch exists to prevent. It sits
+    after every row-own branch, so a task whose own session is live still jumps or
+    resumes — only a new worker is suppressed. Two guards keep it narrow:
+
+    * **`owner is not FLEET`.** The fleet sentinel owns every task whose goal and
+      topic have no live manager; holding on it would suppress the whole batch.
+    * **`owner_live is True`, never `None`.** `owner_live` is `--check` on the owner
+      page's recorded session, which can answer `false` even when the registry
+      selected that owner — the two probes are deliberately independent. An
+      unanswerable probe (`None`) falls through to `create`: a probe that cannot
+      answer must not suppress work, the same reason `unknown` outranks `create`.
     """
     refused = []
     if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
@@ -767,6 +782,8 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block):
         return "resume", refused
     if live == "LIVE":
         return "skip", refused
+    if kind == "task" and owner is not FLEET and owner_live is True:
+        return "held-owner-live", refused
     return "create", refused
 
 
@@ -812,7 +829,8 @@ def row_for(vault, cfg, kind, path, ctx):
     entry = (ctx["role_map"] or {}).get(window) or {}
     owner = resolve_owner(page_kind, name, block, ctx, vault)
     owner_live, chain_live = owner_liveness(owner, page_kind, name, ctx, vault)
-    branch, refused = resolve_branch(page_kind, role, sid, live, pane, chain_live, block)
+    branch, refused = resolve_branch(page_kind, role, sid, live, pane, chain_live, block,
+                                     owner=owner, owner_live=owner_live)
     # Provenance first: `refusals()` is the per-kind rule SC4 names, and it is
     # independent of the branch partition, so a row can carry both tokens.
     refused = refusals(page_kind, block) + refused
