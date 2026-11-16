@@ -143,6 +143,41 @@ class Liveness(unittest.TestCase):
             self.m.arm("Manager Layer", "goal", 300, resume=True)
         self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
 
+    def test_clear_standdown_clears_without_arming(self):
+        """The explicit clear removes the marker and writes nothing else.
+
+        The observable is the FILE SET: `stop()` has already written `.reset`, so asserting
+        an absence after the clear proves nothing. The clear may only REMOVE the marker —
+        any file it created would make it indistinguishable from a round's arm.
+        """
+        slug = "goal--manager-layer"
+        state_dir = os.path.dirname(self.m.path(slug, "stopped"))
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+        before = set(os.listdir(state_dir))
+
+        with redirect_stdout(io.StringIO()):
+            code = self.m.clear_standdown("Manager Layer", "goal")
+        after = set(os.listdir(state_dir))
+
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(self.m.path(slug, "stopped")))
+        self.assertEqual(after - before, set(), "a clear must not create any record")
+        self.assertEqual(before - after, {slug + ".stopped"})
+
+    def test_clear_standdown_removes_a_legacy_twin(self):
+        """A pre-split `<slug>.stopped` is the same stand-down — clearing takes both."""
+        slug = "goal--manager-layer"
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+        legacy = self.m.path(self.m.legacy_base(slug), "stopped")
+        with open(legacy, "w", encoding="utf-8") as handle:
+            handle.write("2026-11-01T00:00:00+0000\n")
+        with redirect_stdout(io.StringIO()):
+            self.m.clear_standdown("Manager Layer", "goal")
+        self.assertFalse(os.path.exists(legacy))
+        self.assertFalse(os.path.exists(self.m.path(slug, "stopped")))
+
     def deliver(self, s):
         """Ack a lapse the way the sender does after the transport returns success."""
         with redirect_stdout(io.StringIO()):

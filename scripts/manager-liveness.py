@@ -31,13 +31,23 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     marker vanished, the Fleet Manager read STALE and
                                     restarted a session that had deliberately stopped.
                                     Only --resume resumes.
-  --arm --resume                    ALSO clears <slug>.stopped. This is the one verb that
-                                    resumes a stood-down subject, and the two loop-start
-                                    arms (`commands/goal-loop.md` step 3,
-                                    `commands/topic-loop.md` step 3) pass it, so the
-                                    documented `Restart: /supervisor:goal-loop "<subject>"`
-                                    still comes back. A plain --arm (a round's liveness
-                                    reading) must never pass it.
+  --arm --resume                    ALSO clears <slug>.stopped. This is the arm that
+                                    resumes a stood-down subject; the topic and fleet
+                                    loop-start arms (`commands/topic-loop.md` step 3,
+                                    `commands/fleet-loop.md`) pass it. The goal tier's
+                                    step 3 arms plainly and clears with
+                                    `--clear-standdown`, so the documented
+                                    `Restart: /supervisor:goal-loop "<subject>"` still
+                                    comes back. A plain --arm (a round's liveness
+                                    reading) must never pass it. `--clear-standdown` is
+                                    the other verb that clears the marker, and it arms
+                                    nothing.
+  --clear-standdown --subject T    <slug>.stopped removed, nothing else written. The
+                                    explicit reopen: unlike `--arm --resume` it records
+                                    no liveness beat, starts no cadence sample and
+                                    consumes no reset epoch, so a reopen that is not
+                                    starting a loop stays distinguishable from one that
+                                    is. Idempotent — a subject with no marker exits 0.
   --stop  --subject T --branch B   <slug>.stopped + <slug>.reset. Run by `/supervisor:stop`,
                                     so a deliberately stood-down manager is not reported
                                     as a lapse. `.reset` is the epoch an arm consumes to
@@ -345,8 +355,8 @@ def stopped_marker(subject: str, branch: str):
     subject the operator had deliberately ended.
 
     ⚠️ **Existence, not the timestamp.** Later stops rewrite the marker's content, so the
-    file existing is the load-bearing fact; `--arm --resume` is the one verb that clears
-    it. The RESOLVED path is returned, never a re-composed `<branch>--<slug>`: a legacy
+    file existing is the load-bearing fact; `--arm --resume` and `--clear-standdown` are
+    the two verbs that clear it, and a plain `--arm` never does. The RESOLVED path is returned, never a re-composed `<branch>--<slug>`: a legacy
     pre-split record (`<slug>.stopped`, no branch prefix) counts too, through `resolve()`,
     and a caller that re-derived the name would report a file that does not exist.
 
@@ -1240,6 +1250,42 @@ def stop(subject: str, branch: str) -> int:
     return 0
 
 
+def clear_standdown(subject: str, branch: str) -> int:
+    """Clear a stand-down marker WITHOUT arming anything.
+
+    The operator's explicit reopen. `--arm --resume` also clears the marker, but it is an
+    arm: it records a liveness beat and starts a fresh cadence sample. That is the right
+    act for a loop start and the wrong one for a reopen that is not starting a loop — the
+    clear must be observable as a decision, not as a side effect of taking a reading.
+
+    ⚠️ **Arms nothing.** No `.cadence`, no `.arms`, no `.session`, no `.reset` epoch. A
+    clear that armed would be indistinguishable from a round's reading, and a reading
+    that cleared the marker is exactly the 2026-11-07 defect (`docs/subject-resolution.md`).
+
+    ⚠️ **Every twin goes.** `resolve()` returns the prefixed record first, so deleting only
+    that would leave a legacy `<slug>.stopped` standing and the subject still stood down —
+    `stopped_marker()` would then report the twin and `open-queue.py` would keep skipping.
+    Both candidates are removed when present.
+
+    Idempotent: a subject carrying no marker is a success, not an error — the operator
+    asked for "not stood down", which is the state it is already in.
+    """
+    s = slug(subject, branch)
+    removed = []
+    candidates = [path(s, "stopped")]
+    base = legacy_base(s)
+    if base:
+        candidates.append(path(base, "stopped"))
+    for candidate in candidates:
+        try:
+            os.remove(candidate)
+            removed.append(candidate)
+        except FileNotFoundError:
+            pass
+    print(f"cleared {s}" if removed else f"not stopped {s}")
+    return 0
+
+
 def stood_down_past(minutes: float, now: float | None = None) -> int:
     """Every subject whose stand-down is older than MINUTES: `<age-seconds>\\t<slug>`.
 
@@ -1620,6 +1666,15 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--arm", action="store_true", help="record a re-arm (manager, every tick)")
     mode.add_argument("--stop", action="store_true", help="mark a deliberate stand-down")
+    mode.add_argument(
+        "--clear-standdown",
+        action="store_true",
+        dest="clear_standdown",
+        help="clear a stand-down marker and arm NOTHING — no cadence, no arms, no "
+             "session, no reset epoch. The explicit reopen; `--arm --resume` also "
+             "clears the marker but records a liveness beat, which is the wrong act "
+             "for a reopen that is not starting a loop",
+    )
     mode.add_argument("--check", action="store_true", help="report subjects that turned stale")
     mode.add_argument(
         "--stood-down-past",
@@ -1718,7 +1773,7 @@ def main() -> int:
             ap.error("--state requires --subject (or the deprecated --topic)")
         return state(a.subject, a.branch, a.vault, time.time())
     if not a.subject:
-        ap.error("--subject (or the deprecated --topic) is required with --arm/--stop/--sleep")
+        ap.error("--subject (or the deprecated --topic) is required with --arm/--stop/--sleep/--clear-standdown")
     a.branch = a.branch or detect_branch(a.subject, a.vault)
     if a.arm:
         if not a.interval or a.interval <= 0:
@@ -1728,6 +1783,11 @@ def main() -> int:
         # sitting on the arm's own path.
         join_reach_thread()
         return code
+    if a.clear_standdown:
+        # The explicit reopen. Deliberately NOT an arm: an arm is the round's liveness
+        # reading, and a reading that cleared the marker erased the stand-down (measured
+        # 2026-11-07). This verb exists so the clear can be a decision of its own.
+        return clear_standdown(a.subject, a.branch)
     if a.resume:
         # Resuming is an ARM, never a stop: the flag clears a marker, so silently
         # ignoring it on `--stop` would leave the operator believing they had resumed.
