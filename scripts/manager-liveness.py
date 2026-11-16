@@ -200,7 +200,7 @@ turns exit 10 into a push.
 """
 from __future__ import annotations
 
-import argparse, glob, importlib, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import argparse, glob, importlib.util, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
