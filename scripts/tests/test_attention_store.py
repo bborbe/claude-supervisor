@@ -105,6 +105,43 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("Board", line)
 
 
+class FetchTest(unittest.TestCase):
+    """The response-shape handling, exercised through `fetch_items` itself."""
+
+    def _fetch(self, body):
+        payload = json.dumps(body).encode()
+
+        class Resp:
+            status = 200
+
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with mock.patch.object(st.urllib.request, "urlopen", return_value=Resp()):
+            return st.fetch_items("http://store.test", 1.0, 500)
+
+    def test_bare_list_is_the_item_set(self):
+        self.assertEqual(len(self._fetch([{"producer_id": "a"}])), 1)
+
+    def test_items_envelope_is_unwrapped(self):
+        self.assertEqual(len(self._fetch({"items": [{"producer_id": "a"}]})), 1)
+
+    def test_a_dict_without_an_items_list_is_refused_not_read_as_empty(self):
+        # Defaulting to [] would print `Store: 0 open` on a shape change — the
+        # silent undercount this script exists to prevent. Both a missing and a
+        # non-list `items` must raise, never render a zero.
+        for body in ({"count": 3}, {"items": "nope"}, {"items": None}):
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    self._fetch(body)
+
+
 class MainTest(unittest.TestCase):
     def _run(self, argv, fetch):
         out = io.StringIO()

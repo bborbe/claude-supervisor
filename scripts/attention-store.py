@@ -70,10 +70,15 @@ def fetch_items(store: str, timeout: float, limit: int) -> list[dict]:
         if resp.status != 200:
             raise OSError(f"HTTP {resp.status}")
         body = json.loads(resp.read().decode("utf-8", "replace"))
-    # The store serves a bare list; accept an `{"items": [...]}` envelope too rather
-    # than reporting an empty store for a shape change.
+    # The store serves a bare list; accept an `{"items": [...]}` envelope too. A dict
+    # WITHOUT a list `items` is refused rather than read as empty: defaulting to `[]`
+    # would print `Store: 0 open` on a shape change, the silent undercount this
+    # script exists to prevent.
     if isinstance(body, dict):
-        body = body.get("items", [])
+        items = body.get("items")
+        if not isinstance(items, list):
+            raise ValueError("unexpected response shape: object without an items list")
+        body = items
     if not isinstance(body, list):
         raise ValueError(f"unexpected response shape: {type(body).__name__}")
     return body
