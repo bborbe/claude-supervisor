@@ -46,7 +46,20 @@ STATE. `$PARK_EVENT_STATE_DIR`, default `~/.claude/state/park-events/`, one JSON
 file per event key. `PARK_EVENT_NOW` overrides the clock so tests can drive
 `due` without sleeping.
 
-EXIT CODES. 0 ok · 2 usage or validation error · 3 no such watch.
+EXIT CODES. 0 ok · 2 usage or validation error · 3 no such watch · 4 the watch
+store could not be read (`due` only — see below).
+
+`due` NAMES WHY IT RESOLVED NOTHING. A wake that resolves no session has three
+shapes, and until 2026-11-16 all three printed one undifferentiated line:
+
+  store=readable · no park watches due     nothing was waiting — a real negative
+  UNREADABLE … reason=absent|unreadable    the store could not be read; exit 4
+  resume: <task> [<id>] live=yes|no|unknown  the member, with its liveness
+  resume: none recorded live=none          the watch carries no member at all
+
+`live=` uses `manager-wake.py`'s vocabulary on purpose: one word for the same
+question everywhere. `live=no` is licensed only by a probe that positively
+reports the id absent; an unreadable probe is `live=unknown`, never `no`.
 """
 
 from __future__ import annotations
@@ -71,8 +84,16 @@ PARK_THRESHOLD_SECONDS = 15 * 60
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_MISSING = 3
+# The watch store could not be read. Distinct from EXIT_OK with nothing due:
+# an unreadable store is not an empty one, and a wake that reports it as empty
+# records every parked row as abandoned.
+EXIT_STORE_UNREADABLE = 4
 
 DEFAULT_STATE_DIR = Path.home() / ".claude" / "state" / "park-events"
+HERE = os.path.dirname(os.path.abspath(__file__))
+# A `due` line must not hang on a wedged liveness probe: the round is on a clock.
+# The real probe answers in ~50 ms; 5 s is a ceiling, not an expectation.
+LIVENESS_TIMEOUT_SECONDS = 5
 
 
 class ParkError(ValueError):
@@ -116,6 +137,53 @@ def slugify(key: str) -> str:
 def state_dir() -> Path:
     raw = os.environ.get("PARK_EVENT_STATE_DIR")
     return Path(raw) if raw else DEFAULT_STATE_DIR
+
+
+def store_state() -> tuple[str, str]:
+    """`("readable", "")` or `("unreadable", <why>)` for the watch store.
+
+    ⚠️ **An absent store is NOT an empty one.** `all_watches` returns `[], []`
+    when the directory does not exist — the normal shape on a first run, and
+    also the shape of a store that was relocated, unmounted, or pointed at by a
+    stale `PARK_EVENT_STATE_DIR`. `due` printed "no park watches due" for both
+    and exited 0, so a wake that could not read the store was indistinguishable
+    from a wake with nothing to do, and the round recorded every parked row as
+    abandoned on the strength of it. Measured 2026-11-15 on
+    `Nine Sessions Sit Parked Past the Fifteen-Minute Bound and Nothing Exits
+    Them`: its `sample-15-window-opens` fired into an empty read and the row's
+    session was recorded dead while `session-liveness.py --check` read LIVE.
+    """
+    directory = state_dir()
+    try:
+        if not directory.exists():
+            return "unreadable", "absent"
+        os.listdir(directory)
+    except OSError as exc:
+        return "unreadable", f"unreadable ({exc.__class__.__name__})"
+    return "readable", ""
+
+
+def liveness_script() -> str:
+    """The liveness probe `due` asks, overridable so a test can drive it."""
+    return os.environ.get("PARK_EVENT_LIVENESS") or os.path.join(HERE, "session-liveness.py")
+
+
+def live_word(session_id: str) -> str:
+    """`yes` / `no` / `unknown` for one member — the vocabulary `manager-wake.py` prints.
+
+    Exit 0 is LIVE and 1 is ABSENT. Everything else — 2 UNKNOWN, 3 AMBIGUOUS, a
+    missing probe, a timeout — is `unknown`, never `no`. Folding a failed read
+    into `no` is the defect this field exists to remove: `no` is the value that
+    authorises abandoning the row, and an unreadable probe licenses nothing.
+    """
+    try:
+        res = subprocess.run(
+            [sys.executable, liveness_script(), "--check", session_id],
+            capture_output=True, text=True, timeout=LIVENESS_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return {0: "yes", 1: "no"}.get(res.returncode, "unknown")
 
 
 def watch_path(key: str) -> Path:
@@ -606,6 +674,20 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_due(args: argparse.Namespace) -> int:
     clock = now()
+    # The store is read BEFORE any verdict, because "nothing due" is a claim
+    # about a store that was read, and an unreadable store cannot make it.
+    store, reason = store_state()
+    if store != "readable":
+        if args.json:
+            print(json.dumps({"store": "unreadable", "reason": reason,
+                              "path": str(state_dir())}, indent=2, sort_keys=True))
+        else:
+            print(
+                f"UNREADABLE store={state_dir()} reason={reason} — no watch state could be "
+                f"read, so this is NOT an empty store and no parked row may be recorded "
+                f"abandoned on it"
+            )
+        return EXIT_STORE_UNREADABLE
     watches, corrupt = all_watches()
     _report_corrupt(corrupt)
     due = []
@@ -617,20 +699,34 @@ def cmd_due(args: argparse.Namespace) -> int:
         if when <= clock:
             due.append(record)
     if args.json:
+        # The same verdicts the text carries, so a machine caller is not left
+        # with a list that cannot say whether a member is dead or unreadable.
+        for record in due:
+            record["live"] = {m: live_word(m) for m in (record.get("sessions") or [])}
         print(json.dumps(due, indent=2, sort_keys=True))
         return EXIT_OK
     if not due:
-        print(f"no park watches due at {iso(clock)}")
+        print(f"no park watches due at {iso(clock)} store={store}")
         return EXIT_OK
     for record in due:
         members = record.get("sessions") or []
         tasks = record.get("tasks") or {}
-        named = [f"{tasks[m]} [{m}]" if tasks.get(m) else m for m in members]
+        if members:
+            named = [
+                f"{tasks[m]} [{m}] live={live_word(m)}" if tasks.get(m)
+                else f"{m} live={live_word(m)}"
+                for m in members
+            ]
+            resume = ", ".join(named)
+        else:
+            # A third shape, named so it cannot be mistaken for either of the
+            # other two: the watch carries no member at all.
+            resume = "none recorded live=none"
         print(
             f"{record.get('slug', '?')} · event: {record.get('event', '?')} · "
             f"due since {record.get('recheck_at', '?')} · "
             f"re-parks: {int(record.get('repark_count', 0))} · "
-            f"resume: {', '.join(named) or 'none recorded'}"
+            f"resume: {resume}"
         )
     return EXIT_OK
 

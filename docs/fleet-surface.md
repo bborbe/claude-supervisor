@@ -851,6 +851,14 @@ round's candidates.
 § 2 *Resume the park watches whose re-check has passed* reads it from `park-event.py due`. Kind (b),
 an answered attention card, ships as its own task. Neither is re-implemented here.
 
+⚠️ **A wake that resolves no session says which of the three facts holds.** `due` carries
+`store=readable` on a real negative, exits **4** with `UNREADABLE … reason=absent|unreadable` when
+the watch store could not be read, and tags every member `live=yes|no|unknown` (plus
+`live=none` for a watch carrying no member). `live=no` is licensed only by a probe that positively
+reports the id absent — an unreadable probe is `unknown`, never `no`. A round that folds any of
+these into "the session died" records a live worker as abandoned; measured 2026-11-15 on
+`ebd76359`, recorded dead while `session-liveness.py --check` read LIVE.
+
 ⚠️ **An empty `blocked_by` is not a cleared wait**, and `hold` is not a finished dependency:
 "every name is terminal" is vacuously true of an empty set, and `hold` marks a block of unknown
 length. Both read as "no wait of this kind", never as "cleared".

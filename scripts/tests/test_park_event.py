@@ -39,10 +39,26 @@ class ParkEventTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.state = pathlib.Path(self._tmp.name) / "state"
         self.state.mkdir(parents=True)
+        # `due` asks `session-liveness.py` for each member. The suite must not
+        # reach the real probe — it does network I/O and takes seconds — so
+        # every call gets a fast stand-in unless a test supplies its own.
+        self.liveness_default = self._write_liveness_stub(
+            pathlib.Path(self._tmp.name) / "liveness-default",
+            "#!/usr/bin/env python3\nimport sys\nprint('ABSENT - default test stub')\nsys.exit(1)\n",
+        )
+
+    @staticmethod
+    def _write_liveness_stub(directory, body):
+        directory.mkdir(parents=True, exist_ok=True)
+        stub = directory / "session-liveness.py"
+        stub.write_text(body)
+        stub.chmod(0o755)
+        return str(stub)
 
     def run_script(self, *args, extra_env=None):
         env = dict(os.environ)
         env["PARK_EVENT_STATE_DIR"] = str(self.state)
+        env["PARK_EVENT_LIVENESS"] = self.liveness_default
         env.pop("PARK_EVENT_NOW", None)
         env.pop("CLAUDE_CODE_SESSION_ID", None)
         env.update(extra_env or {})
@@ -329,6 +345,130 @@ class ParkEventTest(unittest.TestCase):
         proc = self.run_script("due", extra_env={"PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("CORRUPT", proc.stdout)
+
+    # --- the wake names WHY it resolved nothing ------------------------------
+    #
+    # A wake that resolves no session has two very different causes — the
+    # session is dead, or the wake could not see it — and until 2026-11-16 both
+    # printed the same output and exited 0, so a round recorded the parked row
+    # as abandoned on the strength of a read failure.
+
+    def liveness_stub(self, verdicts):
+        """A `session-liveness.py` stand-in, keyed by session id.
+
+        `verdicts` maps a session id to `(exit code, message)`. An id absent
+        from the map exits 2, which is how the real probe answers a read it
+        could not complete.
+        """
+        bin_dir = pathlib.Path(self._tmp.name) / "liveness"
+        bin_dir.mkdir(exist_ok=True)
+        calls = pathlib.Path(self._tmp.name) / "liveness-calls.txt"
+        stub = bin_dir / "session-liveness.py"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "table = json.loads(os.environ['LIVENESS_TABLE'])\n"
+            "sid = sys.argv[-1]\n"
+            'with open(os.environ["LIVENESS_CALLS"], "a") as fh:\n'
+            '    fh.write(sid + "\\n")\n'
+            "rc, msg = table.get(sid, (2, 'UNKNOWN - could not read the registry'))\n"
+            "print(msg)\n"
+            "sys.exit(rc)\n"
+        )
+        stub.chmod(0o755)
+        return {
+            "PARK_EVENT_LIVENESS": str(stub),
+            "LIVENESS_TABLE": json.dumps(verdicts),
+            "LIVENESS_CALLS": str(calls),
+        }
+
+    def test_due_distinguishes_an_absent_store_from_an_empty_one(self):
+        # The defect: both printed "no park watches due" and exited 0, so a
+        # store that could not be read was indistinguishable from a store with
+        # nothing due.
+        absent = self.run_script(
+            "due",
+            extra_env={"PARK_EVENT_STATE_DIR": str(self.state / "missing"),
+                       "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertNotEqual(absent.returncode, 0, absent.stdout)
+        self.assertIn("UNREADABLE", absent.stdout)
+        self.assertIn("reason=absent", absent.stdout)
+        self.assertNotIn("no park watches due", absent.stdout)
+
+        empty = self.run_script("due", extra_env={"PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertIn("no park watches due", empty.stdout)
+        # The honest negative carries its own token, so a caller distinguishes
+        # the two by the output rather than by the exit code alone.
+        self.assertIn("store=readable", empty.stdout)
+
+    def test_due_marks_a_member_whose_session_is_absent(self):
+        self.run_script("register", "--task", "Some Task", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        env = self.liveness_stub({"aaaaaaaa": (1, "ABSENT - no live heartbeat row")})
+        proc = self.run_script("due", extra_env={**env,
+                                                 "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Some Task [aaaaaaaa]", proc.stdout)
+        self.assertIn("live=no", proc.stdout)
+
+    def test_due_marks_a_live_member(self):
+        self.run_script("register", "--task", "Some Task", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        env = self.liveness_stub({"aaaaaaaa": (0, "LIVE - heartbeat age 21s")})
+        proc = self.run_script("due", extra_env={**env,
+                                                 "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("live=yes", proc.stdout)
+
+    def test_due_marks_a_member_it_could_not_check_as_unknown(self):
+        # Exit 2 is UNKNOWN and 3 is AMBIGUOUS. Neither may fold to `no`:
+        # `no` is the value that authorises abandoning the row.
+        self.run_script("register", "--task", "Some Task", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        for rc in (2, 3):
+            with self.subTest(exit=rc):
+                env = self.liveness_stub({"aaaaaaaa": (rc, "could not decide")})
+                proc = self.run_script(
+                    "due", extra_env={**env, "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("live=unknown", proc.stdout)
+                self.assertNotIn("live=no", proc.stdout)
+
+    def test_due_says_a_watch_carries_no_member_rather_than_blaming_the_read(self):
+        # A watch with no members is a third shape: not a read failure, and not
+        # a dead session. It must not read as either.
+        (self.state / "x.json").write_text(json.dumps({
+            "event": "an event", "slug": "x",
+            "recheck_at": "2026-11-02T02:00:00+01:00",
+            "created_at": "2026-11-02T01:00:00+01:00",
+            "sessions": [], "tasks": {}, "repark_count": 0,
+        }))
+        proc = self.run_script("due", extra_env={"PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("resume: none recorded", proc.stdout)
+        self.assertIn("live=none", proc.stdout)
+        self.assertNotIn("UNREADABLE", proc.stdout)
+
+    def test_due_json_carries_the_same_verdicts_as_the_text(self):
+        self.run_script("register", "--task", "Some Task", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        env = self.liveness_stub({"aaaaaaaa": (1, "ABSENT - no live heartbeat row")})
+        proc = self.run_script("due", "--json",
+                               extra_env={**env, "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload[0]["live"], {"aaaaaaaa": "no"})
+
+    def test_due_json_does_not_render_an_unreadable_store_as_an_empty_list(self):
+        proc = self.run_script(
+            "due", "--json",
+            extra_env={"PARK_EVENT_STATE_DIR": str(self.state / "missing"),
+                       "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["store"], "unreadable")
+        self.assertNotIn("due", payload)
 
     # --- release ------------------------------------------------------------
 
