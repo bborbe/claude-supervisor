@@ -2276,6 +2276,78 @@ def capped(rows, show_all):
     return rows[:CAP], len(rows) - CAP
 
 
+def pane_for_maps(session_id, registry, pmap, records):
+    """Resolve one session id against an ALREADY-READ registry, pane map and store.
+
+    Returns `(pane, None)` on success, else `(None, reason)` where `reason` is the
+    exact line `pane_for` writes to stderr. `pane_for` is a thin wrapper over this
+    function, so the CLI's refusals and a batch caller's cannot drift: the rules live
+    here once and the caller supplies only the three inputs it read.
+
+    A batch caller reads those three ONCE per run. `pane_for` re-reads them per call
+    because its callers are one-shot; `flagged-rows.py` resolves ~17 rows a run, and
+    re-reading them cost 17 `wezterm cli list` spawns and 40.7 s of a 51 s run.
+    """
+    sid = (session_id or "").strip().lower()
+    if not sid:
+        return None, "pane-for: no session id given"
+    if registry is None:
+        return None, "pane-for: session registry unreadable — cannot decide liveness"
+    matches = sorted(str(i) for i in registry if str(i).lower().startswith(sid))
+    if not matches:
+        return None, "pane-for: no live session id matches %s" % sid
+    if len(matches) > 1:
+        return None, ("pane-for: %d live session ids match %s — pass the full id"
+                      % (len(matches), sid))
+    full = matches[0]
+    name = strip_status_glyph(registry.get(full))
+    if pmap is None:
+        # The same distinction `main()` makes, and for the same reason: `--pane-for` is
+        # the per-row lookup every fleet sweep takes, so it is the path most likely to
+        # meet a contended mux — and a failed read cannot prove a pane is gone any more
+        # than it can prove one is live.
+        return None, "pane-for: " + pane_read_refusal(
+            subject="pane can be proven live", consequence="answer")
+
+    # A session holds several records at once — the store returns one item per open
+    # item, and `load` folds the event log per item — so take the first that carries a
+    # pane rather than the first record outright, which may have none while a sibling
+    # does.
+    recorded = next(
+        (str(r["pane"]) for r in records
+         if r.get("session_id") == full and r.get("pane")),
+        None,
+    )
+    if recorded and recorded in pmap:
+        # Existence is not ownership. A pane id is recycled across tab moves and
+        # WezTerm restarts, so an existing pane can be *another* session's — the
+        # wrong answer wearing the appearance of a resolved one, which is strictly
+        # worse than a blank. `is_routable` asks for the title as well, for exactly
+        # this reason; the same rule applies here, or this path hands over a
+        # confident link to the wrong tab.
+        title = strip_status_glyph(pmap[recorded].get("title"))
+        if not name or not title or title == name:
+            return recorded, None
+
+    if not name:
+        return None, (
+            "pane-for: session %s is live but carries no name, and its recorded pane %s is gone"
+            % (full[:8], recorded or "(none)")
+        )
+    hits = sorted(pid for pid, p in pmap.items() if strip_status_glyph(p.get("title")) == name)
+    if len(hits) == 1:
+        return hits[0], None
+    if not hits:
+        return None, (
+            "pane-for: session %s is live but no pane resolves — recorded pane %s is gone and no "
+            "WezTerm pane is titled %r" % (full[:8], recorded or "(none)", name)
+        )
+    return None, (
+        "pane-for: session %s is live but %d WezTerm panes are titled %r — ambiguous"
+        % (full[:8], len(hits), name)
+    )
+
+
 def pane_for(session_id):
     """Print the pane of one live session, or exit non-zero.
 
@@ -2305,80 +2377,18 @@ def pane_for(session_id):
     resolves and an ambiguous one refuses rather than guesses. Two panes sharing a
     title refuse too. Every failure names what it saw: the caller renders
     `no pane — <reason>`, so a vague reason leaves the operator with a dead end.
+
+    ⚠️ The rules themselves live in `pane_for_maps`, which this function only wraps —
+    a batch caller reads the registry, the pane list and the store once and calls
+    that directly. Keep every refusal there, or the two paths drift.
     """
-    sid = (session_id or "").strip().lower()
-    if not sid:
-        sys.stderr.write("pane-for: no session id given\n")
+    pane, reason = pane_for_maps(
+        session_id, read_registry(), wezterm_panes(), load("needs"))
+    if reason:
+        sys.stderr.write(reason + "\n")
         return 1
-
-    registry = read_registry()
-    if registry is None:
-        sys.stderr.write("pane-for: session registry unreadable — cannot decide liveness\n")
-        return 1
-    matches = sorted(str(i) for i in registry if str(i).lower().startswith(sid))
-    if not matches:
-        sys.stderr.write("pane-for: no live session id matches %s\n" % sid)
-        return 1
-    if len(matches) > 1:
-        sys.stderr.write(
-            "pane-for: %d live session ids match %s — pass the full id\n" % (len(matches), sid)
-        )
-        return 1
-    full = matches[0]
-    name = strip_status_glyph(registry.get(full))
-
-    pmap = wezterm_panes()
-    if pmap is None:
-        # The same distinction `main()` makes, and for the same reason: `--pane-for` is
-        # the per-row lookup every fleet sweep takes, so it is the path most likely to
-        # meet a contended mux — and it used to report that as an unreadable socket.
-        sys.stderr.write("pane-for: " + pane_read_refusal(
-            subject="pane can be proven live", consequence="answer") + "\n")
-        return 1
-
-    # A session holds several records at once — the store returns one item per open
-    # item, and `load` folds the event log per item — so take the first that carries
-    # a pane rather than the first record outright, which may have none while a
-    # sibling does.
-    records = load("needs")
-    recorded = next(
-        (str(r["pane"]) for r in records
-         if r.get("session_id") == full and r.get("pane")),
-        None,
-    )
-    if recorded and recorded in pmap:
-        # Existence is not ownership. A pane id is recycled across tab moves and
-        # WezTerm restarts, so an existing pane can be *another* session's — the
-        # wrong answer wearing the appearance of a resolved one, which is strictly
-        # worse than a blank. `is_routable` asks for the title as well, for exactly
-        # this reason; the same rule applies here, or this path hands over a
-        # confident link to the wrong tab.
-        title = strip_status_glyph(pmap[recorded].get("title"))
-        if not name or not title or title == name:
-            print(recorded)
-            return 0
-
-    if not name:
-        sys.stderr.write(
-            "pane-for: session %s is live but carries no name, and its recorded pane %s is gone\n"
-            % (full[:8], recorded or "(none)")
-        )
-        return 1
-    hits = sorted(pid for pid, p in pmap.items() if strip_status_glyph(p.get("title")) == name)
-    if len(hits) == 1:
-        print(hits[0])
-        return 0
-    if not hits:
-        sys.stderr.write(
-            "pane-for: session %s is live but no pane resolves — recorded pane %s is gone and no "
-            "WezTerm pane is titled %r\n" % (full[:8], recorded or "(none)", name)
-        )
-        return 1
-    sys.stderr.write(
-        "pane-for: session %s is live but %d WezTerm panes are titled %r — ambiguous\n"
-        % (full[:8], len(hits), name)
-    )
-    return 1
+    print(pane)
+    return 0
 
 
 # The seven sections this feed can render, in render order. `--section` names them;

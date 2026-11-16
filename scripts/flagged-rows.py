@@ -441,44 +441,60 @@ def row_liveness(ctx, sid):
     return ctx["liveness_cache"][key]
 
 
+_WHO_NEEDS_ME = None
+
+
+def _who_needs_me():
+    """`who-needs-me.py` loaded ONCE per run, by path.
+
+    Loaded in-process rather than per row: the old path spawned a fresh interpreter
+    for every session id purely to import this module, at 2.4 s a row — 17 rows,
+    40.7 s of a 51 s run. `sys.path` is not usable (this module is itself loaded by
+    path, by the tests and by `open-queue.py`), so the import is explicit, exactly as
+    `flag_provenance` above is.
+    """
+    global _WHO_NEEDS_ME
+    if _WHO_NEEDS_ME is None:
+        spec = importlib.util.spec_from_file_location(
+            "who_needs_me", os.path.join(HERE, "who-needs-me.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _WHO_NEEDS_ME = module
+    return _WHO_NEEDS_ME
+
+
+def _pane_maps(ctx):
+    """`(registry, pane map, records)` — read ONCE per run, then shared by every row.
+
+    One `wezterm cli list`, one registry read and one store read for the whole run.
+    `pane_for` re-reads all three per call because its callers are one-shot; doing
+    that here would be the same 17 spawns in a different costume.
+    """
+    if "pane_maps" not in ctx:
+        wnm = _who_needs_me()
+        ctx["pane_maps"] = (wnm.read_registry(), wnm.wezterm_panes(), wnm.load("needs"))
+    return ctx["pane_maps"]
+
+
 def pane_of(ctx, sid):
-    """`who-needs-me.py`'s `pane_for()`, cached per sid — neither the heartbeat store
-    nor the registry carries a pane field.
+    """`who-needs-me.py`'s `pane_for()` rules, resolved in-process and cached per sid.
 
-    ⚠️ Cached because each call spawns a fresh interpreter and importlib-loads a
-    2300-line module; rows share session ids exactly as they do for `row_liveness`.
+    ⚠️ Delegates to `pane_for_maps`, which `pane_for` itself is a thin wrapper over,
+    so every refusal — unknown id, ambiguous prefix, unreadable registry or pane
+    list, nameless session, two panes sharing a title — is the CLI's own. The batch
+    path cannot drift from it.
 
-    ⚠️ `pane_for` PRINTS the pane and returns an exit code, so the pane is its stdout,
-    never its return value. Reading the return value yields `0`, which is not a pane
-    id and folds every live session into `skip`.
+    ⚠️ Cached per sid: rows share session ids exactly as they do for `row_liveness`.
     """
     if not sid:
         return None
     key = ("pane", sid)
     if key in ctx["liveness_cache"]:
         return ctx["liveness_cache"][key]
-    script = ("import importlib.util, sys;"
-              "s = importlib.util.spec_from_file_location('wnm', sys.argv[1]);"
-              "m = importlib.util.module_from_spec(s); s.loader.exec_module(m);"
-              "sys.exit(m.pane_for(sys.argv[2]))")
-    # ⚠️ Bounded, for the reason PROBE_TIMEOUT records: this is the helper that
-    # actually hung, and an absent pane is a field on one row rather than a tick
-    # that did nothing.
-    try:
-        out = subprocess.run([sys.executable, "-c", script,
-                              os.path.join(HERE, "who-needs-me.py"), sid],
-                             capture_output=True, text=True, check=False,
-                             timeout=PROBE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        print("flagged-rows: pane probe for %s exceeded %ds — no pane"
-              % (sid, PROBE_TIMEOUT), file=sys.stderr)
-        ctx["liveness_cache"][key] = None
-        return None
-    pane = ""
-    if out.returncode == 0 and out.stdout.strip():
-        pane = out.stdout.strip().splitlines()[0].strip()
-    ctx["liveness_cache"][key] = pane or None
-    return ctx["liveness_cache"][key]
+    registry, pmap, records = _pane_maps(ctx)
+    pane, _reason = _who_needs_me().pane_for_maps(sid, registry, pmap, records)
+    ctx["liveness_cache"][key] = pane
+    return pane
 
 
 def fleet_mode():

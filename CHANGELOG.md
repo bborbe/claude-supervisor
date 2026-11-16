@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- perf: **`flagged-rows.py` resolves panes in-process instead of spawning an interpreter per session id.** `pane_of` ran `python -c …` once per session — 17 rows at 2.4 s each, 40.7 s of a 51 s run — to importlib-load `who-needs-me.py` only to call `pane_for`, which itself re-reads the session registry and runs `wezterm cli list`. The resolution rules now live in `pane_for_maps(session_id, registry, pmap, records)`, which `pane_for` is a thin wrapper over, so every refusal (unknown id, ambiguous prefix, unreadable registry, unreadable pane list, nameless session with its recorded pane gone, no title match, two panes sharing a title) is the CLI's own and the two paths cannot drift. `flagged-rows.py` loads the module once per run and reads the registry, the pane list and the store once, whatever the row count. Change set: `scripts/who-needs-me.py`, `scripts/flagged-rows.py`, `scripts/tests/test_flagged_rows.py`, `CHANGELOG.md`.
+
 ## v0.328.0
 
 - perf: **`flagged-rows.py` no longer re-parses every page on every run.** An mtime page cache (`flagged-rows-cache.json` in the Claude state dir, overridable with `--cache`, keyed on `(mtime_ns, size)`) serves the skip verdict of a page whose bytes have not moved, for the two verdicts that depend on nothing else (`not flagged`, `status is …`). Eligible, deferred and unreadable pages are re-read every run, so a defer that comes due and a liveness change surface without the file changing. Measured on the live corpus with `--no-liveness`: cold run 47,482 pages parsed / 11 s, warm run **116 parsed / 47,366 cache hits / 3 s**, against a 14 s baseline; the row set and `skipped` counts are identical across all three. A deleted or renamed page leaves no row and no cache key (`pruned` counts them). `--no-cache` restores the old behaviour; `--json` gains a `cache` counter object.
