@@ -110,6 +110,15 @@ LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
 # `scripts/inbox.py` returns 4 for its own refusal, so the code is precedented in this tree.
 MALFORMED = 4
 
+# Why a registry-live session has no LIVE row at the endpoint — a CLOSED set, because a
+# cause outside it is a classification bug, not a fourth kind of miss. Defined here, with the
+# other module constants, because `_absent_licensed` uses one as a DEFAULT ARGUMENT and a
+# default is evaluated when the `def` is executed, not when it is called.
+CAUSE_NOT_REGISTERED = "not-registered"
+CAUSE_EXPIRED = "expired"
+CAUSE_KEY_MISMATCH = "key-mismatch"
+CAUSES = (CAUSE_NOT_REGISTERED, CAUSE_EXPIRED, CAUSE_KEY_MISMATCH)
+
 # A full session id is a UUID, so its hyphens sit at these offsets and nowhere else.
 _UUID_SEPARATORS = frozenset((8, 13, 18, 23))
 _ID_MAX = 36
@@ -408,7 +417,8 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
         ), None
 
 
-def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it"):
+def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it",
+                     cause=CAUSE_NOT_REGISTERED):
     """`(verdict, message, None)` for an id the endpoint holds NO row for — the ABSENT licence.
 
     ⚠️ **The three-tuple is `_check`'s contract, and the `None` row is part of it.** `_check`
@@ -461,10 +471,14 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
     matched = [exact] if exact is not None else [k for k in keys if k.lower().startswith(sid)]
     non_dead = [k for k in matched if (identity.get(k) or {}).get("alive") is not False]
     if non_dead:
+        # ⚠️ **The cause is part of the message, not a new exit code.** A distinct code would
+        # change what every caller maps to "not live, resume is authorised"; UNKNOWN already
+        # means "cannot tell", and `cause=` is what lets a reader tell a registration gap from a
+        # lapsed stamp without moving the verdict.
         return UNKNOWN, (
             "%s is held by the identity registry as non-dead while the session-heartbeat "
             "endpoint %s — the endpoint's coverage of live sessions is "
-            "incomplete, so ABSENT cannot be licensed" % (non_dead[0], endpoint_state)
+            "incomplete, so ABSENT cannot be licensed (cause: %s)" % (non_dead[0], endpoint_state, cause)
         ), None
     return ABSENT, "no session id matches %s" % sid, None
 
@@ -681,12 +695,89 @@ def _verdict_for(row, sid, registry_dir=None):
                     "row's staleness proves nothing" % (full, why)
                 ), row
         verdict, why, _ = _absent_licensed(
-            full, registry_dir, "serves a stale `live: false` row for it"
+            full, registry_dir, "serves a stale `live: false` row for it", CAUSE_EXPIRED
         )
         return verdict, why, row
     return UNKNOWN, (
         "%s has a heartbeat row with no usable `live` flag — cannot decide liveness" % full
     ), row
+
+
+def _miss_cause(sid, by_id):
+    """`(cause, extra)` — WHY the endpoint holds no LIVE row for a registry-live session.
+
+    ⚠️ **A closed set, and every member names a different repair.** `missing` alone folded
+    three unlike facts into one number, so a fleet reading `missing=12` could not tell a
+    registration outage from twelve idle sessions whose stamp lapsed — measured 2026-11-15:
+    all twelve held a row reading `live: false` with `source: mcp-timer` and an `age_seconds`
+    of ~14 900 s, i.e. the store could see every one of them and was answering about them.
+    Labelling those `not-registered` would have been a false report of a registration fault.
+
+      * `expired` — the endpoint HAS a row keyed by this id and reports it not live. The
+        session's own stamp lapsed; nothing about registration is broken. Carries the row's
+        `age_seconds`, so a blanket label is distinguishable from a measured one.
+      * `key-mismatch` — no row under this id, but one whose key is the same id under a
+        different shape (case or hyphenation). The session announced itself under a key this
+        reader cannot match. Carries `found_as`, the key it was found under.
+      * `not-registered` — no row at all, under this id or a normalised variant. The endpoint
+        has never heard of the session: the only member that is a genuine coverage gap.
+    """
+    row = by_id.get(sid)
+    if row is not None:
+        return CAUSE_EXPIRED, {"age_seconds": row.get("age_seconds")}
+    flat = sid.replace("-", "").lower()
+    for key in by_id:
+        if key.replace("-", "").lower() == flat:
+            return CAUSE_KEY_MISMATCH, {"found_as": key}
+    return CAUSE_NOT_REGISTERED, {}
+
+
+def coverage_report(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
+    """`(verdict, line, misses)` — the coverage counts plus one classified entry per miss.
+
+    `misses` is `None` when the measurement could not be taken (the same UNKNOWN case the
+    line already names), `[]` when complete, and otherwise one dict per missing id carrying
+    `session_id`, `cause` and the cause's own evidence (`age_seconds` / `found_as`).
+    """
+    rows = read_endpoint(endpoint, timeout)
+    if rows is None:
+        return UNKNOWN, "UNKNOWN — cannot read the session-heartbeat endpoint at %s" % endpoint_base(endpoint), None
+    identity = _identity().read_registry(registry_dir)
+    if identity is None:
+        return UNKNOWN, "UNKNOWN — cannot read the identity registry (%s)" % (registry_dir or "default path"), None
+    # ⚠️ **The `isinstance(..., str)` guard is what keeps a malformed row from crashing the
+    # measurement.** A row carrying `live: true` and a non-string `session_id` (a list or a
+    # dict) is unhashable, so the set build would raise `TypeError` out of `main()` and Python
+    # would exit 1 — this file's ABSENT code. `_check` guards the identical case at the verdict
+    # path; the diagnostic path is not a place to be looser.
+    by_id = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        row_sid = r.get("session_id")
+        if not (isinstance(row_sid, str) and row_sid):
+            continue
+        # A live row wins over a stale one for the same id: the store should hold one row per
+        # session, and if it ever holds two, the classification must not depend on row order.
+        if r.get("live") is True or row_sid not in by_id:
+            by_id[row_sid] = r
+    endpoint_live = {sid for sid, r in by_id.items() if r.get("live") is True}
+    registry_live = {sid for sid, rec in identity.items() if rec.get("alive") is not False}
+    missing = sorted(registry_live - endpoint_live)
+    misses = []
+    for sid in missing:
+        cause, extra = _miss_cause(sid, by_id)
+        entry = {"session_id": sid, "cause": cause}
+        entry.update(extra)
+        misses.append(entry)
+    counts = {cause: sum(1 for m in misses if m["cause"] == cause) for cause in CAUSES}
+    line = "endpoint_live=%d registry_live=%d missing=%d %s" % (
+        len(endpoint_live),
+        len(registry_live),
+        len(missing),
+        " ".join("%s=%d" % (cause, counts[cause]) for cause in CAUSES),
+    )
+    return (ABSENT if missing else LIVE), line, misses
 
 
 def coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
@@ -701,59 +792,41 @@ def coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     only `alive is True` would read a partial rollout as complete, the exact direction that makes
     ABSENT unsafe); `missing` is the difference.
 
+    The line also carries a count per cause (`not-registered` / `expired` / `key-mismatch`);
+    `coverage_report()` holds the classification and the reasoning behind it.
+
     Exit codes: 0 complete, 1 incomplete (a registry-live session has no live endpoint row), 2
     the measurement could not be taken (an unreadable endpoint or registry) — never a fabricated
     `0`, because "could not measure" and "measured complete" are different facts.
     """
-    rows = read_endpoint(endpoint, timeout)
-    if rows is None:
-        return UNKNOWN, "UNKNOWN — cannot read the session-heartbeat endpoint at %s" % endpoint_base(endpoint)
-    identity = _identity().read_registry(registry_dir)
-    if identity is None:
-        return UNKNOWN, "UNKNOWN — cannot read the identity registry (%s)" % (registry_dir or "default path")
-    # ⚠️ **The `isinstance(..., str)` guard is what keeps a malformed row from crashing the
-    # measurement.** A row carrying `live: true` and a non-string `session_id` (a list or a
-    # dict) is unhashable, so the set build would raise `TypeError` out of `main()` and Python
-    # would exit 1 — this file's ABSENT code. `_check` guards the identical case at the verdict
-    # path; the diagnostic path is not a place to be looser.
-    endpoint_live = {
-        r["session_id"]
-        for r in rows
-        if isinstance(r, dict)
-        and isinstance(r.get("session_id"), str)
-        and r["session_id"]
-        and r.get("live") is True
-    }
-    registry_live = {sid for sid, rec in identity.items() if rec.get("alive") is not False}
-    missing = registry_live - endpoint_live
-    line = "endpoint_live=%d registry_live=%d missing=%d" % (
-        len(endpoint_live),
-        len(registry_live),
-        len(missing),
-    )
-    return (ABSENT if missing else LIVE), line
+    verdict, line, _misses = coverage_report(endpoint, registry_dir, timeout)
+    return verdict, line
 
 
-def safe_coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
-    """`coverage()` guarded so no exception can escape `main()` as exit 1.
+def safe_coverage_report(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
+    """`coverage_report()` guarded so no exception can escape `main()` as exit 1.
 
-    ⚠️ **Same invariant `check()` carries, and for the same reason.** `coverage()` reaches the
-    registry through `_identity()`, which `exec_module`s a sibling file with no guard — so a
-    missing or unparseable `session-identity.py` raises straight out of it, and `main()`
-    returning is the only thing between that and `sys.exit(1)`. One is this file's ABSENT code,
-    which every caller reads as "not live, resume is authorised"; a diagnostic that cannot be
-    taken is UNKNOWN (exit 2), never a crash wearing ABSENT's exit code. The suite already
-    treats an unimportable sibling as a real case (`load_from()` isolates exactly that), so
-    leaving this path unguarded while `check()` is guarded end-to-end was an oversight rather
-    than a decision.
+    ⚠️ **Same invariant `check()` carries, and for the same reason.** `coverage_report()`
+    reaches the registry through `_identity()`, which `exec_module`s a sibling file with no
+    guard — so a missing or unparseable `session-identity.py` raises straight out of it, and
+    `main()` returning is the only thing between that and `sys.exit(1)`. One is this file's
+    ABSENT code, which every caller reads as "not live, resume is authorised"; a diagnostic
+    that cannot be taken is UNKNOWN (exit 2), never a crash wearing ABSENT's exit code.
+
+    ⚠️ **One guard, not two.** This replaces `safe_coverage()`, which wrapped the older
+    `(verdict, line)` reader: with `--coverage` now reading the richer report, keeping both
+    would have left two functions enforcing one invariant, and the day one of them drifted
+    the difference would be invisible from the call site. `coverage()` stays as the thin
+    `(verdict, line)` view over `coverage_report()`, so a caller that only wants the line
+    still has one.
     """
     try:
-        return coverage(endpoint, registry_dir, timeout)
+        return coverage_report(endpoint, registry_dir, timeout)
     except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
         return UNKNOWN, "UNKNOWN — the stamp-coverage measurement could not be taken: %s: %s" % (
             type(exc).__name__,
             exc,
-        )
+        ), None
 
 
 def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
@@ -825,7 +898,7 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
 
 
 def safe_unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
-    """`unstamped()` guarded — see `safe_coverage` for why no exception may escape `main()`."""
+    """`unstamped()` guarded — see `safe_coverage_report` for why no exception may escape `main()`."""
     try:
         return unstamped(endpoint, registry_dir, timeout)
     except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
@@ -963,9 +1036,24 @@ def main(argv=None):
         # the unmeasurable case keeps its message on stderr, where `$(...)` cannot capture it.
         # Exit 1 while the fleet is not fully stamped — see the module docstring on why a partial
         # rollout makes ABSENT unsafe.
-        verdict, line = safe_coverage(args.endpoint, args.dir)
+        #
+        # `--json` emits the same counts plus one classified entry per miss, so a consumer can
+        # tell a registration gap (`not-registered`) from a lapsed stamp (`expired`) without
+        # parsing the line. The verdict is unchanged: a residual miss still exits 1.
+        verdict, line, misses = safe_coverage_report(args.endpoint, args.dir)
         if verdict == UNKNOWN:
             print(line, file=sys.stderr)
+        elif args.json:
+            json.dump(
+                {
+                    "verdict": "complete" if verdict == LIVE else "incomplete",
+                    "line": line,
+                    "misses": misses or [],
+                },
+                sys.stdout,
+                indent=2,
+            )
+            sys.stdout.write("\n")
         else:
             print(line)
         return verdict

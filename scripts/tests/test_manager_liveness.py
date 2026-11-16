@@ -1724,20 +1724,34 @@ class WorkSignal(unittest.TestCase):
         self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
         self.heartbeat("some-other-subject.heartbeat", 5)
 
-    def test_a_round_free_but_working_goal_reads_working_not_stale_and_not_ok(self):
+    def test_a_round_free_but_working_goal_past_the_cap_reads_lapsed_not_stale_and_not_ok(self):
         """FALSE STALE — the direction the record used to miss entirely — without a false OK.
 
-        Cadence far past the limit, no round, gate down (no heartbeat written): pre-fix
+        Cadence past the HARD CAP, no round, gate down (no heartbeat written): pre-fix
         this read STALE and `topic-keepalive.py` would restart a working manager. The
         transcript moved, so it is working: it must not read STALE (no mid-turn restart),
-        and it must not read OK either (no round ran). It reads WORKING, which no restart
-        path acts on.
+        and it must not read OK either (no round ran, and its next wake is not coming).
+        It reads LAPSED, which no restart path acts on.
         """
         s = self.arm_old(age=5000, session=self.SID)
         self.transcript(self.SID, 30)
         state, detail = self.m.classify(s, time.time())
-        self.assertEqual("WORKING", state)
+        self.assertEqual("LAPSED", state)
         self.assertRegex(detail, r"work=\d+s")
+        self.assertIn("lapsed (no round past the cap", detail)
+
+    def test_a_round_free_but_working_goal_inside_the_cap_still_reads_working(self):
+        """The negative control for LAPSED: a moving transcript inside the cap is WORKING.
+
+        Without this, "always return LAPSED when work is fresh" would satisfy the case above
+        while destroying the mid-turn protection WORKING exists for. 900 s declared, so the
+        cap is 5 x 900 = 4500 s; an arm 2000 s old is past the round limit (1080 s) and
+        inside the cap.
+        """
+        s = self.arm_old(age=2000, session=self.SID)
+        self.transcript(self.SID, 30)
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("WORKING", state)
         self.assertIn("working (no round", detail)
 
     def test_an_armed_but_unworking_goal_reads_idle_not_ok(self):
