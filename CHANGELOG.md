@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.328.0
 
 - perf: **`flagged-rows.py` no longer re-parses every page on every run.** An mtime page cache (`flagged-rows-cache.json` in the Claude state dir, overridable with `--cache`, keyed on `(mtime_ns, size)`) serves the skip verdict of a page whose bytes have not moved, for the two verdicts that depend on nothing else (`not flagged`, `status is …`). Eligible, deferred and unreadable pages are re-read every run, so a defer that comes due and a liveness change surface without the file changing. Measured on the live corpus with `--no-liveness`: cold run 47,482 pages parsed / 11 s, warm run **116 parsed / 47,366 cache hits / 3 s**, against a 14 s baseline; the row set and `skipped` counts are identical across all three. A deleted or renamed page leaves no row and no cache key (`pruned` counts them). `--no-cache` restores the old behaviour; `--json` gains a `cache` counter object.
 
