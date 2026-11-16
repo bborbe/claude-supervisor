@@ -958,12 +958,79 @@ class SleepState(unittest.TestCase):
         self.arm(age=0)
         self.assertFalse(os.path.exists(self.m.path(self.s, "sleeping")))
 
-    def test_stopped_beats_sleeping(self):
-        """A deliberate stand-down is the stronger statement; it must not be masked."""
+    def test_sleeping_beats_stopped(self):
+        """A pending date gate outranks a stand-down — the stand-down is time-boxed by it.
+
+        Was `test_stopped_beats_sleeping`, which pinned the opposite order. That order is
+        the defect: a subject both stopped and slept read `STOPPED` for ever, so nothing
+        released it when the instant passed and `topic-keepalive.py` mapped the reading to
+        `leave` ("deliberately stopped — do nothing").
+        """
         self.sleep(3600)
         with redirect_stdout(io.StringIO()):
             self.m.stop(self.SUBJECT, "goal")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "SLEEPING")
+
+    def test_an_expired_sleep_does_not_keep_a_stand_down_standing(self):
+        """Once the gate has passed the stand-down stops masking: STALE, never STOPPED."""
+        self.arm(age=5000)
+        self.sleep(-60)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STALE")
+
+    def test_a_stand_down_with_no_date_gate_still_reads_stopped(self):
+        """The regression guard: an unflagged stand-down is unchanged by all of this."""
+        self.arm(age=5000)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
         self.assertEqual(self.m.classify(self.s, time.time())[0], "STOPPED")
+
+    def test_an_unparseable_sleep_does_not_release_a_stand_down(self):
+        """Fail closed: a corrupt gate is not evidence that it passed."""
+        with open(self.m.path(self.s, "sleeping"), "w", encoding="utf-8") as fh:
+            fh.write("someday\n")
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STOPPED")
+
+    def test_a_future_defer_date_beats_a_stand_down(self):
+        """The motivating population: `.stopped` + `defer_date`, and no `.sleeping` marker."""
+        self.arm(age=5000)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        future = datetime.now(timezone.utc) + timedelta(days=3)
+        state, detail = self.m.classify(self.s, time.time(), defer_date=future)
+        self.assertEqual(state, "SLEEPING")
+        self.assertIn("defer_date", detail)
+
+    def test_a_passed_defer_date_does_not_keep_a_stand_down_standing(self):
+        self.arm(age=5000)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self.assertEqual(
+            self.m.classify(self.s, time.time(), defer_date=past)[0], "STALE"
+        )
+
+    def test_a_passed_defer_date_with_a_fresh_cadence_is_not_stopped(self):
+        """The claim is "never STOPPED"; the exact reading follows the age arithmetic."""
+        self.arm(age=10)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self.assertEqual(
+            self.m.classify(self.s, time.time(), defer_date=past)[0], "OK"
+        )
+
+    def test_a_passed_defer_date_with_no_cadence_is_unarmed(self):
+        """`stop()` writes no cadence file, so the fall-through lands on UNARMED."""
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self.assertEqual(
+            self.m.classify(self.s, time.time(), defer_date=past)[0], "UNARMED"
+        )
 
     def test_an_unreadable_sleep_marker_reads_as_absent(self):
         """Fail toward ARMED: a corrupt marker must not suppress a real STALE."""
@@ -979,6 +1046,97 @@ class SleepState(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertFalse(os.path.exists(self.m.path(self.s, "sleeping")))
         self.assertIn("ISO 8601", err.getvalue())
+
+
+class DeferDateOnThePage(unittest.TestCase):
+    """SC2's live shape: `.stopped` plus a page `defer_date`, and NO `.sleeping` marker.
+
+    The stand-down runbook sets `defer_date` and runs `/supervisor:stop`, which writes
+    only `<slug>.stopped`. Nothing reads the page's `defer_date` on the liveness path
+    before this change, so the subject read `STOPPED` before and after its instant.
+    """
+
+    SUBJECT = "Review and Merge Stop Binding"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+        self.vault = tempfile.TemporaryDirectory()
+        self.goals = os.path.join(self.vault.name, "24 Goals")
+        os.makedirs(self.goals)
+        self.s = self.m.slug(self.SUBJECT, "goal")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.vault.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def arm(self, age):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm(self.SUBJECT, "goal", 300)
+        p = self.m.path(self.s, "cadence")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def page(self, defer_value):
+        with open(
+            os.path.join(self.goals, self.SUBJECT + ".md"), "w", encoding="utf-8"
+        ) as fh:
+            fh.write("---\n")
+            if defer_value is not None:
+                fh.write(f"defer_date: {defer_value}\n")
+            fh.write("---\n")
+
+    def run_state(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.state(self.SUBJECT, "goal", self.vault.name, time.time())
+        return rc, out.getvalue(), err.getvalue()
+
+    def stop(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+
+    def future(self):
+        return (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+
+    def past(self):
+        return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def test_a_future_defer_date_on_the_page_reads_sleeping(self):
+        self.arm(age=5000)
+        self.stop()
+        self.page(self.future())
+        rc, out, _err = self.run_state()
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("SLEEPING\t"), out)
+        self.assertIn("defer_date", out)
+
+    def test_a_passed_defer_date_on_the_page_reads_stale(self):
+        self.arm(age=5000)
+        self.stop()
+        self.page(self.past())
+        rc, out, _err = self.run_state()
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("STALE\t"), out)
+
+    def test_no_defer_date_on_the_page_leaves_the_stand_down_standing(self):
+        self.arm(age=5000)
+        self.stop()
+        self.page(None)
+        rc, out, _err = self.run_state()
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("STOPPED\t"), out)
+
+    def test_an_unparseable_defer_date_leaves_the_stand_down_standing(self):
+        """Fail closed: a typo must never wake a deliberately stopped subject."""
+        self.arm(age=5000)
+        self.stop()
+        self.page("not-a-date")
+        rc, out, err = self.run_state()
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("STOPPED\t"), out)
+        self.assertIn("defer_date", err)
 
 
 class StoodDownVersusLapsed(unittest.TestCase):
