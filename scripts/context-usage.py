@@ -18,6 +18,18 @@ exist). A pane that cannot be confirmed is withheld, never printed and never off
 compaction — compaction is a no-ask action, so a phantom candidate is a run that reports
 success and does nothing.
 
+Pane existence is not session existence, and that gap is the next defect this reader was
+measured on. A pane id is a lease: WezTerm renumbers and reuses them, so a record whose
+pane still exists can be worn by a different, live session. Session liveness is therefore
+read from the registry `~/.claude/sessions/<pid>.json` (an entry is deleted when its
+session exits), through `who-needs-me.py`'s `live_session_ids()` so the fleet has one
+answer. A record whose session is no longer registered is withheld from the candidate
+list and its pane is not printed — measured 2026-11-16: 14 of 14 candidates carried a
+dead session id while every recorded pane existed and was occupied by another live
+session, so a send would have compacted 11 unrelated live sessions, the Fleet Manager's
+among them. An unreadable registry is UNKNOWN, never "nothing is live": the record is
+kept rather than swept, the same rule the pane query follows.
+
   context-usage.py                 all sessions, highest usage first
   context-usage.py --over 70       only sessions at/over 70%
   context-usage.py --compactable   over the bound AND neither blocked nor in a tool call
@@ -101,6 +113,17 @@ def live_panes():
     return wnm.live_pane_ids()
 
 
+def live_sessions():
+    """Registered-live session ids, or `None` when the registry cannot be read.
+
+    Delegates to `who-needs-me.py`'s `live_session_ids()` — the same authority
+    `pane_for()` uses — so the fleet has one answer to "is this session still
+    running". `None` is distinct from `set()`: an unreadable registry cannot prove
+    a session is dead, so the caller keeps the record rather than sweeping it.
+    """
+    return wnm.live_session_ids()
+
+
 def pane_state(pane, live):
     """Resolve one recorded pane id against the live set: (display, addressable, phantom).
 
@@ -118,13 +141,16 @@ def pane_state(pane, live):
 
 
 def is_candidate(r):
-    """Compaction candidates must be idle, not this session, and have a live pane.
+    """Compaction candidates must be idle, not this session, live, and have a live pane.
 
     A candidate is addressed by sending to its pane, so one without a confirmed
-    pane is a no-op that reports success.
+    pane is a no-op that reports success. A pane is a lease, not an identity: a
+    record whose session has exited can leave a pane id that another live session
+    now wears, so pane existence alone would offer a stranger's session for
+    compaction. The registry is what separates the two.
     """
     return (not r["blocked"] and not r["busy"] and not r["self"]
-            and r["addressable"])
+            and r["alive"] and r["addressable"])
 
 
 def used_tokens(r):
@@ -192,6 +218,7 @@ def main():
     needs = load(ATTENTION, "needs")
     tools = load(ATTENTION, "tool")
     live = live_panes()
+    sessions = live_sessions()
 
     rows = []
     me = CLAUDE_CODE_SESSION_ID
@@ -207,10 +234,17 @@ def main():
         busy = bool(t)
         pane, addressable, phantom = pane_state(
             d.get("pane") or n.get("pane") or t.get("pane"), live)
+        # A pane id outlives its session and is reused by a later one, so a record whose
+        # session is no longer registered must not carry a pane address: the id it holds
+        # may now belong to a different, live session. UNKNOWN keeps the row instead of
+        # sweeping it — an unreadable registry proves nothing.
+        alive = sessions is None or sid in sessions
+        if not alive:
+            pane, addressable = "—", False
         # This session stays visible (its own fill level is worth seeing) but is never a
         # compaction candidate — compacting yourself loses the loop state mid-round.
         rows.append({"sid": sid, "pct": float(pct), "rec": d, "pane": pane,
-                     "addressable": addressable, "phantom": phantom,
+                     "addressable": addressable, "phantom": phantom, "alive": alive,
                      "blocked": blocked, "busy": busy, "self": bool(me) and sid == me,
                      "detail": n.get("detail", "")})
     rows.sort(key=lambda r: -r["pct"])
@@ -230,6 +264,9 @@ def main():
     if live is None:
         print("⚠️  `wezterm cli list` unreadable — pane ids withheld. A pane that cannot "
               "be checked is UNKNOWN: not live, and not gone either.")
+    if sessions is None:
+        print("⚠️  session registry unreadable — session liveness UNKNOWN. Every record is "
+              "kept: a session that cannot be checked is not proven gone.")
     print(f"Context usage ({len(shown)} of {len(rows)} sessions, highest first)")
     print(f"Bound in force: {bound_label(a.threshold, a.threshold_tokens)}")
     for r in shown:
@@ -249,6 +286,7 @@ def main():
         print(f"\n⚠️  Over {bound_label(a.threshold, a.threshold_tokens)}: {len(over)}")
         for r in over:
             why = ("this session — never a candidate" if r["self"]
+                   else "session gone — not compactable" if not r["alive"]
                    else "blocked" if r["blocked"]
                    else "in a tool call" if r["busy"]
                    else "pane gone — not compactable" if r["phantom"]
