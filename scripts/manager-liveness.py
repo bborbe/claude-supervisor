@@ -1369,11 +1369,14 @@ def work_age(s: str, now: float):
 
 
 def classify(s: str, now: float) -> tuple:
-    """(state, detail) for one subject: OK, WORKING, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
+    """(state, detail) for one subject: OK, WORKING, LAPSED, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
 
     `OK` means a round ran inside the limit, and only that. Past the limit a moving
     transcript reads `WORKING` and an armed manager that produced nothing reads `IDLE`;
-    neither is a lapse and nothing restarts either. Only `STALE` / `INVALID` are acted on.
+    neither is a lapse and nothing restarts either. Past the HARD CAP
+    (`DECLARED_K x declared`) a moving transcript reads `LAPSED` — the manager is alive but
+    will not be woken again, which is a lapse to report and still not a restart. Only
+    `STALE` / `INVALID` are acted on.
 
     ⚠️ `UNARMED` and `INVALID` are different answers and must never be collapsed.
     `INVALID` means a record EXISTS and cannot be read — a probe failure, the
@@ -1459,6 +1462,17 @@ def classify(s: str, now: float) -> tuple:
         # it was. WORKING is its own word so every reader can tell the two apart; every
         # restart path acts on STALE / INVALID only, so it acts on neither.
         if work is not None and work <= limit:
+            if age > bound:
+                # ⚠️ **LAPSED, never WORKING, once the arm file is past the hard cap.** The
+                # work signal proves the session is ALIVE and busy; it does not prove it will
+                # ever round again. Past `DECLARED_K x declared` the manager has missed enough
+                # re-arms that its next wake is not coming, and calling that WORKING is how a
+                # manager that stopped arming stayed invisible: measured 2026-11-15, seven
+                # goal-manager loops sat dead for up to 15 hours while every keep-alive round
+                # counted a fresh `work=` as healthy. LAPSED is deliberately NOT in any restart
+                # set (`topic-keepalive.py` acts on STALE / INVALID only), so this names the
+                # lapse without reintroducing the mid-turn restart WORKING exists to prevent.
+                return "LAPSED", detail + f" lapsed (no round past the cap; work {work}s ago)"
             return "WORKING", detail + f" working (no round; work {work}s ago)"
         # Goal tier only: the detached sweep gate is its sole wake source, so an ageing
         # `.cadence` between gate wakes is expected, not a lapse. A fresh gate heartbeat

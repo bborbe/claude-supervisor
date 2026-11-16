@@ -978,5 +978,79 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(chk_rc, UNKNOWN)
 
 
+    # ---- cause classification: one number, three unlike facts (2026-11-15) --------------
+    #
+    # `missing` folded three different states into one number, so a fleet reading `missing=12`
+    # could not tell a registration outage from twelve idle sessions whose stamp lapsed. These
+    # pin the closed set AND the evidence each member carries — a blanket label would satisfy
+    # the counts while proving nothing.
+
+    def test_coverage_classifies_a_stale_row_as_expired(self):
+        # The live shape measured 2026-11-15: the store HAS the row and answers `live: false`,
+        # so registration is fine and the session's own stamp lapsed.
+        sid = "e0a1e5ed-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with self.fixture([row(sid, live=False, age_seconds=14937)]) as fx:
+            rc, line = self.coverage(fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("expired=1", line)
+        self.assertIn("not-registered=0", line)
+
+    def test_coverage_classifies_a_missing_row_as_not_registered(self):
+        # The genuine coverage gap, and the only member that means the endpoint cannot see
+        # a session at all.
+        sid = "b0a2e5ed-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with self.fixture([]) as fx:
+            rc, line = self.coverage(fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("not-registered=1", line)
+        self.assertIn("expired=0", line)
+
+    def test_coverage_classifies_a_case_variant_key_as_key_mismatch(self):
+        # The session announced itself under a key this reader cannot match by id.
+        sid = "d0a4e5ed-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with self.fixture([row(sid.upper(), live=False)]) as fx:
+            rc, line = self.coverage(fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("key-mismatch=1", line)
+
+    def test_coverage_json_carries_the_cause_and_its_evidence(self):
+        # `expired` must carry the row's age: a blanket label with no measurement reads the
+        # same as a classified one, and only the evidence tells them apart.
+        sid = "c0a3e5ed-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with self.fixture([row(sid, live=False, age_seconds=14937)]) as fx:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.m.main(
+                    ["--coverage", "--json", "--endpoint", fx.url, "--dir", self.registry]
+                )
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["verdict"], "incomplete")
+        self.assertEqual(payload["misses"][0]["cause"], "expired")
+        self.assertEqual(payload["misses"][0]["age_seconds"], 14937)
+
+    def test_check_names_the_not_registered_cause(self):
+        # SC2: a distinct cause on the verdict path, without moving the verdict. It must stay
+        # UNKNOWN — a new exit code would change what every caller maps to "resume authorised".
+        sid = "bf00c554-b829-44eb-813b-437fe2f45322"
+        self.plant(sid)
+        with self.fixture([]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("cause: not-registered", out)
+
+    def test_check_names_the_expired_cause(self):
+        # The same shape for a stale row: the store answered, so this is not a registration gap.
+        sid = "57a1e111-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with self.fixture([row(sid, live=False)]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("cause: expired", out)
+
+
 if __name__ == "__main__":
     unittest.main()
