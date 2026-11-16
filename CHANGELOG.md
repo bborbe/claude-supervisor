@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.325.1
 
 - docs: **`scripts/cause-resolve.py` records which half of its own verdict is observable.** The negative half — a cause it cannot find in the session's own sources is reported `unverified` — is proven on real fleet rounds. The positive half — `asserted` — is not observable there at all, and the docstring now says why: the reaper writes `job=idle-reaper action=closed sid=<sid>` to the **daemon log** when it closes a session, so a session's own `events.jsonl` can carry that line only if it read the daemon log **after** it was reaped, which cannot happen. Measured 2026-11-15 over every `*.jsonl` under the Claude projects and state trees (56,739 files): 173 `action=closed` lines, every one naming a **foreign** session, none naming its own file — the borrowing the resolver refuses is the only shape that exists. The paragraph names `scripts/tests/test_cause_resolve.py` as the positive half's **only** proof, because a change that breaks the `asserted` path turns that suite's positive control red while no production observation would notice — a round of all-`unverified` causes satisfies the negative half and reads as a working round.
 
