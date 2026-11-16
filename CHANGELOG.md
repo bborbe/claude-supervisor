@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.324.0
 
 - feat: **`scripts/census-manager-mode.py` names every topic or goal manager running headless.** A headless manager has no tab, no pane and no jump link, while the Vault UI still renders its card as Live — so the board says it is running and offers nothing to click, and the condition is only found when an operator notices the missing link (measured 2026-11-14 on `23 Topics/Development Pipeline Throughput.md`, session `6f14c290`). The reading joins three sources, and the join is the point: `session-liveness.py --list --json` for the live set, the identity registry for `entrypoint` (the liveness record carries **no** `entrypoint`, so a reading built on it alone would match nothing and print a clean fleet forever), and the vault for the page carrying the session. It prints `<session-id> <subject> DEFECT manager-running-headless` and exits `0` clean / `1` at least one defect / `2` a probe or the vault could not be read. ⚠️ **Only a topic or goal page counts** — a task page's session is a worker, and a worker is headless by design (`docs/role-mode-matrix.md` Rule 1), so flagging those would make every healthy fleet red. Wired as § The manager-mode reading in `commands/steps/readings.md`, beside the keeper census it mirrors. Change set: `scripts/census-manager-mode.py` (new), `scripts/tests/test_census_manager_mode.py` (new), `commands/steps/readings.md`, `CHANGELOG.md`.
 
