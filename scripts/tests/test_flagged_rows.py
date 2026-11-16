@@ -185,9 +185,10 @@ class BranchPartition(unittest.TestCase):
     """The ordered predicate list — first match wins, so the set is a partition."""
 
     def branch(self, kind="task", role="agent", sid=None, live="none", pane=None,
-               chain_live=None, block=None):
+               chain_live=None, block=None, owner=None, owner_live=None):
         return fr.resolve_branch(kind, role, sid, live, pane, chain_live,
-                                 block or page("role: agent"))
+                                 block or page("role: agent"),
+                                 owner=owner, owner_live=owner_live)
 
     def test_unknown_outranks_everything(self):
         for verdict in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
@@ -231,6 +232,106 @@ class BranchPartition(unittest.TestCase):
 
     def test_absent_without_id_creates(self):
         self.assertEqual(self.branch(live="ABSENT", sid=None)[0], "create")
+
+
+class HeldOwnerLive(unittest.TestCase):
+    """SC1–SC2: a flagged TASK whose owning subject already has a live manager is held.
+
+    The hold is a branch, not a refusal token, and it sits after every row-own branch:
+    a task whose own session is live still jumps or resumes, so only a would-be CREATE
+    is suppressed. The FLEET sentinel is excluded, or the whole batch would stop.
+    """
+
+    GOAL = {"kind": "goal", "name": "G"}
+
+    def branch(self, **kw):
+        return fr.resolve_branch(kw.pop("kind", "task"), kw.pop("role", "agent"),
+                                 kw.pop("sid", None), kw.pop("live", "none"),
+                                 kw.pop("pane", None), kw.pop("chain_live", None),
+                                 kw.pop("block", page("role: agent")),
+                                 owner=kw.pop("owner", None),
+                                 owner_live=kw.pop("owner_live", None))
+
+    def test_sc1_a_task_under_a_live_goal_is_held(self):
+        branch, refused = self.branch(owner=self.GOAL, owner_live=True)
+        self.assertEqual(branch, "held-owner-live")
+        self.assertEqual(refused, [])
+
+    def test_sc2_a_task_under_an_absent_goal_still_creates(self):
+        self.assertEqual(self.branch(owner=self.GOAL, owner_live=False)[0], "create")
+
+    def test_an_unanswerable_owner_probe_creates_never_holds(self):
+        # `None` is not `True`: a probe that cannot answer must not suppress work.
+        self.assertEqual(self.branch(owner=self.GOAL, owner_live=None)[0], "create")
+
+    def test_the_fleet_sentinel_never_holds(self):
+        # Every task with no live goal or topic owner is FLEET-owned; holding on it
+        # would suppress the entire batch.
+        self.assertEqual(self.branch(owner=fr.FLEET, owner_live=True)[0], "create")
+
+    def test_a_live_task_row_still_jumps_over_the_hold(self):
+        self.assertEqual(
+            self.branch(live="LIVE", sid="s1", pane="p1",
+                        owner=self.GOAL, owner_live=True)[0], "jump")
+
+    def test_a_live_task_row_without_a_pane_still_skips(self):
+        self.assertEqual(
+            self.branch(live="LIVE", sid="s1", pane=None,
+                        owner=self.GOAL, owner_live=True)[0], "skip")
+
+    def test_a_resumable_task_still_resumes_over_the_hold(self):
+        self.assertEqual(
+            self.branch(live="ABSENT", sid="s1",
+                        owner=self.GOAL, owner_live=True)[0], "resume")
+
+    def test_a_human_row_is_direct_not_held(self):
+        self.assertEqual(
+            self.branch(role="human", owner=self.GOAL, owner_live=True)[0], "direct")
+
+    def test_a_goal_row_is_never_held(self):
+        self.assertNotEqual(
+            self.branch(kind="goal", owner=self.GOAL, owner_live=True)[0],
+            "held-owner-live")
+
+    def test_an_unknown_row_outranks_the_hold(self):
+        self.assertEqual(
+            self.branch(live="UNKNOWN", owner=self.GOAL, owner_live=True)[0], "unknown")
+
+
+class RowGate(unittest.TestCase):
+    """SC1–SC2 at the ROW level: the emitted row, not just the branch function.
+
+    The facts are seeded through the resolver's own caches — registry names for
+    `subject_live` (owner selection) and `liveness_cache` for `subject_liveness`
+    (`owner_live`) — so no fixture touches the live fleet.
+    """
+
+    def row(self, managers, cache):
+        root = tempfile.mkdtemp()
+        tasks = os.path.join(root, "25 Tasks")
+        path = os.path.join(tasks, "A Task.md")
+        write(path, page("flag: true\nflag_set_by: operator\nrole: agent\n"
+                         "status: in_progress\ngoals:\n    - '[[G]]'"))
+        cfg = {"tasks_dir": "25 Tasks", "path": root,
+               "worker_launcher": "/opt/l/cc-v", "claude_script": "/opt/l/cc"}
+        ctx = {"today": "2026-11-16", "role_map": ROLE_MAP,
+               "template_root": tempfile.mkdtemp(), "no_liveness": False,
+               "managers": set(managers), "topic_map": {}, "mode_default": "interactive",
+               "normalised": [], "subjects": {}, "liveness_cache": dict(cache),
+               "fleet_sid": None}
+        row, reason = fr.row_for("v", cfg, "task", path, ctx)
+        self.assertIsNone(reason)
+        return row
+
+    def test_sc1_the_emitted_row_is_held_and_names_the_goal(self):
+        row = self.row({"G"}, {("v", "goal", "G"): True, ("row", None): "none"})
+        self.assertEqual(row["branch"], "held-owner-live")
+        self.assertEqual(row["owner"], {"kind": "goal", "name": "G"})
+        self.assertIs(row["owner_live"], True)
+
+    def test_sc2_the_emitted_row_still_creates_when_no_manager_is_live(self):
+        row = self.row(set(), {fr.FLEET_KEY: False, ("row", None): "none"})
+        self.assertEqual(row["branch"], "create")
 
 
 class OwnerResolution(unittest.TestCase):

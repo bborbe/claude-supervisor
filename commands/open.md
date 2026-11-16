@@ -161,6 +161,26 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 **Opening is the default — there is no dry run and no `--confirm`.** Print the table, then open every eligible row.
 
+**Gate each task row on its owning subject's manager — `owner_live`.** A flagged task whose goal (or, absent one, topic) already has a live manager is **held**, never opened: opening it puts two sessions on one subject. The fact is already computed — `scripts/flagged-rows.py` emits `owner_live` per row (`--check` on the owner page's recorded session) — so read it, never re-derive it:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/flagged-rows.py" --json --vault "$v"
+# → {"rows": [{kind, name, owner: {kind, name}, owner_live, branch, ...}], "skipped": {...}, ...}
+```
+
+For each selected **task** row, take its `owner` and `owner_live` from that payload (join on `name`; `--vault` already narrowed the scan):
+
+- **`owner_live: true` and the owner is a `goal` or `topic`** → **HOLD** — render `⛔ HOLD — owner <kind> "<name>" has a live manager`, count it `held K (owner live)`, open nothing.
+- **`owner_live: false`** → open (SC2 — the gate is liveness, not the mere existence of an owner).
+- **`owner_live: null`** (the probe could not answer) → **open**, and note the row `❔ owner liveness unverified`. A probe that cannot answer must not suppress work — the same rule that keeps `unknown` outranking `create`.
+- **The owner is the `fleet` sentinel** → open. Every task with no live goal or topic is fleet-owned; holding on it would suppress the whole batch.
+- **No row for the task in the payload** → open; the selector already admitted it, and the resolver skips rows for its own reasons.
+- **The owner was opened earlier in the same run** (SC3) → treat it as live. A manager spawned moments ago may not be in the registry yet, so also ask the spawn ledger — `opened-recently.py --subject "<owner> Manager" --minutes <window>`; exit 0 means it was opened inside the window and the row is held exactly as if `owner_live` were true.
+
+⚠️ **The verdict is the owner's, not the row's.** `⏭️ LIVE HERE` and `🔒 LIVE ELSEWHERE` read the **task's own** session; `held-owner-live` reads the **owning subject's**. Never reuse either label — one row can carry both facts, and they must stay distinguishable in the table.
+
+⚠️ **The resolver's branch is the authority, not this prose.** `flagged-rows.py`'s `resolve_branch()` returns `held-owner-live` for exactly the row this gate holds (a task that would otherwise CREATE, whose non-fleet owner is proven live). When the branch and this prose disagree, the branch is the defect — a test pins it.
+
 ## Step 0.6 — Classify and fill the missing `role` and `mode`
 
 ⚠️ **This step runs on EVERY open — the batch and the single-task path alike.** On the single-task path, every "selected row" below is the one resolved task.
@@ -244,6 +264,8 @@ FLAGGED BATCH — <vault> — <date> — <n> tasks
   4  Untitled Stub - 2026-09-21                    agent   headless      🏷️ defaulted role=agent · 🏷️ defaulted mode=headless
  10  a routine task - 2026W38-sun                   agent   headless      (on disk)
      ⛔ HOLD — blocked by two other in-flight tasks
+ 11  a routine task - 2026W44-sun                   agent   headless      (on disk)
+     ⛔ HOLD — owner goal "Some Goal" has a live manager
   ...
   Rows always carry a `mode:` by the time Step 3 reads them — § Step 0.6 resolves
   it per matrix Rule 2 and writes it. The fleet config (`spawn.mode`) is never the
@@ -253,7 +275,7 @@ FLAGGED BATCH — <vault> — <date> — <n> tasks
 ⚠️  Ordering is NOT auto-detected. Every ⛔ row is skipped;
     the rest open in the stable order printed above.
 
-Opened N · filled F fields · direct H (human) · yours Y (manager) · defaulted D fields · held K (blocked) · not ready R (readiness) · skipped S already opened.
+Opened N · filled F fields · direct H (human) · yours Y (manager) · defaulted D fields · held K (blocked · owner live) · not ready R (readiness) · skipped S already opened.
 ```
 
 **Readiness-gate every CREATE-bound row first, concurrently.** On both paths Gate 1 (Step 1.5) only verifies approval — `approved_at` or an operator-set flag — and never writes one. For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`; `— (pipeline contract)` (an ungated `task_type:` row, defined at Gate 2). A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 passes every row of this batch** — the selector admits only operator-flagged rows, and an operator flag **is** the approval. The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
@@ -277,7 +299,7 @@ python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervi
 
 **Loop the eligible rows in the printed stable order**, delegating each to this command's own single-task path. Per row, invoke `/supervisor:open "<task>"` — with `--first-step "<gap bullets>"` only when the row opened below the readiness ladder's open threshold. Never reimplement jump / resume / spawn here; never pass a mode override to the fleet. ⚠️ **The per-row delegation IS the guard — no shortcut keeps it.** ⚠️ **The batch is paced by delegation, never by a counter of its own** (rule home: `docs/fleet-surface.md` § Spawn a worker item 5).
 
-**Skip every `⛔ HOLD` row and report the skip with its blockers** — a blocked task is one whose prerequisites have not finished, so opening it is the failure the batch exists to prevent. Never open a blocked row because it appeared in the table: appearing in the selector is not the same as having its prerequisites met. Report each row's outcome, and every skip with its stated reason.
+**Skip every `⛔ HOLD` row and report the skip with its stated reason** — a blocked task is one whose prerequisites have not finished, and a task held on `owner_live` is one whose subject already has a live manager; either way, opening it is the failure the batch exists to prevent. Never open a held row because it appeared in the table: appearing in the selector is not the same as having its prerequisites met or its subject unmanaged. Report each row's outcome, and every skip with its stated reason (blockers, or the owning subject).
 
 **Write the batch's checklist into TodoWrite before the loop, and close every item before the run ends.** One item per selected row plus one for the report. Mark an item completed only when its outcome is settled: **opened**, **live** (JUMP/RESUME), **refused**, or **held** with its stated reason. The batch cannot end while any item is `pending`/`in_progress`; if one is, the run stopped early — say so. ⚠️ **The item text names the outcome, not just the row.**
 
