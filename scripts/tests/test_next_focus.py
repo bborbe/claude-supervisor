@@ -654,3 +654,154 @@ class OperatorFlagIsApprovalTest(unittest.TestCase):
                 row = self.row(extra)
                 self.assertTrue(row["needs_approval"])
                 self.assertNotIn("action", row)
+
+
+class ReservedSlotTest(unittest.TestCase):
+    """The reserved slot and the per-objective cap.
+
+    Both claims are about a COMPUTED ranking, so every test here is built to fail on a
+    hardcoded implementation. The load-bearing one is the swapped-share pair: the same
+    fixture with the two objectives' actuals exchanged must move the reserved row from
+    one task to the other. A constant pick returns the same task under both fixtures and
+    fails exactly there.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.vault = pathlib.Path(self.dir.name)
+
+    def write(self, rel, text):
+        path = self.vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def make_plan(self, *task_names):
+        blocks = ["# Fixture week", "", "# Tasks", ""]
+        for i, name in enumerate(task_names, 1):
+            blocks += [f"### {i}. item {i}", "", f"**Task:** [[{name}]]", ""]
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md", "\n".join(blocks))
+
+    def objective(self, name, share=None):
+        fm = "status: in_progress\npage_type: objective\n"
+        if share is not None:
+            fm += f'stated_share: "{share}"\n'
+        self.write(f"22 Objectives/{name}.md", f"---\n{fm}---\n\n# {name}\n")
+
+    def goal(self, name, objective):
+        self.write(f"24 Goals/{name}.md",
+                   "---\nstatus: in_progress\nphase: execution\n"
+                   f"objective: '[[{objective}]]'\n---\n\n# {name}\n")
+
+    def task(self, name, goal, priority="2", defer=None):
+        lines = ["---", "status: in_progress", "phase: execution",
+                 f"priority: {priority}"]
+        if goal:
+            lines.append(f"goals:\n    - '[[{goal}]]'")
+        if defer:
+            lines.append(f'defer_date: "{defer}"')
+        lines += ["---", "", f"# {name}", ""]
+        self.write(f"25 Tasks/{name}.md", "\n".join(lines))
+
+    def lineage(self, per_objective, population):
+        """A stand-in for the vault's own task-lineage.py --json."""
+        payload = json.dumps({"per_objective": per_objective,
+                              "population": population})
+        self.write(".claude/scripts/task-lineage.py",
+                   f"import json\nprint(json.dumps({payload}))\n")
+
+    def run_script(self):
+        cmd = [sys.executable, str(SCRIPT), "--vault", str(self.vault),
+               "--tasks-dir", "25 Tasks", "--now", DAY, "--json",
+               "--live", "3", "--target", "30"]
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              cwd=str(self.vault.parent))
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        return json.loads(proc.stdout)
+
+    def build_two_objectives(self, a_finished, b_finished, population=10):
+        self.make_plan("Task A", "Task B")
+        self.objective("Obj A", "50.0%")
+        self.objective("Obj B", "10.0%")
+        self.goal("Goal A", "Obj A")
+        self.goal("Goal B", "Obj B")
+        self.task("Task A", "Goal A")
+        self.task("Task B", "Goal B")
+        self.lineage({"Obj A": a_finished, "Obj B": b_finished}, population)
+
+    # -- the reserved slot --------------------------------------------------
+
+    def test_reserved_slot_is_the_furthest_below_objective(self):
+        # Obj A: stated 50, actual 0  -> deficit +50 (furthest below)
+        # Obj B: stated 10, actual 50 -> deficit -40
+        self.build_two_objectives(a_finished=0, b_finished=5)
+        out = self.run_script()
+        self.assertEqual(out["reserved_row"], "Task A")
+        self.assertEqual(out["candidates"][0]["name"], "Task A")
+        self.assertTrue(out["candidates"][0]["reserved"])
+        self.assertEqual(out["reserved_slot"]["name"], "Obj A")
+
+    def test_reserved_slot_moves_when_the_shares_swap(self):
+        """The discriminator: same fixture, actuals exchanged, pick must move."""
+        self.build_two_objectives(a_finished=5, b_finished=0)
+        out = self.run_script()
+        self.assertEqual(out["reserved_row"], "Task B",
+                         "a hardcoded pick returns Task A under both fixtures")
+        self.assertEqual(out["candidates"][0]["name"], "Task B")
+        self.assertEqual(out["reserved_slot"]["name"], "Obj B")
+
+    def test_due_today_cannot_take_the_reserved_slot(self):
+        self.build_two_objectives(a_finished=0, b_finished=5)
+        # A due-today task that ALSO traces to the furthest-below objective.
+        self.task("Due A", "Goal A", defer=DAY)
+        self.make_plan("Task A", "Task B", "Due A")
+        out = self.run_script()
+        self.assertEqual(out["reserved_row"], "Task A",
+                         "the reserved slot is filled from the plan tier only")
+        self.assertEqual(out["candidates"][0]["name"], "Task A")
+        due = [r for r in out["candidates"] if r["name"] == "Due A"]
+        self.assertTrue(due and not due[0].get("reserved"))
+
+    def test_no_stated_share_means_no_reserved_slot(self):
+        self.make_plan("Task A", "Task B")
+        self.objective("Obj A")          # no stated_share
+        self.goal("Goal A", "Obj A")
+        self.task("Task A", "Goal A")
+        self.lineage({"Obj A": 0}, 10)
+        out = self.run_script()
+        self.assertIsNone(out["reserved_row"])
+        self.assertEqual(out["deficit_state"], "no-stated-shares")
+        self.assertEqual([r["name"] for r in out["candidates"]], ["Task A"])
+
+    def test_unread_lineage_is_reported_not_empty(self):
+        self.build_two_objectives(a_finished=0, b_finished=5)
+        (self.vault / ".claude/scripts/task-lineage.py").unlink()
+        out = self.run_script()
+        self.assertIsNone(out["reserved_row"])
+        self.assertEqual(out["deficit_state"], "unavailable")
+        self.assertIn("deficits: unavailable", out["render"])
+
+    # -- the per-objective cap ---------------------------------------------
+
+    def test_per_objective_cap_withholds_and_names(self):
+        self.make_plan()                 # empty week
+        self.objective("Obj A", "50.0%")
+        self.goal("Goal A", "Obj A")
+        for i in range(3):
+            self.task(f"P1 Task {i}", "Goal A", priority="1")
+        self.lineage({"Obj A": 0}, 10)
+        out = self.run_script()
+        self.assertEqual([r["name"] for r in out["proposed"]],
+                         ["P1 Task 0", "P1 Task 1"])
+        self.assertEqual(out["proposed_withheld"], ["P1 Task 2"])
+        self.assertIn("withheld at the per-objective cap (2)", out["render"])
+
+    def test_untraced_rows_are_never_capped(self):
+        """A P1 task serving no objective has no objective to be over."""
+        self.make_plan()
+        for i in range(3):
+            self.task(f"Free P1 {i}", None, priority="1")
+        self.lineage({}, 10)
+        out = self.run_script()
+        self.assertEqual(len(out["proposed"]), 3)
+        self.assertEqual(out["proposed_withheld"], [])
