@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.322.1
 
 - fix: **`manager-quiet.py` names a `phase: todo` row's future `defer_date` on the stand-down line.** `classify()` returned `{"kind": "quiet", "defer": None}` on the unapproved-phase branch **before** it read `defer_date`, so a subject whose only quiet row was deferred printed `Stood down: zero runnable tasks; reopen on no named trigger` — the one case `round-quiet.md` says a reader cannot act on (measured 2026-11-07 on `Automatic Weekly AI Knowledge Sharing Task in Seibert Personal`, row `Verify the Second Weekly AI Knowledge Sharing Task Materializes`, `defer_date: "2026-11-14"`). The defer read now precedes the phase branch, and `classify()` carries an `unapproved` flag **separately** from `defer`: `reopen_trigger()` names the date, while `verdict_for()` still stands the subject down rather than flipping it to `sleep-until`, because an approval is not something a clock delivers. A due or absent date still prints `no named trigger`, and an unapproved row never becomes runnable. Tests: `TestDeferredTodoRowNamesItsDate` (future date named on stdout, past date still unnamed, no-defer still unnamed, the row never runnable) and `TestDeferParsersAreNotTheFault` (the quoted-scalar form parses and displays, so the parser was never at fault). Change set: `scripts/manager-quiet.py`, `scripts/tests/test_manager_quiet.py`, `CHANGELOG.md`.
 
