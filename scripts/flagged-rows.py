@@ -394,12 +394,33 @@ def live_session_names(sessions):
     return names
 
 
+#: How long ONE helper subprocess may take before its answer is abandoned.
+#:
+#: ⚠️ **Bounded, and it was not.** `subprocess.run` with no `timeout` waits
+#: forever, so a single slow helper held the whole predicate. Measured
+#: 2026-11-16: a `flagged-rows.py` child of the daemon sat 11m49s in `poll()`
+#: waiting on one `pane_for` helper, the daemon's 25-minute bound SIGKILLed it,
+#: and the tick opened nothing — 28 of 64 ticks died that way that day.
+#:
+#: A helper that cannot answer inside this window is treated exactly as the
+#: reader already treats a store it could not read: `UNKNOWN` for liveness, no
+#: pane for `pane_of`. Never a hang, because a hang costs the whole tick while a
+#: missing answer costs one row's field.
+PROBE_TIMEOUT = 15
+
+
 def liveness_of(sid):
     """`session-liveness.py --check` — the heartbeat endpoint, never the registry."""
     if not sid:
         return "none"
-    out = subprocess.run([sys.executable, os.path.join(HERE, "session-liveness.py"),
-                          "--check", sid], capture_output=True, text=True, check=False)
+    try:
+        out = subprocess.run(
+            [sys.executable, os.path.join(HERE, "session-liveness.py"), "--check", sid],
+            capture_output=True, text=True, check=False, timeout=PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("flagged-rows: liveness probe for %s exceeded %ds — UNKNOWN"
+              % (sid, PROBE_TIMEOUT), file=sys.stderr)
+        return "UNKNOWN"
     return LIVENESS_EXIT.get(out.returncode, "UNKNOWN")
 
 
@@ -431,9 +452,19 @@ def pane_of(ctx, sid):
               "s = importlib.util.spec_from_file_location('wnm', sys.argv[1]);"
               "m = importlib.util.module_from_spec(s); s.loader.exec_module(m);"
               "sys.exit(m.pane_for(sys.argv[2]))")
-    out = subprocess.run([sys.executable, "-c", script,
-                          os.path.join(HERE, "who-needs-me.py"), sid],
-                         capture_output=True, text=True, check=False)
+    # ⚠️ Bounded, for the reason PROBE_TIMEOUT records: this is the helper that
+    # actually hung, and an absent pane is a field on one row rather than a tick
+    # that did nothing.
+    try:
+        out = subprocess.run([sys.executable, "-c", script,
+                              os.path.join(HERE, "who-needs-me.py"), sid],
+                             capture_output=True, text=True, check=False,
+                             timeout=PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("flagged-rows: pane probe for %s exceeded %ds — no pane"
+              % (sid, PROBE_TIMEOUT), file=sys.stderr)
+        ctx["liveness_cache"][key] = None
+        return None
     pane = ""
     if out.returncode == 0 and out.stdout.strip():
         pane = out.stdout.strip().splitlines()[0].strip()
@@ -824,7 +855,13 @@ def row_for(vault, cfg, kind, path, ctx):
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
     # 2000-line module per call — probing ABSENT rows too tripled the run time for
     # an answer that is `null` by construction.
-    pane = pane_of(ctx, sid) if live == "LIVE" else None
+    # `--no-pane`: the daemon's tick never reads a pane — it skips every non-ABSENT
+    # row before it looks at `jump` — so probing one per LIVE row spawned ~27
+    # interpreters per tick for a discarded field, and one of them hung 11m49s
+    # (2026-11-16). A LIVE row with no pane resolves to `skip`, which the tick
+    # treats exactly as `jump`.
+    pane = (pane_of(ctx, sid)
+            if live == "LIVE" and not ctx.get("no_pane") else None)
     window = ROLE_WINDOW.get(role, "Agents")
     entry = (ctx["role_map"] or {}).get(window) or {}
     owner = resolve_owner(page_kind, name, block, ctx, vault)
@@ -880,6 +917,7 @@ def collect(args):
         "role_map": role_map(args.role_map),
         "template_root": args.template_root,
         "no_liveness": args.no_liveness,
+        "no_pane": args.no_pane,
         #: `None` means "the registry could not be read" — a different fact from an
         #: empty set, and the difference is what keeps `open-manager` from firing.
         "managers": (None if registry_failed
@@ -948,6 +986,9 @@ def main(argv=None):
                         help="the bborbe/nuke recurring-schedules/prod directory")
     parser.add_argument("--no-liveness", action="store_true",
                         help="skip the heartbeat probe and pane lookup (offline/fixtures)")
+    parser.add_argument("--no-pane", action="store_true",
+                        help="probe liveness but skip the pane lookup (the daemon's tick, "
+                             "which never reads a pane)")
     args = parser.parse_args(argv)
 
     rows, skipped, fallbacks, normalised = collect(args)
