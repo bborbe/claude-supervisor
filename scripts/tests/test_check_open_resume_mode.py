@@ -11,6 +11,12 @@ fix and assert the guard rejects it. A guard that cannot fail on the tree it was
 proves nothing — and the leg case is the one that matters here: the shipped leg read
 `Which path a row takes is its mode:'s decision` and nothing else, which is exactly the shape a
 later editor would restore while believing the branch already consulted `role:`.
+
+The manager-resume sites carry a third control, added 2026-11-16 after the refusal branch shipped
+inert: `docs/fleet-surface.md` stated it and `check_surface` pinned it, while `commands/open.md`
+§ 2B item 3 and § 2C item 3 — the two places a lapsed manager is actually resumed — never read
+`mode:` at all. A rule documented, linted in the document, and applied nowhere passes every check
+and changes no behaviour, so the sites are now asserted directly.
 """
 import pathlib
 import shutil
@@ -28,6 +34,18 @@ GOOD_OPEN = (
     "single home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker)'s\n"
     "resume table. `interactive` → this path; headless/absent + **ABSENT** → § 3 headless resume\n"
     "(`cwd`, paced); **LIVE** → neither; **UNKNOWN**/**AMBIGUOUS** → this path.\n"
+    "\n"
+    "## Step 2B — Goal branch\n"
+    "\n"
+    "3. **`ABSENT` → RESUME it by id** (Step 3). ⚠️ **Refuse first when the goal page carries\n"
+    "   an explicit `mode: headless`** — print `role=manager, mode=headless — refused` and STOP,\n"
+    "   taking neither path (rule: `docs/fleet-surface.md` § Spawn a worker).\n"
+    "\n"
+    "## Step 2C — Topic branch\n"
+    "\n"
+    "3. **`ABSENT` → RESUME it by id.** ⚠️ **Refuse first when the topic page carries an\n"
+    "   explicit `mode: headless`** — print `role=manager, mode=headless — refused` and STOP,\n"
+    "   taking neither path (rule: `docs/fleet-surface.md` § Spawn a worker).\n"
 )
 
 #: A tree the guard accepts, for the docs half — the manager-resume block.
@@ -137,6 +155,39 @@ class CheckOpenResumeModeTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("no route", result.stderr)
+
+    def test_topic_resume_site_without_refusal_fails(self):
+        """The topic resume site is where a lapsed manager is actually resumed.
+
+        Measured 2026-11-16: the refusal was asserted in the doc and in no runtime path, so a
+        manager page carrying an explicit `mode: headless` was resumed by § 2C item 3 instead
+        of refused. Every check passed while the branch was inert.
+        """
+        text = GOOD_OPEN
+        head, sep, tail = text.rpartition("`role=manager, mode=headless — refused`")
+        self.write("commands/open.md", head + "it refuses" + tail)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Step 2C", result.stderr)
+
+    def test_goal_resume_site_without_refusal_fails(self):
+        """The goal resume site carries the same rule; a silent one is the same defect."""
+        self.write(
+            "commands/open.md",
+            GOOD_OPEN.replace("`role=manager, mode=headless — refused`", "it refuses", 1),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Step 2B", result.stderr)
+
+    def test_missing_manager_site_fails(self):
+        """A renamed or deleted step must be reported, never silently pass unread."""
+        text = GOOD_OPEN
+        head, _, _tail = text.partition("## Step 2C")
+        self.write("commands/open.md", head)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("carries no '## Step 2C'", result.stderr)
 
 
 if __name__ == "__main__":

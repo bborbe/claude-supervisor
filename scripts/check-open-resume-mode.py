@@ -62,6 +62,12 @@ HOME = "fleet-surface.md"
 #: The headless arm's own obligation: a resume must never guess a working tree.
 CWD = "cwd"
 
+#: The two sites that actually resume a manager. The manager-resume block in the doc states the
+#: rule; these are where it is applied. A rule documented and linted in the doc while these
+#: stay silent is an inert branch — measured 2026-11-16, `REFUSAL` was asserted in
+#: `docs/fleet-surface.md` and in no runtime path, and every check still passed.
+MANAGER_SITES = ("## Step 2B", "## Step 2C")
+
 #: The anchor of the manager-resume block in `docs/fleet-surface.md` § Spawn a worker.
 LEG_SELECTOR = "A manager row never resumes headless"
 
@@ -105,6 +111,21 @@ def block(text: str, anchor: str) -> Optional[str]:
         return None
     rest = text[at:]
     nxt = re.search(r"\n\d+\. ", rest)
+    return rest[: nxt.start()] if nxt else rest
+
+
+def section(text: str, heading: str) -> Optional[str]:
+    """Return the body from `heading` to the next `## ` heading, or None.
+
+    Unlike `paragraph`, this bounds a whole step rather than one numbered item. The manager
+    resume lives in item 3 of two different steps, so an assertion over the step survives a
+    renumbering that an item-anchored one would not.
+    """
+    at = text.find(heading)
+    if at < 0:
+        return None
+    rest = text[at + len(heading):]
+    nxt = re.search(r"\n## ", rest)
     return rest[: nxt.start()] if nxt else rest
 
 
@@ -152,6 +173,28 @@ def check_open(path: Path) -> list:
             f"{OPEN}'s selector paragraph does not require {CWD!r} on the headless arm "
             "— a resume without one must refuse rather than guess a tree"
         )
+
+    # The manager resume sites. The doc states the refusal; these are where a lapsed manager
+    # is actually resumed, so a silent site here is the rule stated and never applied.
+    for heading in MANAGER_SITES:
+        step = section(text, heading)
+        if step is None:
+            failures.append(
+                f"{OPEN} carries no {heading!r} section — the manager resume site is gone "
+                "or renamed, so its refusal cannot be checked"
+            )
+            continue
+        if REFUSAL not in step:
+            failures.append(
+                f"{OPEN}'s {heading} never refuses an explicit `mode: headless` manager "
+                f"page — it resumes the id instead of printing {REFUSAL!r}, which is the "
+                "silent override the operator ruling rejects"
+            )
+        if HOME not in step:
+            failures.append(
+                f"{OPEN}'s {heading} does not point at {HOME} — the refusal must cite the "
+                "rule's single home rather than leave a reader to infer it"
+            )
 
     return failures
 
