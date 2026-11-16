@@ -994,5 +994,192 @@ class SubjectLivenessPrecedence(unittest.TestCase):
         self.assertIsNone(row["session_id"])
 
 
+class ProbeTimeoutTest(unittest.TestCase):
+    """A helper subprocess that never answers must cost one row's field, not the tick.
+
+    Measured 2026-11-16: an unbounded `pane_for` helper held the predicate in `poll()`
+    for 11m49s until the daemon's 25-minute bound SIGKILLed it, and the tick opened
+    nothing. Each probe is now bounded by `PROBE_TIMEOUT`.
+    """
+
+    SID = "616a52dd-833b-475b-889f-ee1580c73c37"
+
+    def _hang(self, *args, **kwargs):
+        # A real hang would block the test; asserting the timeout is PASSED and then
+        # raising what `subprocess.run` raises when it expires covers both halves.
+        self.assertEqual(kwargs.get("timeout"), fr.PROBE_TIMEOUT)
+        raise fr.subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    def test_a_hung_liveness_probe_reads_unknown(self):
+        with unittest.mock.patch.object(fr.subprocess, "run", side_effect=self._hang):
+            self.assertEqual(fr.liveness_of(self.SID), "UNKNOWN")
+
+    def test_a_hung_pane_probe_reads_no_pane_and_is_cached(self):
+        ctx = {"liveness_cache": {}}
+        with unittest.mock.patch.object(fr.subprocess, "run",
+                                        side_effect=self._hang) as run:
+            self.assertIsNone(fr.pane_of(ctx, self.SID))
+            # Cached: a second row sharing the session must not pay the timeout again.
+            self.assertIsNone(fr.pane_of(ctx, self.SID))
+            self.assertEqual(run.call_count, 1)
+
+    def _live_row(self, no_pane):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "Live Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent\n"
+                   "claude_session_id: %s" % self.SID))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        ctx = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+               "no_liveness": False, "no_pane": no_pane, "managers": set(),
+               "topic_map": {}, "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}, "fleet_sid": None}
+        with unittest.mock.patch.object(fr, "liveness_of", return_value="LIVE"), \
+             unittest.mock.patch.object(fr, "pane_of", return_value="42") as pane_of:
+            row, reason = fr.row_for("v", cfg, "task",
+                                     os.path.join(tasks, "Live Task.md"), ctx)
+        self.assertIsNone(reason)
+        return row, pane_of
+
+    def test_no_pane_never_probes_a_live_rows_pane(self):
+        # The daemon passes --no-pane: its tick skips every non-ABSENT row before it
+        # reads `jump`, so the probe is pure cost — and it is the helper that hung.
+        row, pane_of = self._live_row(no_pane=True)
+        pane_of.assert_not_called()
+        self.assertIsNone(row["pane"])
+        self.assertEqual(row["liveness"], "LIVE")
+        self.assertEqual(row["branch"], "skip")
+
+    def test_without_no_pane_a_live_row_still_resolves_its_pane(self):
+        # /supervisor:open still needs the pane to jump; the default must not change.
+        row, pane_of = self._live_row(no_pane=False)
+        pane_of.assert_called_once()
+        self.assertEqual(row["pane"], "42")
+        self.assertEqual(row["branch"], "jump")
+
+    def test_the_bound_is_far_below_the_daemon_read_bound(self):
+        # The daemon kills a read at 25 minutes. A per-probe bound near that would let
+        # a handful of slow probes reproduce the very kill this guard exists to stop.
+        self.assertLessEqual(fr.PROBE_TIMEOUT, 60)
+
+
+class PageCacheTest(unittest.TestCase):
+    """The mtime page cache: a warm run parses only what moved, and never serves a
+    stale or ghost row."""
+
+    FLAGGED = ("---\nflag: true\nflag_set_by: operator\nstatus: in_progress\n"
+               "role: agent\nmode: headless\n---\nbody\n")
+    UNFLAGGED = "---\nstatus: in_progress\n---\nbody\n"
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.tasks = os.path.join(self.root, "vault", "25 Tasks")
+        os.makedirs(self.tasks)
+        self.cache = os.path.join(self.root, "cache.json")
+        for i in range(20):
+            self.write("Quiet %02d" % i, self.UNFLAGGED)
+        self.write("Flagged", self.FLAGGED)
+        cfg = {"v": {"path": os.path.join(self.root, "vault"),
+                     "tasks_dir": "25 Tasks", "goals_dir": "24 Goals",
+                     "topics_dir": "23 Topics", "worker_launcher": "cc-x"}}
+        patcher = unittest.mock.patch.object(fr, "vault_configs", return_value=cfg)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, name, text):
+        path = os.path.join(self.tasks, name + ".md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def run_once(self, **extra):
+        args = fr.argparse.Namespace(json=True, vault=None,
+                                     role_map=os.path.join(self.root, "none"),
+                                     template_root=None, no_liveness=True, no_pane=False,
+                                     cache=self.cache, no_cache=False)
+        for key, value in extra.items():
+            setattr(args, key, value)
+        rows, skipped, _, _, stats = fr.collect(args)
+        return sorted(r["name"] for r in rows), skipped, stats
+
+    def entries(self):
+        return fr.load_cache(self.cache)
+
+    def test_warm_run_parses_only_uncached_pages(self):
+        cold_rows, cold_skipped, cold = self.run_once()
+        warm_rows, warm_skipped, warm = self.run_once()
+        self.assertEqual(cold["parsed"], 21)
+        self.assertEqual(cold["hits"], 0)
+        # The 20 unflagged pages are served from the cache; the eligible one re-reads.
+        self.assertEqual(warm["hits"], 20)
+        self.assertEqual(warm["parsed"], 1)
+        self.assertEqual((cold_rows, cold_skipped), (warm_rows, warm_skipped))
+        self.assertEqual(warm_rows, ["Flagged"])
+
+    def test_changed_page_is_picked_up_next_run(self):
+        self.run_once()
+        path = self.write("Quiet 03", self.FLAGGED)
+        # Force a distinct mtime even on a coarse-clock filesystem.
+        st = os.stat(path)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        rows, _, stats = self.run_once()
+        self.assertEqual(rows, ["Flagged", "Quiet 03"])
+        self.assertEqual(stats["hits"], 19)
+
+    def test_unflagging_an_eligible_page_drops_its_row(self):
+        self.run_once()
+        path = self.write("Flagged", self.UNFLAGGED)
+        st = os.stat(path)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        rows, skipped, _ = self.run_once()
+        self.assertEqual(rows, [])
+        self.assertEqual(skipped.get("not flagged"), 21)
+
+    def test_deleted_page_leaves_no_row_and_no_cache_key(self):
+        self.run_once()
+        gone = os.path.join(self.tasks, "Quiet 07.md")
+        self.assertIn(gone, self.entries())
+        os.unlink(gone)
+        flagged = os.path.join(self.tasks, "Flagged.md")
+        os.rename(flagged, os.path.join(self.tasks, "Renamed.md"))
+        rows, _, stats = self.run_once()
+        self.assertEqual(rows, ["Renamed"])
+        self.assertNotIn(gone, self.entries())
+        self.assertEqual(stats["pruned"], 1)
+        self.assertEqual(stats["entries"], 19)
+
+    def test_deferred_page_is_never_cached(self):
+        """A defer that comes due must surface without the file changing."""
+        self.write("Later", self.FLAGGED.replace(
+            "status: in_progress\n", "status: in_progress\ndefer_date: \"2999-01-01\"\n"))
+        self.run_once()
+        self.assertNotIn(os.path.join(self.tasks, "Later.md"), self.entries())
+
+    def test_no_cache_neither_reads_nor_writes(self):
+        _, _, stats = self.run_once(no_cache=True)
+        self.assertIsNone(stats)
+        self.assertFalse(os.path.exists(self.cache))
+
+    def test_corrupt_or_foreign_cache_is_a_cold_start(self):
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        _, _, stats = self.run_once()
+        self.assertEqual(stats["hits"], 0)
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            json.dump({"version": 0, "entries": {}}, handle)
+        _, _, stats = self.run_once()
+        self.assertEqual(stats["hits"], 0)
+
+    def test_vault_narrowed_run_keeps_other_vaults_entries(self):
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            json.dump({"version": fr.CACHE_VERSION, "entries": {
+                "/elsewhere/x.md": {"m": 1, "s": 1, "k": "task", "v": "other",
+                                    "r": "not flagged"}}}, handle)
+        self.run_once(vault="v")
+        self.assertIn("/elsewhere/x.md", self.entries())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,7 +30,16 @@ field → authority map lives in the task file
 
 Usage:
   flagged-rows.py [--json] [--vault <name>] [--role-map <path>]
-                  [--template-root <dir>] [--no-liveness]
+                  [--template-root <dir>] [--no-liveness] [--no-pane]
+                  [--cache <file>] [--no-cache]
+
+The page cache (`--cache`, default `~/.claude/state/flagged-rows-cache.json`) stores,
+per page, its `(mtime_ns, size)` and the skip reason when that reason is a pure
+function of the page's bytes (`not flagged`, `status is …`). A page whose stat key is
+unchanged is not read; every other page — eligible, deferred, unreadable, or changed —
+is. Only pages visited this run are written back, so a deleted or renamed page leaves
+no key. `--json` reports the run's `cache` counters (`hits`, `parsed`, `entries`,
+`pruned`).
 
 `--no-liveness` skips the heartbeat probe, the pane lookup and every owner probe,
 reporting `liveness: none` and `owner_live: null`. Rows then fall through to
@@ -394,12 +403,33 @@ def live_session_names(sessions):
     return names
 
 
+#: How long ONE helper subprocess may take before its answer is abandoned.
+#:
+#: ⚠️ **Bounded, and it was not.** `subprocess.run` with no `timeout` waits
+#: forever, so a single slow helper held the whole predicate. Measured
+#: 2026-11-16: a `flagged-rows.py` child of the daemon sat 11m49s in `poll()`
+#: waiting on one `pane_for` helper, the daemon's 25-minute bound SIGKILLed it,
+#: and the tick opened nothing — 28 of 64 ticks died that way that day.
+#:
+#: A helper that cannot answer inside this window is treated exactly as the
+#: reader already treats a store it could not read: `UNKNOWN` for liveness, no
+#: pane for `pane_of`. Never a hang, because a hang costs the whole tick while a
+#: missing answer costs one row's field.
+PROBE_TIMEOUT = 15
+
+
 def liveness_of(sid):
     """`session-liveness.py --check` — the heartbeat endpoint, never the registry."""
     if not sid:
         return "none"
-    out = subprocess.run([sys.executable, os.path.join(HERE, "session-liveness.py"),
-                          "--check", sid], capture_output=True, text=True, check=False)
+    try:
+        out = subprocess.run(
+            [sys.executable, os.path.join(HERE, "session-liveness.py"), "--check", sid],
+            capture_output=True, text=True, check=False, timeout=PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("flagged-rows: liveness probe for %s exceeded %ds — UNKNOWN"
+              % (sid, PROBE_TIMEOUT), file=sys.stderr)
+        return "UNKNOWN"
     return LIVENESS_EXIT.get(out.returncode, "UNKNOWN")
 
 
@@ -431,9 +461,19 @@ def pane_of(ctx, sid):
               "s = importlib.util.spec_from_file_location('wnm', sys.argv[1]);"
               "m = importlib.util.module_from_spec(s); s.loader.exec_module(m);"
               "sys.exit(m.pane_for(sys.argv[2]))")
-    out = subprocess.run([sys.executable, "-c", script,
-                          os.path.join(HERE, "who-needs-me.py"), sid],
-                         capture_output=True, text=True, check=False)
+    # ⚠️ Bounded, for the reason PROBE_TIMEOUT records: this is the helper that
+    # actually hung, and an absent pane is a field on one row rather than a tick
+    # that did nothing.
+    try:
+        out = subprocess.run([sys.executable, "-c", script,
+                              os.path.join(HERE, "who-needs-me.py"), sid],
+                             capture_output=True, text=True, check=False,
+                             timeout=PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("flagged-rows: pane probe for %s exceeded %ds — no pane"
+              % (sid, PROBE_TIMEOUT), file=sys.stderr)
+        ctx["liveness_cache"][key] = None
+        return None
     pane = ""
     if out.returncode == 0 and out.stdout.strip():
         pane = out.stdout.strip().splitlines()[0].strip()
@@ -790,10 +830,94 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
 # ---------------------------------------------------------------- rows
 
 
+# ---------------------------------------------------------------- page cache
+
+
+#: The default cache file. Outside every repo and vault on purpose: a vault autocommits.
+CACHE_PATH = os.path.expanduser("~/.claude/state/flagged-rows-cache.json")
+#: Bump when the cached verdict's meaning changes, so an old file is discarded whole.
+CACHE_VERSION = 1
+
+
+def cacheable(reason):
+    """True when a skip reason is a pure function of the page's own bytes.
+
+    ⚠️ **Only these two are.** `deferred` depends on the clock (a defer that comes due
+    must surface without the file changing), `unreadable page` can be a transient
+    OSError, and an eligible row depends on liveness — so all three re-read every run.
+    `not flagged` alone is ~46k of the ~46.3k pages a run walks (2026-11-16).
+    """
+    return reason == "not flagged" or reason.startswith("status is ")
+
+
+def load_cache(path):
+    """The cache's entries, `{}` when absent, unreadable or of another version."""
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
+        return {}
+    entries = payload.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+
+def save_cache(path, entries):
+    """Write atomically; a failed write is reported and never fails the run."""
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump({"version": CACHE_VERSION, "entries": entries}, handle)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print("flagged-rows: cache not written (%s)" % exc, file=sys.stderr)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def cached_skip(ctx, vault, kind, path):
+    """(reason or None, stat key or None). A hit returns the stored reason unparsed.
+
+    The key is `(mtime_ns, size)` read BEFORE the page is: a write landing between the
+    stat and the read stores the new verdict under the old key, which the next run sees
+    as changed and re-parses — never the reverse.
+    """
+    cache = ctx.get("cache")
+    if cache is None:
+        return None, None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None
+    key = [st.st_mtime_ns, st.st_size]
+    hit = cache["old"].get(path)
+    if (isinstance(hit, dict) and hit.get("k") == kind and hit.get("m") == key[0]
+            and hit.get("s") == key[1] and isinstance(hit.get("r"), str)):
+        cache["new"][path] = hit
+        cache["stats"]["hits"] += 1
+        return hit["r"], key
+    return None, key
+
+
 def row_for(vault, cfg, kind, path, ctx):
+    hit, key = cached_skip(ctx, vault, kind, path)
+    if hit is not None:
+        return None, hit
     text = read_text(path)
     block = open_queue.frontmatter(text) or None
     reason = eligible(block, kind, ctx["today"])
+    cache = ctx.get("cache")
+    if cache is not None:
+        cache["stats"]["parsed"] += 1
+        if key is not None and reason is not None and cacheable(reason):
+            cache["new"][path] = {"m": key[0], "s": key[1], "k": kind,
+                                  "v": vault, "r": reason}
     if reason is not None:
         return None, reason
 
@@ -824,7 +948,13 @@ def row_for(vault, cfg, kind, path, ctx):
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
     # 2000-line module per call — probing ABSENT rows too tripled the run time for
     # an answer that is `null` by construction.
-    pane = pane_of(ctx, sid) if live == "LIVE" else None
+    # `--no-pane`: the daemon's tick never reads a pane — it skips every non-ABSENT
+    # row before it looks at `jump` — so probing one per LIVE row spawned ~27
+    # interpreters per tick for a discarded field, and one of them hung 11m49s
+    # (2026-11-16). A LIVE row with no pane resolves to `skip`, which the tick
+    # treats exactly as `jump`.
+    pane = (pane_of(ctx, sid)
+            if live == "LIVE" and not ctx.get("no_pane") else None)
     window = ROLE_WINDOW.get(role, "Agents")
     entry = (ctx["role_map"] or {}).get(window) or {}
     owner = resolve_owner(page_kind, name, block, ctx, vault)
@@ -880,6 +1010,7 @@ def collect(args):
         "role_map": role_map(args.role_map),
         "template_root": args.template_root,
         "no_liveness": args.no_liveness,
+        "no_pane": args.no_pane,
         #: `None` means "the registry could not be read" — a different fact from an
         #: empty set, and the difference is what keeps `open-manager` from firing.
         "managers": (None if registry_failed
@@ -893,6 +1024,11 @@ def collect(args):
         #: through. Filled as the directories are walked, before any row is built.
         "subjects": {},
         "liveness_cache": {},
+        #: The mtime page cache — `None` under `--no-cache`. `new` holds only pages
+        #: visited THIS run, so a deleted or renamed page leaves no key behind.
+        "cache": (None if args.no_cache else
+                  {"old": load_cache(args.cache), "new": {},
+                   "stats": {"hits": 0, "parsed": 0}}),
     }
     rows, skipped, fallbacks = [], {}, []
     if registry_failed:
@@ -936,7 +1072,19 @@ def collect(args):
                     continue
                 rows.append(row)
     rows.sort(key=lambda r: (KIND_ORDER.get(r["kind"], 9), r["vault"], r["name"]))
-    return rows, skipped, fallbacks, ctx["normalised"]
+    cache = ctx["cache"]
+    if cache is not None:
+        entries = dict(cache["new"])
+        if args.vault:
+            # A narrowed run visited one vault only; every other vault's entries are
+            # still valid and must survive it, or a `--vault` call empties the cache.
+            for path, entry in cache["old"].items():
+                if isinstance(entry, dict) and entry.get("v") != args.vault:
+                    entries.setdefault(path, entry)
+        save_cache(args.cache, entries)
+        cache["stats"]["entries"] = len(entries)
+        cache["stats"]["pruned"] = len(set(cache["old"]) - set(entries))
+    return rows, skipped, fallbacks, ctx["normalised"], (cache or {}).get("stats")
 
 
 def main(argv=None):
@@ -948,12 +1096,24 @@ def main(argv=None):
                         help="the bborbe/nuke recurring-schedules/prod directory")
     parser.add_argument("--no-liveness", action="store_true",
                         help="skip the heartbeat probe and pane lookup (offline/fixtures)")
+    parser.add_argument("--no-pane", action="store_true",
+                        help="probe liveness but skip the pane lookup (the daemon's tick, "
+                             "which never reads a pane)")
+    parser.add_argument("--cache", default=CACHE_PATH,
+                        help="mtime page cache file (default: %(default)s)")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="parse every page; neither read nor write the page cache")
     args = parser.parse_args(argv)
 
-    rows, skipped, fallbacks, normalised = collect(args)
+    rows, skipped, fallbacks, normalised, cache_stats = collect(args)
     if args.json:
-        json.dump({"rows": rows, "skipped": skipped, "fallbacks": fallbacks,
-                   "normalised": normalised}, sys.stdout, indent=2)
+        payload = {"rows": rows, "skipped": skipped, "fallbacks": fallbacks,
+                   "normalised": normalised}
+        if cache_stats is not None:
+            # `parsed` is the population the run actually read; a quiet warm run reads
+            # only the clock- and liveness-dependent pages, never the ~46k unflagged ones.
+            payload["cache"] = cache_stats
+        json.dump(payload, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 0
     for row in rows:
@@ -967,6 +1127,9 @@ def main(argv=None):
         print("normalised: %s/%s %s %r -> %s"
               % (item["vault"], item["name"], item["field"], item["raw"], item["used"]))
     print("%d rows, %d skipped" % (len(rows), sum(skipped.values())))
+    if cache_stats is not None:
+        print("cache: %(hits)d hits, %(parsed)d parsed, %(entries)d entries, "
+              "%(pruned)d pruned" % cache_stats)
     return 0
 
 

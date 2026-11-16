@@ -488,10 +488,21 @@ class ResolvePane(_Registries):
     def test_persistently_unreadable_pane_list_names_the_read(self):
         self.panes = lambda: None
         self.assertEqual((None, "wezterm-unreadable"), self.mod.resolve_pane(self.A))
-        self.assertEqual(2, self.calls)
+        self.assertEqual(self.mod.PANE_ATTEMPTS, self.calls)
+
+    def test_a_flaky_pane_list_resolving_on_the_third_read_wakes(self):
+        """The 2026-11-16 shape: `wezterm cli list` fails per call, flakily, so wakes
+        minutes either side of a `NO-PANE` succeeded. One retry was not enough."""
+        self._reg("100", self.A, 100, "ttys012")
+        answers = [None, None, {"6": {"tty_name": "/dev/ttys012"}}]
+        self.panes = lambda: answers.pop(0)
+        self.assertEqual(("6", None), self.mod.resolve_pane(self.A))
+        self.assertEqual(3, self.calls)
 
     def test_a_standing_miss_is_not_retried(self):
-        self._reg("100", self.A, 100, "ttys099")
+        # `no-tty` is structural: a headless session has no terminal by construction, so a
+        # second read cannot clear it and the tick must not pay 2 s to learn that.
+        self._reg("100", self.A, 100, "")
         self.mod.resolve_pane(self.A)
         self.assertEqual(1, self.calls)
 

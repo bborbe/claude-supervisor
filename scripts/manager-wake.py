@@ -310,6 +310,13 @@ def live_word(live):
 # standing fact about the session and is reported on the first read.
 TRANSIENT_MISSES = ("wezterm-unreadable", "tty-unreadable")
 PANE_RETRY_DELAY_S = 2.0
+#: Attempts for a TRANSIENT_MISSES reason, not the single retry this used to allow.
+#: Measured 2026-11-16: over 24 h the gate logged 20 `NO-PANE` results, every one
+#: `reason=wezterm-unreadable`, while wakes minutes either side of each failure succeeded —
+#: so `wezterm cli list` fails per call, flakily, and one 2 s retry was not enough. Four
+#: attempts span ~6 s inside a tick that already takes seconds, which is the right budget
+#: for a wake that would otherwise be silently lost.
+PANE_ATTEMPTS = 4
 
 
 def _registry_records(session_id, registry_dir=None):
@@ -375,11 +382,13 @@ def resolve_pane(session_id):
     Measured 2026-11-14 17:26–17:32Z: four live managers, each heartbeating in its own
     pane throughout, all read `NO-PANE` in one six-minute window and resolved again
     afterwards. The failing read was never recorded, so the reason is now carried on
-    the result line, and a read that can fail transiently gets one retry before the
-    tick gives the wake up.
+    the result line, and a read that can fail transiently is retried `PANE_ATTEMPTS`
+    times before the tick gives the wake up.
     """
     pane, reason = find_pane(session_id)
-    if pane is None and reason in TRANSIENT_MISSES:
+    for _ in range(PANE_ATTEMPTS - 1):
+        if pane is not None or reason not in TRANSIENT_MISSES:
+            break
         time.sleep(PANE_RETRY_DELAY_S)
         pane, reason = find_pane(session_id)
     return pane, reason
