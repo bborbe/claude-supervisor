@@ -8,17 +8,17 @@ channel at all to release the gate the worker is parked on. Measured 2026-11-15/
 three sessions (`694afb06`, `914849f9`, `33646d27`), each confirmed alive by its own
 transcript while `SendMessage` refused it.
 
-⚠️ **This reads two instruments and deliberately not a third.** `session-liveness.py
---check` answers liveness from the heartbeat store; `GET /api/1.0/sessions` answers which
-controls the wrapper offers for that id. `~/.claude/sessions/*.json` is never read here —
-reading it would reintroduce the exact dependency this script removes, and the whole point
-is a channel that works when that file is absent.
+⚠️ **The registry is never read to GRANT a verdict.** Liveness comes from
+`session-liveness.py --check` (heartbeat first); the message control comes from
+`GET /api/1.0/sessions`. That sibling may consult `~/.claude/sessions/*.json` on its own
+ABSENT-licensing path, so the accurate claim is: nothing here reads the registry to decide
+a session is live, and a session missing from it is still deliverable.
 
 ⚠️ **A delivery is reported only when the wrapper accepted it, and acceptance is not
 effect.** `POST …/message` answers 202 `{"status":"sent"}`, which means the turn was
 queued, not that the worker acted on it. The caller reads the transcript for the effect.
-This script never claims more than the accept, because "the send returned success" is
-precisely the claim that was wrong in the pane transport before it was measured.
+A transport failure is reported as **delivery unknown**, never as "nothing delivered" —
+a request that was written and then timed out may well have landed.
 
 ⚠️ **`--answer` and `--text` are mutually exclusive, and that split is the park.** A worker
 parked on a permission gate or an `AskUserQuestion` is released through the answer route
@@ -33,9 +33,9 @@ Usage:
     deliver-message.py --session-id <uuid> --text "…" --dry-run
 
 Exit codes:
-    0  delivered — the wrapper accepted it (see the caveat above)
-    1  refused — the session is not live, or offers no usable control; the reason is printed
-    2  an instrument could not be read; nothing was sent
+    0  delivered — the wrapper accepted it, or `--dry-run` resolved the channel
+    1  refused — the session is not live, or the wrapper would not take it
+    2  an instrument could not be read, or a transport failed; delivery is unknown
 """
 import argparse
 import json
@@ -43,6 +43,7 @@ import os
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # The wrapper daemon's base, the same one every other supervisor script talks to.
@@ -54,10 +55,26 @@ WRAPPER_DEFAULT = "http://127.0.0.1:18090"
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIVENESS = os.path.join(HERE, "session-liveness.py")
 
-# The only statuses that mean the wrapper took it. 202 is the documented accept; 409 means
-# no open question (or one already answered) and 404 means the wrapper does not hold that
-# session — both are refusals to report, never a quiet success.
-ACCEPTED = {200, 202}
+# Every verdict `session-liveness.py --check` can print. AMBIGUOUS and MALFORMED are
+# refusals about the ID, not about the instrument, and reading only the first three turned
+# them into "instrument could not be read" — the wrong direction, since it sends the reader
+# to look at the heartbeat store instead of at the id they typed.
+VERDICTS = frozenset({"LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED"})
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect instead of following it.
+
+    `urlopen` follows a 3xx by default, so a proxy or a misrouted port could turn this
+    POST into a request to somewhere else and still report success. A redirect here means
+    the address is not what the caller thinks it is, which is a refusal.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _base_url():
@@ -65,12 +82,15 @@ def _base_url():
 
 
 def liveness(session_id):
-    """The liveness verdict as a single word: LIVE, ABSENT, UNKNOWN — or None on error.
+    """(verdict, sibling's own line) or (None, reason) when the instrument could not be read.
 
-    Delegated to `session-liveness.py` rather than reimplemented. That file owns the
-    definition of liveness (heartbeat first, registry second); a second copy here would
-    drift the moment either source changed, and two definitions of "live" is how a manager
-    ends up acting on one while the sweep reports the other.
+    Delegated to `session-liveness.py` rather than reimplemented: that file owns the
+    definition of liveness, and a second copy here would drift the moment either source
+    changed.
+
+    ⚠️ **The token and the exit code must agree.** The sibling's contract is exit 0 iff
+    LIVE. Scanning text alone would let a stray `LIVE` line in a diagnostic decide "may I
+    send", so a token is accepted only when the code corroborates it.
     """
     try:
         out = subprocess.run(
@@ -80,55 +100,66 @@ def liveness(session_id):
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"liveness check failed: {exc}", file=sys.stderr)
-        return None
-    # ⚠️ The reader writes `LIVE — …` to STDOUT but its non-LIVE verdicts (`ABSENT`,
-    # `UNKNOWN`) to STDERR, and exits non-zero for them. Reading stdout alone therefore
-    # turns a genuine ABSENT into "instrument unreadable" — a wrong verdict that looks
-    # like a broken instrument and sends the reader looking in the wrong place. Measured
-    # 2026-11-16 on the first run of this script. Both streams are read, and only a known
-    # verdict token is accepted, so a traceback on stderr still reports None.
-    known = {"LIVE", "ABSENT", "UNKNOWN"}
+        return None, f"liveness check failed: {exc}"
+
+    # ⚠️ The sibling writes `LIVE — …` to STDOUT but its non-LIVE verdicts to STDERR, and
+    # exits non-zero for them. Reading stdout alone turns a genuine ABSENT into "instrument
+    # unreadable" — measured 2026-11-16 on this script's first run. Both streams are read.
     for stream in (out.stdout or "", out.stderr or ""):
         for line in stream.splitlines():
             tokens = line.strip().split()
-            if tokens and tokens[0] in known:
-                return tokens[0]
-    return None
+            if tokens and tokens[0] in VERDICTS:
+                verdict = tokens[0]
+                agrees = (out.returncode == 0) == (verdict == "LIVE")
+                if not agrees:
+                    return None, (
+                        f"liveness verdict {verdict} disagrees with exit {out.returncode}; "
+                        f"refusing to act on either"
+                    )
+                return verdict, line.strip()
+    return None, "the liveness reader printed no recognisable verdict"
 
 
 def roster_row(session_id):
-    """The wrapper's own row for this session, or None when it does not hold it."""
+    """(row, None) for the wrapper's row, (None, None) when it holds none, (None, why) on
+    a read failure.
+
+    The three outcomes are distinct on purpose: a wrapper that cannot be read is an
+    instrument failure (exit 2), while a wrapper that answers and does not hold the session
+    is a refusal (exit 1). Collapsing them makes a dead wrapper look like a missing session.
+    """
     url = f"{_base_url()}/api/1.0/sessions"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             rows = json.load(resp)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        print(f"roster read failed: {exc}", file=sys.stderr)
-        return None
+        return None, f"roster read failed: {exc}"
+    if not isinstance(rows, list):
+        return None, f"roster answered {type(rows).__name__}, not a list of sessions"
     for row in rows:
-        if row.get("id") == session_id:
-            return row
-    return None
+        if isinstance(row, dict) and row.get("id") == session_id:
+            return row, None
+    return None, None
 
 
 def post(path, payload):
-    """POST one body and return (status, decoded-body-or-raw-text).
+    """POST one body and return (status, decoded-body-or-raw-text, transport-failed).
 
-    A non-2xx is returned rather than raised: the caller needs the status and the wrapper's
-    own message to report *why* nothing was delivered.
+    A non-2xx is returned rather than raised — the caller needs the status and the
+    wrapper's own message to report why nothing was delivered. A transport failure is
+    flagged separately because the request may already have been written.
     """
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         _base_url() + path, data=data, headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, _decode(resp.read())
+        with _OPENER.open(req, timeout=30) as resp:
+            return resp.status, _decode(resp.read()), False
     except urllib.error.HTTPError as exc:
-        return exc.code, _decode(exc.read())
+        return exc.code, _decode(exc.read()), False
     except (urllib.error.URLError, OSError) as exc:
-        return 0, str(exc)
+        return 0, str(exc), True
 
 
 def _decode(raw):
@@ -136,6 +167,21 @@ def _decode(raw):
         return json.loads(raw)
     except ValueError:
         return raw.decode(errors="replace") if isinstance(raw, bytes) else raw
+
+
+def _accepted(status, body, is_answer):
+    """Whether the wrapper took it — status and body, not status alone.
+
+    The message route documents 202 `{"status":"sent"}`. A bare 200 from something that is
+    not the wrapper would otherwise read as a delivery, which is the "success without
+    evidence" shape this file exists to avoid. The answer route's success status is not
+    documented, so a 2xx is accepted there but the body is still reported.
+    """
+    if is_answer:
+        return 200 <= status < 300
+    if status != 202:
+        return False
+    return isinstance(body, dict) and body.get("status") == "sent"
 
 
 def main():
@@ -153,37 +199,61 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.answer and not args.behavior:
+    # `is not None`, never truthiness: `--text ""` is falsy, and a truthiness test would
+    # fall through to the answer branch and POST a payload with `request_id: null`.
+    is_answer = args.answer is not None
+    if not is_answer and not args.text:
+        print("REFUSED: --text must not be empty", file=sys.stderr)
+        return 1
+    if is_answer and not args.answer:
+        print("REFUSED: --answer must not be empty", file=sys.stderr)
+        return 1
+    if is_answer and not args.behavior:
         print("REFUSED: --answer requires --behavior allow|deny", file=sys.stderr)
         return 1
+    if not is_answer and (args.behavior or args.message):
+        # Silently dropping these is how a caller believes a message was carried when it
+        # was not — the flags only mean anything on the answer route.
+        print("REFUSED: --behavior and --message only apply with --answer", file=sys.stderr)
+        return 1
 
-    verdict = liveness(args.session_id)
+    verdict, detail = liveness(args.session_id)
     if verdict is None:
-        print("REFUSED: the liveness instrument could not be read; nothing sent", file=sys.stderr)
+        print(f"REFUSED: {detail}; nothing sent", file=sys.stderr)
         return 2
     if verdict != "LIVE":
-        # ABSENT and UNKNOWN are different facts and both refuse here. UNKNOWN means the
-        # instruments disagree, which is a reason to look — not a reason to guess.
-        print(f"REFUSED: {args.session_id} reads {verdict}, not LIVE; nothing sent")
+        # ABSENT, UNKNOWN, AMBIGUOUS and MALFORMED are different facts and all refuse here.
+        # The sibling's own line is echoed so the caller gets its hint (a longer id, a
+        # malformed id) rather than a verdict with the reason stripped off.
+        print(f"REFUSED: {detail}", file=sys.stderr)
         return 1
 
-    row = roster_row(args.session_id)
+    row, why = roster_row(args.session_id)
+    if why is not None:
+        print(f"REFUSED: {why}; nothing sent", file=sys.stderr)
+        return 2
     if row is None:
-        print(f"REFUSED: the wrapper holds no row for {args.session_id}; nothing sent")
+        print(f"REFUSED: the wrapper holds no row for {args.session_id}; nothing sent",
+              file=sys.stderr)
         return 1
 
-    controls = row.get("controls") or []
-    if args.text and "message" not in controls:
+    controls = row.get("controls")
+    controls = controls if isinstance(controls, list) else []
+    if not is_answer and "message" not in controls:
         print(
             f"REFUSED: {args.session_id} is live but offers no message control "
-            f"(controls={controls}); nothing sent"
+            f"(controls={controls}); nothing sent",
+            file=sys.stderr,
         )
         return 1
 
-    if args.text:
-        path, payload = f"/api/1.0/sessions/{args.session_id}/message", {"text": args.text}
+    # The id is caller-supplied and goes into a URL path. Quoting it stops a `/`, `?` or
+    # `#` from changing which route is called.
+    quoted = urllib.parse.quote(args.session_id, safe="")
+    if not is_answer:
+        path, payload = f"/api/1.0/sessions/{quoted}/message", {"text": args.text}
     else:
-        path = f"/api/1.0/sessions/{args.session_id}/answer"
+        path = f"/api/1.0/sessions/{quoted}/answer"
         payload = {"request_id": args.answer, "behavior": args.behavior}
         if args.message:
             payload["message"] = args.message
@@ -194,8 +264,16 @@ def main():
                           "dry_run": True}))
         return 0
 
-    status, body = post(path, payload)
-    delivered = status in ACCEPTED
+    status, body, transport_failed = post(path, payload)
+    if transport_failed:
+        # The request may have been written before the failure. Saying "nothing delivered"
+        # here would assert an absence this side cannot observe.
+        print(json.dumps({"session_id": args.session_id, "path": path,
+                          "delivered": None, "delivery": "unknown", "error": body}))
+        print("REFUSED: no response from the wrapper; delivery unknown", file=sys.stderr)
+        return 2
+
+    delivered = _accepted(status, body, is_answer)
     print(json.dumps({"session_id": args.session_id, "liveness": verdict,
                       "controls": controls, "path": path, "http_status": status,
                       "delivered": delivered, "body": body}))
