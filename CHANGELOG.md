@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.323.1
 
 - test: **the `held-owner-live` hold's two consumer obligations are pinned, not asserted.** `scripts/check-open-owner-live.py` (wired into `precommit` as `check-open-owner-live`) pins what a prose command file cannot otherwise hold: the `⛔ HOLD — owner <kind> "<name>" has a live manager` render and that it names the owning subject, so the hold stays distinguishable from the pre-existing `blocked=True` hold; the `opened-recently.py --subject` spawn-ledger leg that catches a manager opened earlier in the same run; the footer split `held K (blocked · owner live)`; the `LIVE HERE` / `LIVE ELSEWHERE` distinctness clause; and producer/consumer agreement on `held-owner-live` between `scripts/flagged-rows.py` and the row schema. Each guard is proven to fire on its own one-line mutation of the real `commands/open.md` in `scripts/tests/test_check_open_owner_live.py` — a guard that cannot fail turns that file red, the defect a first revision of the sibling `check-open-hand-run.py` had. Change set: `scripts/check-open-owner-live.py` (new), `scripts/tests/test_check_open_owner_live.py` (new), `Makefile`, `CHANGELOG.md`.
 
