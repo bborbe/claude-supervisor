@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.327.0
 
 - feat: **`scripts/manager-quiet.py` never offers `sleep-until` to a subject whose page is wake-counted.** For some subjects the check's own remedy is the defect: a goal whose success criterion is a count of wakable ticks loses one for every hour slept, because `pane-wake-guard.py` returns `skip:sleeping` for a `SLEEPING` subject and nothing types into a parked manager — the sleep suppresses the very signal the criterion counts, and the only defence was a language model remembering to decline the offer every interval. A new frontmatter marker on the **subject page**, `quiet_check_exempt`, whose value is the reason, turns the date-gated branch into `armed`; it is reached through the tracked rows' `goals:` (`read_task` returns `goals` but no criterion — `status` / `phase` / `session(s)` / `progress_hash` / `met`, with `defer_date` and `blocked_by` derived later by `classify`), and an absent or unreadable page is not an exemption. A new `Exempt: quiet_check_exempt — <reason>` line names it, echoed from the marker's own value so the criterion is named by construction; it prints LAST, after any action line, so `commands/steps/round-quiet.md`'s "second line is the action line" stays true. It blocks `sleep-until` only — a subject that reaches `stood-down` has no row a wake could advance. Change set: `scripts/manager-quiet.py`, `scripts/tests/test_manager_quiet.py`, `commands/steps/round-quiet.md`, `CHANGELOG.md`.
 
