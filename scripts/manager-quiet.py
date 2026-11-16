@@ -44,8 +44,10 @@ and nothing types into a parked manager. The check therefore reads a marker from
 ⚠️ **The marker is `quiet_check_exempt`, and its value IS the reason.** It lives in the
 frontmatter of the subject page and is read through the **tracked rows' `goals:`** — never
 from the `--subject` argument alone, and never from the tracked set itself: `read_task`
-returns only `status` / `phase` / `defer_date` / `blocked_by`, so the criterion the marker
-protects has no producer on that side. Resolving through the rows is what keeps the
+returns `goals` but no criterion (`status` / `phase` / `session(s)` / `progress_hash` /
+`met`, with `defer_date` and `blocked_by` derived later by `classify`), so the criterion
+the marker protects has no producer on that side. Resolving through the rows is what keeps
+the
 exemption attached to the tree this manager actually drives — a subject with no tracked
 rows has nothing to exempt, and a row cross-listed to an unrelated goal does not lend that
 goal's marker. The value is echoed verbatim on an `Exempt:` line, so the line names the
@@ -95,8 +97,11 @@ disarm. `sleep-until` means the same threshold was reached but **every** quiet r
 quiet for a future `defer_date`, so the subject is waiting on a clock rather than
 finished: the caller arms a wakeup at the trigger instead of disarming, and a second line
 on stdout names that instant (`Sleep until <instant>`). When the subject page carries
-`quiet_check_exempt`, a line beginning `Exempt:` follows the verdict line, naming the key
-and the reason it holds — and the verdict is `armed`, never `sleep-until`. An unreadable
+`quiet_check_exempt`, a further line beginning `Exempt:` names the key and the reason it
+holds — printed LAST, after any action line, so the action line stays the second line this
+contract and `commands/steps/round-quiet.md` both name. On the date-gated shape the verdict
+is `armed`, never `sleep-until`; the exemption does not reach `stood-down`, which still
+prints its own action line. An unreadable
 subject exits 2 with a reason on stderr and **writes nothing** — a failed read must not
 advance a counter toward a stand-down.
 """
@@ -590,11 +595,6 @@ def main(argv: list) -> int:
         f"{len(result['quiet'])}\t{result['consecutive_quiet']}"
     )
     exempt = result.get("exempt") or {}
-    if exempt.get("reason"):
-        # Echoed verbatim from the marker's own value, so the line names the protected
-        # criterion by construction rather than by convention — and it comes from the SAME
-        # read that produced the verdict, like the sleep and stand-down lines below.
-        print(f"Exempt: {EXEMPT_KEY} — {exempt['reason']}")
     if result["verdict"] == "sleep-until":
         # The wake instant comes from the SAME read that produced the verdict — a caller
         # that recomputed it could arm the wakeup for a different date than the one the
@@ -605,6 +605,13 @@ def main(argv: list) -> int:
         # verdict come from one read of the tree — a step that recomputed the trigger
         # could name a different date than the one the stand-down was decided on.
         print(f"Stood down: zero runnable tasks; reopen on {result['trigger']}")
+    if exempt.get("reason"):
+        # LAST, never between the verdict and the action line: `commands/steps/round-quiet.md`
+        # calls the second line the action line and tells the round to print it verbatim, so
+        # an `Exempt:` line printed earlier would displace the stand-down report in the
+        # exempt+stood-down case. Echoed verbatim from the marker's own value, so the line
+        # names the protected criterion by construction rather than by convention.
+        print(f"Exempt: {EXEMPT_KEY} — {exempt['reason']}")
     if result["runnable"]:
         # The reason a subject is still armed is the row that kept it armed; a bare
         # count would send a reader looking for which task it was.

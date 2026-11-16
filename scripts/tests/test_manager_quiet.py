@@ -661,3 +661,61 @@ class TestWakeCountedExemption(Base):
         lines = out.getvalue().splitlines()
         self.assertTrue(lines[0].startswith("armed\t"))
         self.assertIn("Exempt: quiet_check_exempt — " + self.REASON, lines)
+
+    def test_the_exempt_line_never_displaces_the_stand_down_action_line(self):
+        """The action line stays the SECOND line even when the subject is exempt.
+
+        `commands/steps/round-quiet.md` calls the second line the action line and tells
+        the round to print it verbatim, so an `Exempt:` line printed earlier would make a
+        manager report the exemption instead of the trigger.
+        """
+        self.task("Waiting", status="hold")
+        self.write("24 Goals/AGoal.md", self.EXEMPT_GOAL)
+        self.seed()
+        self.arm()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.main(self._argv())
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[1].startswith("Stood down: zero runnable tasks"))
+        self.assertEqual(lines[2], "Exempt: quiet_check_exempt — " + self.REASON)
+
+    def test_several_marked_pages_pick_the_first_by_name_and_carry_all(self):
+        self.write("24 Goals/AGoal.md", self.EXEMPT_GOAL)
+        self.write("24 Goals/BGoal.md",
+                   '---\npage_type: goal\nstatus: in_progress\n'
+                   'quiet_check_exempt: "second reason"\n---\n')
+        ex = self.m.exemption(
+            self.vault, ["AGoal", "BGoal"],
+            [{"goals": ["BGoal"]}, {"goals": ["AGoal"]}],
+        )
+        self.assertEqual(ex["pages"], ["AGoal", "BGoal"])
+        self.assertEqual(ex["reason"], self.REASON)
+
+    def test_an_unreadable_page_is_not_an_exemption(self):
+        """An OSError on a page that exists reads as no marker, never as a granted one."""
+        os.remove(os.path.join(self.vault, "24 Goals", "AGoal.md"))
+        os.makedirs(os.path.join(self.vault, "24 Goals", "AGoal.md"))
+        self.assertEqual(
+            self.m.exemption(self.vault, ["AGoal"], [{"goals": ["AGoal"]}])["reason"],
+            "",
+        )
+
+    def test_a_cross_listed_row_does_not_lend_another_goals_marker(self):
+        self.write("24 Goals/OtherGoal.md", self.EXEMPT_GOAL)
+        # Admitted because its NAME matches the member, but its only goal is unrelated.
+        self.assertEqual(
+            self.m.exemption(
+                self.vault, ["AGoal"], [{"goals": ["OtherGoal"]}]
+            )["reason"],
+            "",
+        )
+
+    def test_a_marker_on_a_topic_member_goal_page_is_honoured(self):
+        self.write("23 Topics/TGoal.md",
+                   '---\npage_type: topic\n---\n\n## Goals\n\n- [[MGoal]]\n')
+        self.write("24 Goals/MGoal.md", self.EXEMPT_GOAL)
+        self.assertEqual(
+            self.m.exemption(self.vault, ["MGoal"], [{"goals": ["MGoal"]}])["reason"],
+            self.REASON,
+        )
