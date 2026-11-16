@@ -994,5 +994,75 @@ class SubjectLivenessPrecedence(unittest.TestCase):
         self.assertIsNone(row["session_id"])
 
 
+class ProbeTimeoutTest(unittest.TestCase):
+    """A helper subprocess that never answers must cost one row's field, not the tick.
+
+    Measured 2026-11-16: an unbounded `pane_for` helper held the predicate in `poll()`
+    for 11m49s until the daemon's 25-minute bound SIGKILLed it, and the tick opened
+    nothing. Each probe is now bounded by `PROBE_TIMEOUT`.
+    """
+
+    SID = "616a52dd-833b-475b-889f-ee1580c73c37"
+
+    def _hang(self, *args, **kwargs):
+        # A real hang would block the test; asserting the timeout is PASSED and then
+        # raising what `subprocess.run` raises when it expires covers both halves.
+        self.assertEqual(kwargs.get("timeout"), fr.PROBE_TIMEOUT)
+        raise fr.subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    def test_a_hung_liveness_probe_reads_unknown(self):
+        with unittest.mock.patch.object(fr.subprocess, "run", side_effect=self._hang):
+            self.assertEqual(fr.liveness_of(self.SID), "UNKNOWN")
+
+    def test_a_hung_pane_probe_reads_no_pane_and_is_cached(self):
+        ctx = {"liveness_cache": {}}
+        with unittest.mock.patch.object(fr.subprocess, "run",
+                                        side_effect=self._hang) as run:
+            self.assertIsNone(fr.pane_of(ctx, self.SID))
+            # Cached: a second row sharing the session must not pay the timeout again.
+            self.assertIsNone(fr.pane_of(ctx, self.SID))
+            self.assertEqual(run.call_count, 1)
+
+    def _live_row(self, no_pane):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "Live Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent\n"
+                   "claude_session_id: %s" % self.SID))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        ctx = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+               "no_liveness": False, "no_pane": no_pane, "managers": set(),
+               "topic_map": {}, "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}, "fleet_sid": None}
+        with unittest.mock.patch.object(fr, "liveness_of", return_value="LIVE"), \
+             unittest.mock.patch.object(fr, "pane_of", return_value="42") as pane_of:
+            row, reason = fr.row_for("v", cfg, "task",
+                                     os.path.join(tasks, "Live Task.md"), ctx)
+        self.assertIsNone(reason)
+        return row, pane_of
+
+    def test_no_pane_never_probes_a_live_rows_pane(self):
+        # The daemon passes --no-pane: its tick skips every non-ABSENT row before it
+        # reads `jump`, so the probe is pure cost — and it is the helper that hung.
+        row, pane_of = self._live_row(no_pane=True)
+        pane_of.assert_not_called()
+        self.assertIsNone(row["pane"])
+        self.assertEqual(row["liveness"], "LIVE")
+        self.assertEqual(row["branch"], "skip")
+
+    def test_without_no_pane_a_live_row_still_resolves_its_pane(self):
+        # /supervisor:open still needs the pane to jump; the default must not change.
+        row, pane_of = self._live_row(no_pane=False)
+        pane_of.assert_called_once()
+        self.assertEqual(row["pane"], "42")
+        self.assertEqual(row["branch"], "jump")
+
+    def test_the_bound_is_far_below_the_daemon_read_bound(self):
+        # The daemon kills a read at 25 minutes. A per-probe bound near that would let
+        # a handful of slow probes reproduce the very kill this guard exists to stop.
+        self.assertLessEqual(fr.PROBE_TIMEOUT, 60)
+
+
 if __name__ == "__main__":
     unittest.main()
