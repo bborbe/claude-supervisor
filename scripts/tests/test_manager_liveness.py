@@ -416,7 +416,7 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 300, age=3 * 1020)  # way past one observed period
         rc, out = self.check()
         self.assertEqual(rc, 10)
-        self.assertRegex(out, r"observed=10\d\ds")
+        self.assertRegex(out, r"period=10\d\ds")
 
     def test_one_cadence_plus_slack_is_still_ok(self):
         # The limit is ONE cadence plus slack, not two (2026-10-20). A manager that
@@ -448,7 +448,7 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 900, age=1000)
         state, detail = self.m.classify("goal--manager-layer", time.time())
         self.assertEqual(state, "OK")
-        self.assertRegex(detail, r"observed=225\d+s")
+        self.assertRegex(detail, r"period=225\d+s")
 
     def test_rearm_after_a_stand_down_resets_the_history(self):
         # The outage gap must never count as cadence. It cannot be filtered at read
@@ -1477,7 +1477,7 @@ class StateResolution(unittest.TestCase):
         os.utime(self.m.path(s, "cadence"), (now - 1300, now - 1300))
         state, detail = self.m.classify(s, now)
         self.assertEqual("OK", state, detail)
-        self.assertRegex(detail, r"observed=12\d\ds")
+        self.assertRegex(detail, r"period=12\d\ds")
 
 
 class StoodDownPast(unittest.TestCase):
@@ -1967,20 +1967,20 @@ class GoalTierBound(unittest.TestCase):
         s = self.record("goal", [30105] * 11, 900, 5248)
         state, detail = self.m.classify(s, time.time())
         self.assertNotEqual("LAPSED", state, detail)
-        self.assertIn("goal-tier bounded 2x observed", detail)
-        self.assertRegex(detail, r"observed=301\d\ds")
+        self.assertIn("goal-tier observed", detail)
+        self.assertRegex(detail, r"period=301\d\ds")
 
     def test_the_limit_is_one_observed_period_and_the_bound_two(self):
         s = self.record("goal", [30105] * 11, 900, 5248)
         _, detail = self.m.classify(s, time.time())
         m = re.search(
-            r"limit=(\d+)s period=(\d+)s\(goal-tier bounded 2x observed\) observed=(\d+)s",
+            r"limit=(\d+)s period=(\d+)s\(goal-tier observed\) bound=(\d+)s\(2x observed\)",
             detail,
         )
         self.assertIsNotNone(m, detail)
-        limit, bounded, observed = (int(g) for g in m.groups())
-        self.assertEqual(observed + self.m.SLACK, limit)  # one observed period
-        self.assertEqual(2 * observed, bounded)  # the cap, in the `period=` field
+        limit, period, bound = (int(g) for g in m.groups())
+        self.assertEqual(period + self.m.SLACK, limit)  # one observed period
+        self.assertEqual(2 * period, bound)  # the cap
 
     def test_a_working_goal_past_two_periods_still_lapses(self):
         # The 2026-11-15 guard survives the new bound: a moving transcript past the cap is

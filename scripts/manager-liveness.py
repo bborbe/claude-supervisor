@@ -1500,13 +1500,15 @@ def classify(s: str, now: float) -> tuple:
         # declared interval is not the cadence. The cap moves to `GOAL_BOUND_K x observed`
         # (see that constant) and the limit follows one observed period, which is when the
         # next gate wake is due.
-        # `period=` still carries the BOUNDED value — `answer-path-check.py` sizes its
-        # reach window from that field — with the unbounded observation in its own field.
+        # `period=` carries the OBSERVED value here, unlike the model-cadence branch: the
+        # goal tier's cadence IS the observed period, and `answer-path-check.py` multiplies
+        # it by two to size its reach window, which is then the same two-period detection
+        # limit the bound uses. The cap goes in its own field.
         bound = GOAL_BOUND_K * period
         limit = period + SLACK
         basis = (
-            f"period={int(bound)}s(goal-tier bounded {GOAL_BOUND_K}x observed)"
-            f" observed={int(period)}s"
+            f"period={int(period)}s(goal-tier observed)"
+            f" bound={int(bound)}s({GOAL_BOUND_K}x observed)"
         )
     else:
         bound = DECLARED_K * interval
