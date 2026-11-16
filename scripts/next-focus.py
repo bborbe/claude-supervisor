@@ -20,6 +20,31 @@ Ranking, first match winning
     4. the current quarterly plan
     5. the current yearly plan
 
+The reserved slot and the per-objective cap
+-------------------------------------------
+Tier 1 is concatenated ahead of every plan tier, so with a busy due-today set it
+consumes all `CAP` slots and no plan tier is ever reached. Two bounds fix that, both
+config constants beside `CAP`:
+
+**One reserved slot (`RESERVED_SLOTS`).** An objective that states a `stated_share` and
+sits below it is ranked by `stated_share - actual_share`; the largest positive deficit
+is "furthest below". The reserved slot is filled by a candidate from *that* objective's
+plan tier, and a due-today row can never take it — which is what lets the plan pull work
+while tier 1 is still open. Objectives with no `stated_share` are never eligible: there
+is no share to fall below, and inventing a denominator would rank them by nothing.
+
+**A per-objective cap (`CAP_PER_OBJECTIVE`).** An objective already carrying its cap of
+non-urgent proposals this round has no further item proposed — it waits, silently, at
+`next`. The withheld rows are NAMED in the output, because a withheld row and a row
+that was never found must not look the same.
+
+Both are read from the vault: `stated_share` off each `22 Objectives/` page, and the
+actual share from the vault's own `task-lineage.py --json` over the current week. ⚠️
+**TRUST BOUNDARY** — like `read_alerts`, this executes a script that lives inside the
+vault, which workers can write. Accepted for the same reason: the operator's own lineage
+script is the declared source. A vault without the script reads `unavailable`, never
+"no deficits".
+
 A goal or topic sorts into the tier of the plan level that names it. One named by no
 plan is never a *planned* candidate — it can only surface under `proposed`.
 
@@ -44,6 +69,7 @@ Usage
 Exit codes: 0 emitted · 2 refused (bad input, unreadable vault).
 """
 import argparse
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -76,6 +102,10 @@ flag_provenance = _load("flag_provenance", "flag_provenance.py")
 PLAN_DIR = "60 Periodic Notes"
 CAP = 5
 PROPOSAL_CAP = 3
+#: Slots held back for the objective furthest below its stated share (see the header).
+RESERVED_SLOTS = 1
+#: Max non-urgent proposals one objective may carry in a round.
+CAP_PER_OBJECTIVE = 2
 TERMINAL = {"completed", "aborted"}
 # Where `next-focus-answer.py` records a `leave it out` answer. Reading this directory is
 # a READ, so it costs nothing of this script's read-only contract — the consumer is its
@@ -160,6 +190,113 @@ def period_keys(day):
 
 def plan_path(vault, period, key):
     return Path(vault) / PLAN_DIR / period.capitalize() / f"{key}.md"
+
+
+def week_bounds(day):
+    """The Monday..Sunday ISO dates of the week containing `day`."""
+    start = day - datetime.timedelta(days=day.weekday())
+    return start.isoformat(), (start + datetime.timedelta(days=6)).isoformat()
+
+
+def parse_share(raw):
+    """`"35.0%"` -> 35.0; anything else -> None (never a silent 0.0)."""
+    if not raw:
+        return None
+    m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*$", str(raw))
+    return float(m.group(1)) if m else None
+
+
+def read_stated_shares(board):
+    """{objective name: stated percent} for pages carrying a parseable `stated_share`.
+
+    An objective with no `stated_share` is absent, not zero: it has no share to fall
+    below, so it can never be the "furthest below" and is never invented into the set.
+    """
+    out = {}
+    d = Path(board.dirs["objective"])
+    if not d.is_dir():
+        return out
+    for path in sorted(d.glob("*.md")):
+        text, err = read_text(path)
+        if err:
+            continue
+        val = parse_share(frontmatter(text).get("stated_share"))
+        if val is not None:
+            out[path.stem] = val
+    return out
+
+
+def read_actual_shares(vault, day):
+    """({objective name: percent}, state) over the week containing `day`.
+
+    `state` is `ok` / `unavailable` (no script) / `unread` (ran and failed) / `empty`
+    (no finished tasks). A failed read is NEVER `{}` — a round that could not look and
+    a round that found no objective work must not render the same.
+    """
+    script = Path(vault) / ".claude" / "scripts" / "task-lineage.py"
+    if not script.exists():
+        return None, "unavailable"
+    lo, hi = week_bounds(day)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", str(script), "--vault", str(vault),
+             "--from", lo, "--to", hi, "--json"],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None, "unread"
+    if proc.returncode != 0:
+        return None, "unread"
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return None, "unread"
+    population = data.get("population") or 0
+    if population <= 0:
+        return None, "empty"
+    per = data.get("per_objective") or {}
+    return {k: 100.0 * v / population for k, v in per.items()}, "ok"
+
+
+def objective_of(board, kind, name):
+    """The objective names a candidate traces to: task -> goals -> objective.
+
+    A goal names its objective directly; a task or topic reaches it through its `goals`.
+    Returns a set — a row may serve more than one objective, and the reserved-slot match
+    asks only whether the furthest-below objective is among them.
+    """
+    _kind, _path, fm = board.read(name)
+    if not fm:
+        return set()
+    if kind == "goal":
+        return set(wikilinks(fm.get("objective", "")) + wikilinks(fm.get("objectives", "")))
+    out = set()
+    for goal in wikilinks(fm.get("goals", "")):
+        _gk, _gp, gfm = board.read(goal)
+        if not gfm:
+            continue
+        out |= set(wikilinks(gfm.get("objective", "")) + wikilinks(gfm.get("objectives", "")))
+    return out
+
+
+def objective_deficits(board, vault, day):
+    """([{name, stated, actual, deficit}] ranked by deficit desc, state).
+
+    Only objectives that BOTH state a share and trace at least one page are ranked. An
+    objective with a share but no finished work this week reads actual 0.0 and so its
+    full stated share is its deficit — that is the floor doing its job, not a bug.
+    """
+    stated = read_stated_shares(board)
+    if not stated:
+        return [], "no-stated-shares"
+    actual, state = read_actual_shares(vault, day)
+    if actual is None:
+        return [], state
+    rows = []
+    for name, st in stated.items():
+        ac = actual.get(name, 0.0)
+        rows.append({"name": name, "stated": st, "actual": ac, "deficit": st - ac})
+    rows.sort(key=lambda r: r["deficit"], reverse=True)
+    return rows, "ok"
 
 
 # -------------------------------------------------------------- plan parsing
@@ -610,7 +747,7 @@ def load_dismissals(state_dir=None):
 
 
 def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines,
-             dismissed_keys=frozenset()):
+             dismissed_keys=frozenset(), cap_per_objective=None):
     """Important items in NO current plan — at most PROPOSAL_CAP, one card each.
 
     `planned_keys` is a set of `(kind, name)`, not bare names: a planned GOAL called X
@@ -686,7 +823,28 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines,
             f'{row["source"]["file"]}:{row["source"]["line"]}'
         )
         kept.append(row)
-    return kept
+    if cap_per_objective is None:
+        return kept, []
+    # Per-objective cap: a row serving an objective already at its cap this round is
+    # withheld and NAMED — a withheld row and a row that was never found must not look
+    # the same. A row serving NO objective (a firing alert, an untraced P1) is never
+    # capped: it has no objective to be over.
+    counts, capped, withheld = {}, [], []
+    for row in kept:
+        objs = objective_of(board, row["kind"], row["name"])
+        if not objs:
+            capped.append(row)
+            continue
+        # Charged to one objective deterministically when it serves several, so the cap
+        # counts each row exactly once.
+        key = sorted(objs)[0]
+        if counts.get(key, 0) < cap_per_objective:
+            counts[key] = counts.get(key, 0) + 1
+            capped.append(row)
+        else:
+            row["withheld_by"] = key
+            withheld.append(row)
+    return capped, withheld
 
 
 # ---------------------------------------------------------------------- main
@@ -722,19 +880,42 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
         seen.add(key)
         ordered.append(row)
 
-    overflow = ordered[CAP:]
-    emitted = ordered[:CAP]
+    # The reserved slot: the objective furthest below its stated share gets one slot,
+    # filled from a PLAN tier so a due-today row cannot take it (see the header).
+    deficits, deficit_state = objective_deficits(board, vault, day)
+    reserved_row, reserved_meta = None, None
+    if deficit_state == "ok" and deficits and deficits[0]["deficit"] > 0:
+        below = deficits[0]
+        for row in ordered:
+            if row["source"]["period"] == "due-today":
+                continue
+            if below["name"] in objective_of(board, row["kind"], row["name"]):
+                reserved_row, reserved_meta = row, below
+                break
+        if reserved_row is None:
+            notes.append(
+                f"reserved slot: {below['name']} is furthest below "
+                f"({below['deficit']:.1f}%) but no plan-tier candidate traces to it")
+
+    if reserved_row is not None:
+        rest = [r for r in ordered if r is not reserved_row]
+        emitted = [reserved_row] + rest[:CAP - RESERVED_SLOTS]
+        reserved_row["reserved"] = True
+    else:
+        emitted = ordered[:CAP]
+    overflow = [r for r in ordered if r not in emitted]
     for i, row in enumerate(emitted, 1):
         row["rank"] = i
 
     # `deferred_keys` joins the planned set here rather than in `ordered`: a deferred row
     # is not a candidate, so it must not occupy a rank slot, but it is planned in the
     # only sense this script asks about — it must never be proposed back.
-    proposed_rows = proposed(
+    proposed_rows, proposed_withheld = proposed(
         vault, board, Path(vault) / tasks_dir,
         {(row["kind"], row["name"]) for row in ordered} | deferred_keys,
         alerts_state, alerts_lines,
         dismissed_keys=dismissed_keys,
+        cap_per_objective=CAP_PER_OBJECTIVE,
     )
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
 
@@ -747,10 +928,15 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
                           and (target == 0 or live < target)),
         },
         "alerts": alerts_state,
+        "objective_deficits": deficits,
+        "deficit_state": deficit_state,
+        "reserved_slot": reserved_meta,
+        "reserved_row": reserved_row["name"] if reserved_row is not None else None,
         "candidates": emitted,
         "overflow": [r["name"] for r in overflow],
         "proposed": proposed_rows[:PROPOSAL_CAP],
         "proposed_overflow": [r["name"] for r in proposed_overflow],
+        "proposed_withheld": [r["name"] for r in proposed_withheld],
         # The dismissals themselves, not only their effect: the positive marker is what
         # a caller reads, because absence from `proposed` is also what a rank demotion or
         # the 3-per-round cap produces.
@@ -777,15 +963,25 @@ def render(result):
         head = f"Next focus ({cap['live']}/{cap['target']})"
     lines = [head]
 
+    # The computed deficit for EVERY ranked objective. This is the observable that tells
+    # a computed ranking from a hardcoded pick: only a computed one moves when an
+    # objective's actual share moves. A failed read prints its state, never nothing.
+    for d in result.get("objective_deficits") or []:
+        lines.append(f'  deficit {d["name"]}: {d["deficit"]:+.1f}% '
+                     f'(stated {d["stated"]:.1f}%, actual {d["actual"]:.1f}%)')
+    if result.get("deficit_state") in ("unread", "unavailable", "empty"):
+        lines.append(f'  deficits: {result["deficit_state"]}')
+
     for row in result["candidates"]:
         src = row["source"]
         # A due-today row cites its own task file, not a plan line: there is no plan line
         # for it, and inventing one would make the citation unresolvable.
         tag = src["file"] if src["period"] == "due-today" else f'{src["file"]}:{src["line"]}'
+        mark = " [reserved: furthest below]" if row.get("reserved") else ""
         if row["needs_approval"]:
-            lines.append(f'  {row["rank"]}. {row["name"]} — needs your approval — {tag}')
+            lines.append(f'  {row["rank"]}. {row["name"]}{mark} — needs your approval — {tag}')
         else:
-            lines.append(f'  {row["rank"]}. {row["name"]} — {tag} — {row["why"]}')
+            lines.append(f'  {row["rank"]}. {row["name"]}{mark} — {tag} — {row["why"]}')
     if not result["candidates"]:
         lines.append("  (no candidate: " + "; ".join(result["notes"] or ["plans empty"]) + ")")
 
@@ -802,6 +998,11 @@ def render(result):
         rest = len(result["proposed_overflow"]) - 5
         tail = f" and {rest} more" if rest > 0 else ""
         lines.append(f'  left for the next round (cap {PROPOSAL_CAP}): {named}{tail}')
+    if result.get("proposed_withheld"):
+        named = ", ".join(result["proposed_withheld"][:5])
+        rest = len(result["proposed_withheld"]) - 5
+        tail = f" and {rest} more" if rest > 0 else ""
+        lines.append(f'  withheld at the per-objective cap ({CAP_PER_OBJECTIVE}): {named}{tail}')
     if result["alerts"] in ("unread", "unavailable"):
         lines.append(f'  alerts: {result["alerts"]}')
     for note in result["notes"]:
