@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.325.2
 
 - fix: **`scripts/context-usage.py` withholds a compaction candidate whose session is no longer registered.** A pane id is a lease — WezTerm renumbers and reuses them — so a record whose pane still exists can be worn by a different, live session, and pane existence alone offered that stranger's session for a **no-ask** compaction. Measured 2026-11-16: `--compactable --threshold-tokens 500000` returned 14 candidates whose recorded `session_id` was absent from `~/.claude/sessions/*.json` (14 of 14 dead) while every recorded pane existed and was occupied by another live session — a send would have compacted 11 unrelated live sessions, the Fleet Manager's among them. Liveness is read from that registry through `who-needs-me.py`'s `live_session_ids()` (the authority `pane_for()` already uses), `is_candidate()` gains an `alive` term, a dead row's pane is no longer printed, and the over-bound table names it `session gone — not compactable`. An unreadable registry is UNKNOWN, never "nothing is live": every record is kept, the rule `docs/pane-reads.md` states. Replay against the live state dir with the measured condition reproduced (every recorded pane declared live): 403 candidates / 402 dead-session before, 0 / 0 after. Change set: `scripts/context-usage.py`, `scripts/tests/test_context_usage.py`, `CHANGELOG.md`.
 
