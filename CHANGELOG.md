@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.330.1
 
 - fix: **the goal tier's liveness bound follows its observed period, not its declared interval.** `manager-liveness.py` bounded every tier by `DECLARED_K x declared` (4500 s for a manager declaring 900 s), but the goal loop arms no `ScheduleWakeup` — the detached sweep gate is its sole wake source — so a goal manager's real cadence is its observed period, and a live one lapsed roughly six times early (measured 2026-11-16: `limit=4680s` against `observed=30105s` on a manager that had missed no round). The goal tier is now bounded by `GOAL_BOUND_K (2) x observed` with the limit at one observed period; the model-cadence tiers keep `DECLARED_K x declared`. A gate-watched goal manager still reads `IDLE`, and a moving transcript past the cap still reads `LAPSED`.
 
