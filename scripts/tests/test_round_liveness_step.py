@@ -171,8 +171,13 @@ class RoundLivenessStep(unittest.TestCase):
     def test_working_arms(self):
         """WORKING must arm for the same reason IDLE must: it reads WORKING until a round
         lands, and this is that round. A working manager that skipped the arm would never
-        read OK again."""
-        self.arm_old()
+        read OK again.
+
+        ⚠️ **Inside the cap, not past it.** `arm_old`'s 5000 s default is past
+        `DECLARED_K x 900`, which reads `LAPSED` (see the next case); 2000 s is past the
+        round limit (1080 s) and inside the cap, which is the WORKING shape.
+        """
+        self.arm_old(age=2000)
         sid = "11111111-2222-3333-4444-555555555555"
         for name in os.listdir(self.state_dir):
             if name.endswith(".cadence"):
@@ -184,6 +189,27 @@ class RoundLivenessStep(unittest.TestCase):
         with open(os.path.join(proj, f"{sid}.jsonl"), "w", encoding="utf-8") as fh:
             fh.write("{}\n")
         self.assertEqual("WORKING", self.state(FULL, "goal"))
+        self.assertIn(ARMED, self.run_block(FULL, "goal"))
+
+    def test_lapsed_arms(self):
+        """LAPSED must arm too, and it needs it most.
+
+        Past the hard cap the manager will not be woken again; this round's arm is the only
+        thing that pulls its loop back inside the cap. Left off the allow-list, the state
+        that most needs arming would be the one that never gets it.
+        """
+        self.arm_old()  # 5000 s, past DECLARED_K x 900
+        sid = "11111111-2222-3333-4444-555555555555"
+        for name in os.listdir(self.state_dir):
+            if name.endswith(".cadence"):
+                with open(os.path.join(self.state_dir, name[: -len(".cadence")] + ".session"),
+                          "w", encoding="utf-8") as fh:
+                    fh.write(sid + "\n")
+        proj = os.path.join(self.projects_dir, "proj")
+        os.makedirs(proj, exist_ok=True)
+        with open(os.path.join(proj, f"{sid}.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        self.assertEqual("LAPSED", self.state(FULL, "goal"))
         self.assertIn(ARMED, self.run_block(FULL, "goal"))
 
     def test_the_fallback_is_not_an_arm(self):

@@ -98,7 +98,7 @@ The **first line is the verdict**:
 
 | verdict | meaning | what this round does |
 |---|---|---|
-| `jump` | live session, loop `OK`/`WORKING`/`IDLE`/`UNARMED`| render the row. ⚠️ `UNARMED` = never armed, not lost; lever is `/supervisor:goal-loop "<goal>"`, never `restart`. ⚠️ `WORKING`/`IDLE` (mid-turn/no work): render, never restart |
+| `jump` | live session, loop `OK`/`WORKING`/`LAPSED`/`IDLE`/`UNARMED`| render the row. ⚠️ `UNARMED` = never armed, not lost; lever is `/supervisor:goal-loop "<goal>"`, never `restart`. ⚠️ `WORKING`/`LAPSED`/`IDLE` (mid-turn / past the arm cap / no work): render, never restart |
 | `open` | no recorded id, **and the goal carries an operator-set flag** | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
 | `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a round may not create one |
 | `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
