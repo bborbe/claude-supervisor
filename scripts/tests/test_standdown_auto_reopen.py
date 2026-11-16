@@ -10,10 +10,11 @@ every flagged task under a stood-down goal or topic was still selected and opene
 Each case below is a probe with a NEGATIVE CONTROL, because every claim here is an
 absence, and an absence passes on a leg that opens nothing:
 
-  * **SC1 — the goal tier.** A stopped goal suppresses its own task and leaves an unstopped
-    goal's task alone; clearing the marker restores it.
+  * **SC1 — the goal tier.** An OPERATOR-FLAGGED task under a stopped goal is opened (the
+    flag is the operator's later, more specific act); an UNFLAGGED task under the same goal
+    is still skipped `subject stood down`; clearing the marker restores the unflagged row.
   * **SC2 — the topic tier**, through the `## Goals` BODY path (`fleet-board.py`'s
-    population), never the `topics:` task frontmatter.
+    population), never the `topics:` task frontmatter — same flag split as SC1.
   * **SC3 — the task tier still works** (regression): the page field still suppresses, and
     an unmarked control row is still selected.
   * **SC5 — the keepalive restart path still leaves a stood-down subject alone**
@@ -97,6 +98,22 @@ def approved(names):
     }
 
 
+def unflagged(goals=None, extra=""):
+    """The same row WITHOUT an operator flag — the negative control for the exemption.
+
+    A row carrying no `flag:` is skipped `not flagged` by `select()`, so a probe that only
+    asserts "not opened" passes even when the subject guard is deleted. The control asserts
+    the REASON is `subject stood down`, which only the guard can produce.
+    """
+    lines = ["status: in_progress", "priority: 1"]
+    if goals:
+        lines.append("goals:")
+        lines.extend("  - '[[%s]]'" % goal for goal in goals)
+    if extra:
+        lines.append(extra)
+    return "\n".join(lines)
+
+
 def flagged(goals=None, extra=""):
     """Frontmatter for an approved, operator-flagged task, optionally linked to goals."""
     lines = ["status: in_progress", "priority: 1", "flag: true", "flag_set_by: operator"]
@@ -155,32 +172,49 @@ class Base(unittest.TestCase):
 
 
 class GoalTierTest(Base):
-    """SC1 — a stopped goal suppresses its own tasks, and only its tasks."""
+    """SC1 — a flagged row outranks its goal's stand-down; an unflagged one does not."""
 
     def setUp(self):
         super().setUp()
         task_page(self.tasks, "under-stopped", flagged(["Stopped Goal"]))
+        task_page(self.tasks, "under-stopped-plain", unflagged(["Stopped Goal"]))
         task_page(self.tasks, "under-open", flagged(["Open Goal"]))
 
-    def test_stopped_goal_suppresses_only_its_own_task(self):
+    def test_a_flagged_row_opens_under_a_stopped_goal(self):
         self.marker("goal--stopped-goal.stopped")
 
-        opened, skipped = self.run_collect(["under-stopped", "under-open"])
-
-        self.assertEqual([row["name"] for row in opened], ["under-open"])
-        reasons = {row["name"]: row["reason"] for row in skipped}
-        self.assertEqual(reasons.get("under-stopped"), "subject stood down")
-
-    def test_clearing_the_marker_restores_the_row(self):
-        """The other direction — without it, a resolver that suppresses everything passes."""
-        self.marker("goal--stopped-goal.stopped")
-        self.clear("goal--stopped-goal.stopped")
-
-        opened, skipped = self.run_collect(["under-stopped", "under-open"])
+        opened, skipped = self.run_collect(
+            ["under-stopped", "under-stopped-plain", "under-open"])
 
         self.assertEqual(sorted(row["name"] for row in opened),
                          ["under-open", "under-stopped"])
-        self.assertEqual(skipped, [])
+        reasons = {row["name"]: row["reason"] for row in skipped}
+        self.assertEqual(reasons.get("under-stopped-plain"), "subject stood down")
+
+    def test_the_unflagged_control_still_stands_down(self):
+        """The negative control — deleting the subject guard outright fails this."""
+        self.marker("goal--stopped-goal.stopped")
+
+        opened, skipped = self.run_collect(["under-stopped-plain"])
+
+        self.assertEqual(opened, [])
+        self.assertEqual([row["reason"] for row in skipped], ["subject stood down"])
+
+    def test_clearing_the_marker_changes_the_reason_to_not_flagged(self):
+        """The other direction — without it, a resolver that suppresses everything passes.
+
+        An unflagged row is skipped either way, so the observable is the REASON: only the
+        subject guard can produce `subject stood down`; once the marker is gone the row
+        falls through to `select()`'s own `not flagged`.
+        """
+        self.marker("goal--stopped-goal.stopped")
+        _, before = self.run_collect(["under-stopped-plain"])
+        self.assertEqual([row["reason"] for row in before], ["subject stood down"])
+
+        self.clear("goal--stopped-goal.stopped")
+
+        _, after = self.run_collect(["under-stopped-plain"])
+        self.assertEqual([row["reason"] for row in after], ["not flagged"])
 
 
 class TopicTierTest(Base):
@@ -191,6 +225,7 @@ class TopicTierTest(Base):
         topic_page(self.topics, "Stopped Topic", ["A Goal"])
         topic_page(self.topics, "Open Topic", ["Other Goal"])
         task_page(self.tasks, "topic-task", flagged(["A Goal"]))
+        task_page(self.tasks, "topic-task-plain", unflagged(["A Goal"]))
         task_page(self.tasks, "other-task", flagged(["Other Goal"]))
 
     def test_stopped_topic_suppresses_through_the_goals_body(self):
@@ -198,11 +233,9 @@ class TopicTierTest(Base):
 
         opened, skipped = self.run_collect(["topic-task", "other-task"])
 
-        self.assertEqual([row["name"] for row in opened], ["other-task"])
-        self.assertEqual(
-            {row["name"]: row["reason"] for row in skipped}.get("topic-task"),
-            "subject stood down",
-        )
+        self.assertEqual(sorted(row["name"] for row in opened),
+                         ["other-task", "topic-task"])
+        self.assertEqual(skipped, [])
 
     def test_clearing_the_topic_marker_restores_the_row(self):
         self.marker("topic--stopped-topic.stopped")
@@ -215,10 +248,19 @@ class TopicTierTest(Base):
     def test_a_task_named_directly_under_a_topic_is_suppressed(self):
         """A `## Goals` entry that IS a task title — the nearest-ancestor case."""
         topic_page(self.topics, "Stopped Topic", ["direct-task"])
-        task_page(self.tasks, "direct-task", flagged())
+        task_page(self.tasks, "direct-task", unflagged())
         self.marker("topic--stopped-topic.stopped")
 
         opened, skipped = self.run_collect(["direct-task"])
+
+        self.assertEqual(opened, [])
+        self.assertEqual([row["reason"] for row in skipped], ["subject stood down"])
+
+    def test_the_unflagged_control_still_stands_down_under_a_topic(self):
+        """The negative control — deleting the subject guard outright fails this."""
+        self.marker("topic--stopped-topic.stopped")
+
+        opened, skipped = self.run_collect(["topic-task-plain"])
 
         self.assertEqual(opened, [])
         self.assertEqual([row["reason"] for row in skipped], ["subject stood down"])
@@ -259,7 +301,7 @@ class CrossVaultCollisionTest(Base):
         self.other_goals = os.path.join(self.other, "24 Goals")
         for path in (self.other_tasks, self.other_topics, self.other_goals):
             os.makedirs(path)
-        task_page(self.tasks, "Shared Title", flagged(["Stopped Goal"]))
+        task_page(self.tasks, "Shared Title", unflagged(["Stopped Goal"]))
         task_page(self.other_tasks, "Shared Title", flagged(["Open Goal"]))
 
     def test_same_titled_task_in_the_other_vault_still_opens(self):
@@ -298,7 +340,7 @@ class GoalPageCollisionTest(Base):
         task_page(self.goals, self.TITLE, "page_type: goal\nstatus: in_progress")
         task_page(self.tasks, self.TITLE, "status: in_progress\nphase: planning")
         topic_page(self.topics, "Zero-Touch Container Build", [self.TITLE])
-        task_page(self.tasks, "under-the-goal", flagged([self.TITLE]))
+        task_page(self.tasks, "under-the-goal", unflagged([self.TITLE]))
 
     def test_a_stopped_topic_still_suppresses_through_a_colliding_title(self):
         self.marker("topic--zero-touch-container-build.stopped")
@@ -320,7 +362,8 @@ class ManagedByGoalTest(Base):
     def setUp(self):
         super().setUp()
         task_page(self.goals, "Some Goal", "page_type: goal\nstatus: in_progress")
-        task_page(self.tasks, "managed-row", flagged(extra="managed_by: '[[Some Goal]]'"))
+        task_page(self.tasks, "managed-row",
+                  unflagged(extra="managed_by: '[[Some Goal]]'"))
 
     def test_a_managed_by_goal_is_suppressed_without_any_topic_listing_it(self):
         self.marker("goal--some-goal.stopped")
@@ -330,14 +373,15 @@ class ManagedByGoalTest(Base):
         self.assertEqual(opened, [])
         self.assertEqual([row["reason"] for row in skipped], ["subject stood down"])
 
-    def test_clearing_the_marker_restores_it(self):
+    def test_clearing_the_marker_changes_the_reason_to_not_flagged(self):
         self.marker("goal--some-goal.stopped")
+        _, before = self.run_collect(["managed-row"])
+        self.assertEqual([row["reason"] for row in before], ["subject stood down"])
+
         self.clear("goal--some-goal.stopped")
 
-        opened, skipped = self.run_collect(["managed-row"])
-
-        self.assertEqual([row["name"] for row in opened], ["managed-row"])
-        self.assertEqual(skipped, [])
+        _, after = self.run_collect(["managed-row"])
+        self.assertEqual([row["reason"] for row in after], ["not flagged"])
 
 
 class OneResolverTest(unittest.TestCase):

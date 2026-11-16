@@ -56,6 +56,13 @@ the round's act:
     up, so it carries the same ordering: ahead of every derived guard. Measured
     2026-11-12 — a stopped goal's flagged tasks were still selected and opened, because
     this script read only the task tier.
+    ⚠️ **An operator-set flag outranks THIS guard, and only this one.** A flag is the
+    operator's later, more specific act — they marked the row after the goal was stood
+    down — and the standing ruling "only auto-open flagged" makes that the stronger
+    instruction. Measured 2026-11-15: 8 flagged rows sat suppressed as `subject stood
+    down` under goals still `in_progress`. The task tier's own `stopped:` above is NOT
+    bypassed, and `is_flagged` reads provenance, so an agent-set flag still stands down
+    with its subject.
     ⚠️ **This leg only.** `/supervisor:open --flagged` (`flagged-rows.eligible()`) is the
     operator naming rows to open and does not apply this guard — nor the task tier's
     `stopped:` field, nor `prior_wait()`. Same boundary, same reason.
@@ -559,7 +566,17 @@ def guards(block, today, attention_dir=None, name=None, index=None,
     # or topic's stand-down is the same operator act one tier up, so it outranks every
     # derived guard too. The reason is distinct from `stopped` so a reader can tell which
     # tier ended the row — and so the task tier keeps its own clean regression probe.
-    if name is not None and index is not None and stopped_subject_of(name, index):
+    #
+    # ⚠️ **An operator-set flag outranks the SUBJECT tier — and only the subject tier.**
+    # A flag is the operator's later, more specific act: they marked THIS row after the
+    # goal was stood down, and the ruling "only auto-open flagged" makes that the stronger
+    # instruction. Measured 2026-11-15: 8 flagged rows sat suppressed as `subject stood
+    # down` under goals still `in_progress`. The task tier's own `stopped` above is NOT
+    # bypassed: that is the row's own stand-down, not its subject's, and the operator
+    # ruling scopes this exemption to goal and topic subjects. `is_flagged` reads
+    # provenance, so an agent-set flag still stands down with its subject.
+    if (name is not None and index is not None and stopped_subject_of(name, index)
+            and not is_flagged(block)):
         return "subject stood down"
     if has_blocked_by(block):
         # ⚠️ **`blocked_by` is a DECLARATION, not a verdict — hold on the computed one.**
