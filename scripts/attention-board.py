@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps({"open": open_cards, "url": store, "available": True}))
     else:
-        print(f"Board: {open_cards} open — {store}")
+        print(f"Board page: {open_cards} undimmed cards — {store}")
     return EXIT_OK
 
 

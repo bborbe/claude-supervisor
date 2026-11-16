@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the fleet round prints the attention store's open-card count and per-producer split beside the board line.** `attention-board.py` counts undimmed cards the board page rendered; the store holds more, and on 2026-11-16 the board line read `0 open` while the store held 13 — every one cron. `scripts/attention-open-count.py` reads `GET /api/1.0/attention?state=open&limit=500`, counts by `producer_id` and derives the cron share from `producer_kind`, so a new cron producer is counted without an edit here. `commands/steps/drive.md` prints it beside the board line and says the two numbers are not the same number, and `attention-board.py`'s own line is renamed `Board: N open` → `Board page: N undimmed cards` so it can never be read as the store's open count. Change set: `scripts/attention-open-count.py`, `scripts/tests/test_attention_open_count.py`, `commands/steps/drive.md`, `CHANGELOG.md`.
+
 ## v0.328.0
 
 - perf: **`flagged-rows.py` no longer re-parses every page on every run.** An mtime page cache (`flagged-rows-cache.json` in the Claude state dir, overridable with `--cache`, keyed on `(mtime_ns, size)`) serves the skip verdict of a page whose bytes have not moved, for the two verdicts that depend on nothing else (`not flagged`, `status is …`). Eligible, deferred and unreadable pages are re-read every run, so a defer that comes due and a liveness change surface without the file changing. Measured on the live corpus with `--no-liveness`: cold run 47,482 pages parsed / 11 s, warm run **116 parsed / 47,366 cache hits / 3 s**, against a 14 s baseline; the row set and `skipped` counts are identical across all three. A deleted or renamed page leaves no row and no cache key (`pruned` counts them). `--no-cache` restores the old behaviour; `--json` gains a `cache` counter object.
