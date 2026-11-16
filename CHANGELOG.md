@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.326.1
 
 - fix: **the flagged-row predicate no longer hangs the daemon's tick on a pane lookup.** Each LIVE row spawned a fresh interpreter to `importlib`-load `who-needs-me.py` (2,300 lines) for `pane_for`, with an unbounded `subprocess.run`; measured 2026-11-16, one such helper held a daemon-owned `flagged-rows.py` in `poll()` for 11m49s until the 25-minute read bound SIGKILLed it and the tick opened nothing. Two changes: `--no-pane` skips the lookup entirely (the daemon's tick never reads a pane — it skips every non-ABSENT row before it looks at `jump`, so a LIVE row resolving to `skip` instead is identical to it), cutting a full run from 88 s to 19 s; and every helper subprocess is now bounded by `PROBE_TIMEOUT` (15 s), so a slow probe costs one row's field (`UNKNOWN` liveness, no pane) rather than the tick. The default is unchanged — `/supervisor:open` still resolves panes to jump.
 - fix: `manager-wake.py` retries a transient pane-lookup miss up to `PANE_ATTEMPTS` (4) times instead of once. The gate logged 20 `NO-PANE` wake results over 24 h, every one `reason=wezterm-unreadable`, while wakes minutes either side of each failure succeeded — so `wezterm cli list` fails per call, flakily, and one 2 s retry did not cover it. Each affected session resolved to a real pane on a later read (`0dbb4336`→12, `6f14c290`→47, `c49298a8`→72). Four attempts span ~6 s inside a tick that already takes seconds.
