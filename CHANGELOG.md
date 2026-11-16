@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.326.1
 
 - fix: `manager-wake.py` retries a transient pane-lookup miss up to `PANE_ATTEMPTS` (4) times instead of once. The gate logged 20 `NO-PANE` wake results over 24 h, every one `reason=wezterm-unreadable`, while wakes minutes either side of each failure succeeded — so `wezterm cli list` fails per call, flakily, and one 2 s retry did not cover it. Each affected session resolved to a real pane on a later read (`0dbb4336`→12, `6f14c290`→47, `c49298a8`→72). Four attempts span ~6 s inside a tick that already takes seconds.
 
