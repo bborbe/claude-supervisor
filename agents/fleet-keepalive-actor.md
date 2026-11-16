@@ -211,23 +211,6 @@ One line per watch whose time has passed, naming **the task** for every session 
 and a bare session id leaves nothing to open. A watch with several sessions is still
 **one line, one watch**: resuming it is one act per named task, not one per watch.
 
-⚠️ **Read the exit code and the `live=` field, never the line count alone.** `due` names why it
-resolved nothing, because a wake that finds no session has three very different causes and
-treating them alike records a live worker as abandoned (measured 2026-11-15: `ebd76359` was
-recorded dead while `session-liveness.py --check` read LIVE):
-
-| Output | Meaning | What this leg does |
-|---|---|---|
-| `no park watches due … store=readable` | the store was read; nothing is due | nothing — a real negative |
-| `UNREADABLE … reason=absent\|unreadable`, exit **4** | the store could not be read | report `parked-due: unknown — store unreadable`, **never** `0`, and never release or re-park a row on it |
-| `resume: <task> [<id>] live=yes` | a live session is parked | resume it |
-| `resume: … live=no` | the probe positively reports the id absent | resume it; the resume is what recovers it |
-| `resume: … live=unknown` | the probe could not decide | report it and take no act — an undecidable probe is not an absence |
-| `resume: none recorded live=none` | the watch carries no member | report it; there is nothing to open, and this is not a read failure |
-
-`live=` is `manager-wake.py`'s vocabulary on purpose — one word for the same question everywhere.
-Never re-derive liveness yourself from the roster you were handed; the field is the reading.
-
 After step 0's read on that parked session's **full** id, resume each named task through
 `/supervisor:open --task "<name>"`. A held one is left parked and its membership is **not**
 released: releasing it would drop the watch that would resume it once the hold lifts. Then
