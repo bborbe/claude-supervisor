@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: open-queue lets an operator-flagged task outrank its subject's stand-down; add `manager-liveness.py --clear-standdown`, which clears a marker without arming
+
 ## v0.325.3
 
 - fix: **`/supervisor:open` refuses an explicit `mode: headless` on a manager page at the two sites that actually resume one.** v0.321.0 put the refusal in `docs/fleet-surface.md`'s manager-resume block and `scripts/check-open-resume-mode.py` pinned it there — but the block is a **document**, and the resume happens in `commands/open.md` § Step 2B item 3 and § Step 2C item 3, neither of which read `mode:` at all. A lapsed topic manager carrying an explicit `mode: headless` was therefore resumed anyway and the refusal branch never executed. Measured 2026-11-16: the keep-alive leg returned `resume` for such a page, `open.md` resumed the id, and every check still passed — a rule documented, linted in the document, and applied nowhere. Both sites now refuse first, printing `role=manager, mode=headless — refused` and taking neither path, and `check_open` gains a structural assertion over each step (with a missing-step branch, so a rename cannot pass unread) plus three negative controls. Change set: `commands/open.md`, `scripts/check-open-resume-mode.py`, `scripts/tests/test_check_open_resume_mode.py`, `CHANGELOG.md`.
