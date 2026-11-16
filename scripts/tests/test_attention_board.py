@@ -131,7 +131,9 @@ class MainTest(unittest.TestCase):
     def test_success_prints_the_count_and_the_url(self):
         rc, out, _ = self._run(["--store", "http://board.test"], lambda s, t: BOARD)
         self.assertEqual(rc, ab.EXIT_OK)
-        self.assertEqual(out.strip(), "Board: 2 open — http://board.test")
+        # `Board page: … undimmed cards`, never `Board: … open` — the store's open
+        # count is `attention-store.py`'s line, and the two must not read alike.
+        self.assertEqual(out.strip(), "Board page: 2 undimmed cards — http://board.test")
 
     def test_json_carries_the_same_count(self):
         rc, out, _ = self._run(
