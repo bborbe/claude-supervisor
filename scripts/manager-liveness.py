@@ -249,6 +249,16 @@ ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable perce
 # p90 4534 s → 5.04) and Development Pipeline Throughput (1.12). 5 × 900 + SLACK = 4680 s
 # still covers the Fleet Manager's measured 4534 s. The bound only ever lowers a limit.
 DECLARED_K = 5
+# The goal tier's cap is a multiple of its OBSERVED period, not of the declared interval:
+# the goal loop arms no `ScheduleWakeup` (`commands/goal-loop.md` § The goal loop arms no
+# wakeup), so the declared value describes the gate prompt, not this manager's cadence.
+# `DECLARED_K x declared` lapsed a live goal manager ~6x early — measured 2026-11-16,
+# `limit=4680s` against `observed=30105s` on `Manager Token Overhead Falls and the Worker
+# Share Rises`, which had missed no round. The cap stays, because a manager that stops
+# rounding must not teach the record its own silence: two observed periods is the
+# detection limit the parent goal states, and it bounds the work-fresh `LAPSED` path the
+# 2026-11-15 guard introduced. A gate-watched goal manager still reads `IDLE` at any age.
+GOAL_BOUND_K = 2
 EXIT_STALE = 10
 # `--state` for a subject that resolves no record under any branch and no page: a refusal,
 # distinct from argparse's 2 so a caller can tell "unresolvable name" from "bad flags".
@@ -1476,21 +1486,41 @@ def classify(s: str, now: float) -> tuple:
     # cadence, and a planted-lapse probe took 681 s on a 300 s cadence. One period
     # plus SLACK reports the first missed re-arm instead.
     #
-    # ⚠️ BOUNDED by `DECLARED_K × declared`. The observed period is learnt from the
-    # manager's own re-arms, so a manager that stops rounding stretches it: every long
-    # gap raises the p90 and the limit follows, until a manager silent for most of a day
-    # reads OK. The bound caps what the observation may excuse, and it only ever lowers.
+    # ⚠️ BOUNDED. The observed period is learnt from the manager's own re-arms, so a
+    # manager that stops rounding stretches it: every long gap raises the p90 and the
+    # limit follows, until a manager silent for most of a day reads OK. The bound caps
+    # what the observation may excuse, and it only ever lowers. The model-cadence tiers
+    # are bounded by `DECLARED_K x declared`; the goal tier, whose declared interval is
+    # not its cadence, by `GOAL_BOUND_K x observed` — a different multiple of a different
+    # quantity, but the same principle: the cap must not grow with the observed period.
     period = observed_period(s)
-    bound = DECLARED_K * interval
-    if period and period > bound:
-        # `period=` carries the BOUNDED value: `answer-path-check.py` sizes its reach window
-        # from that field, so the unbounded observation goes in a field of its own.
-        limit = bound + SLACK
-        basis = f"period={bound}s(bounded {DECLARED_K}x declared) observed={int(period)}s"
-    elif period:
-        limit, basis = period + SLACK, f"period={int(period)}s(observed)"
+    if s.startswith("goal--") and period:
+        # The goal tier's cadence IS the observed period: the detached sweep gate is its
+        # sole wake source, so an ageing `.cadence` between gate wakes is expected and the
+        # declared interval is not the cadence. The cap moves to `GOAL_BOUND_K x observed`
+        # (see that constant) and the limit follows one observed period, which is when the
+        # next gate wake is due.
+        # `period=` carries the OBSERVED value here, unlike the model-cadence branch: the
+        # goal tier's cadence IS the observed period, and `answer-path-check.py` multiplies
+        # it by two to size its reach window, which is then the same two-period detection
+        # limit the bound uses. The cap goes in its own field.
+        bound = GOAL_BOUND_K * period
+        limit = period + SLACK
+        basis = (
+            f"period={int(period)}s(goal-tier observed)"
+            f" bound={int(bound)}s({GOAL_BOUND_K}x observed)"
+        )
     else:
-        limit, basis = interval + SLACK, f"period={interval}s(reported)"
+        bound = DECLARED_K * interval
+        if period and period > bound:
+            # `period=` carries the BOUNDED value: `answer-path-check.py` sizes its reach window
+            # from that field, so the unbounded observation goes in a field of its own.
+            limit = bound + SLACK
+            basis = f"period={bound}s(bounded {DECLARED_K}x declared) observed={int(period)}s"
+        elif period:
+            limit, basis = period + SLACK, f"period={int(period)}s(observed)"
+        else:
+            limit, basis = interval + SLACK, f"period={interval}s(reported)"
     if legacy:
         # Say so: a pre-split record is a manager that has not re-armed since the
         # split, and the age is measured against a file nothing will refresh.
