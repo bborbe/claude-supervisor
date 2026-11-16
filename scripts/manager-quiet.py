@@ -247,12 +247,18 @@ def _date_text(value) -> str:
 
 
 def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
-    """`{"kind", "defer", "blocked"}` for one task's frontmatter.
+    """`{"kind", "defer", "blocked", "unapproved"}` for one task's frontmatter.
 
     `kind` is `terminal` | `quiet` | `runnable`. `defer` carries the row's future
-    `defer_date` when that is *why* it is quiet, and `blocked` its unmet blocker names —
-    both exist so the reopen trigger can be named from the **same read that decided the
-    verdict**, rather than re-derived later from a second one that could disagree.
+    `defer_date` when it has one, and `blocked` its unmet blocker names — both exist so
+    the reopen trigger can be named from the **same read that decided the verdict**,
+    rather than re-derived later from a second one that could disagree.
+
+    `unapproved` is True for a row sitting at `phase: todo`. It is carried **separately
+    from `defer`** because the two answer different questions: `defer` says a date will
+    reopen the row, `unapproved` says a human must approve it. A row can be both, and
+    `verdict_for()` must still stand the subject down for the approval half while
+    `reopen_trigger()` names the date — an approval is not something a clock delivers.
 
     ⚠️ **Every branch below reads a field; none infers.** An absent or unparseable
     value falls through to `runnable` — see the module docstring on failing toward
@@ -261,12 +267,11 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
     pd = load_predispatch()
     status = (pd.fm_scalar(fm, "status") or "").strip().lower()
     if status in TERMINAL_STATUSES:
-        return {"kind": "terminal", "defer": None, "blocked": []}
+        return {"kind": "terminal", "defer": None, "blocked": [], "unapproved": False}
     if status in UNSURFACED_STATUSES:
-        return {"kind": "quiet", "defer": None, "blocked": []}
+        return {"kind": "quiet", "defer": None, "blocked": [], "unapproved": False}
     phase = (pd.fm_scalar(fm, "phase") or "").strip().lower()
-    if phase == UNAPPROVED_PHASE:
-        return {"kind": "quiet", "defer": None, "blocked": []}
+    unapproved = phase == UNAPPROVED_PHASE
     raw_due = pd.fm_scalar(fm, "defer_date")
     state, detail = defer_date.defer_state(raw_due, today_key)
     if state == "invalid":
@@ -274,26 +279,47 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
         # cannot read is not one it can rule the row out on, so the row stays runnable —
         # and the reason is said rather than swallowed, so the garbage is still visible.
         print(f"manager-quiet: {detail} — not counted as a defer", file=sys.stderr)
+    # ⚠️ The deferred read sits ABOVE the unapproved-phase read, and that order is
+    # load-bearing: a `phase: todo` row with a future `defer_date` is quiet for TWO
+    # reasons, and returning on the phase alone drops the date the stand-down line needs.
+    # Measured 2026-11-07: the only quiet row carried `defer_date: "2026-11-14"` and the
+    # line read `reopen on no named trigger` — the one case `round-quiet.md` says a
+    # reader cannot act on. Only a FUTURE date is named here; a due or absent one still
+    # falls through to the phase branch, so an unapproved row never becomes runnable.
     if state == "deferred":
-        return {"kind": "quiet", "defer": _date_text(raw_due), "blocked": []}
+        return {
+            "kind": "quiet",
+            "defer": _date_text(raw_due),
+            "blocked": [],
+            "unapproved": unapproved,
+        }
+    if unapproved:
+        return {"kind": "quiet", "defer": None, "blocked": [], "unapproved": True}
     verdict = pd.blocked_by_verdict(fm, tasks_dir, index)
     if verdict["blocked"]:
-        return {"kind": "quiet", "defer": None, "blocked": list(verdict["unmet"])}
-    return {"kind": "runnable", "defer": None, "blocked": []}
+        return {
+            "kind": "quiet",
+            "defer": None,
+            "blocked": list(verdict["unmet"]),
+            "unapproved": False,
+        }
+    return {"kind": "runnable", "defer": None, "blocked": [], "unapproved": False}
 
 
 def survey(vault: str, members: list, today_key) -> dict:
-    """`{"runnable", "quiet", "terminal", "defer", "blocked"}` for one subject's set.
+    """`{"runnable", "quiet", "terminal", "defer", "blocked", "unapproved"}` for one subject's set.
 
     The task set is `manager-predispatch.py`'s `resolve_tracked` — a member may be a
     goal (admits tasks whose `goals:` name it) or a task named directly — so this check
     and the sweep see the same rows. `defer` and `blocked` are keyed by task name and
-    carry only the rows that are quiet *for that reason*.
+    carry only the rows that are quiet *for that reason*; `unapproved` lists the quiet
+    rows sitting at `phase: todo`, whose reopening needs an approval rather than a date.
     """
     pd = load_predispatch()
     tasks_dir = os.path.join(vault, pd.TASKS_DIRNAME)
     index = pd.task_index(tasks_dir)
-    out = {"runnable": [], "quiet": [], "terminal": [], "defer": {}, "blocked": {}}
+    out = {"runnable": [], "quiet": [], "terminal": [], "defer": {}, "blocked": {},
+           "unapproved": []}
     for task in pd.resolve_tracked(vault, members):
         path = os.path.join(tasks_dir, task["name"] + ".md")
         try:
@@ -309,6 +335,8 @@ def survey(vault: str, members: list, today_key) -> dict:
             out["defer"][task["name"]] = verdict["defer"]
         if verdict["blocked"]:
             out["blocked"][task["name"]] = verdict["blocked"]
+        if verdict["unapproved"]:
+            out["unapproved"].append(task["name"])
     return out
 
 
@@ -360,6 +388,13 @@ def verdict_for(seen: dict, count: int) -> str:
     blocker reopens on a human's action, not on a clock, and auto-reopening that is out
     of scope.
 
+    ⚠️ **`unapproved` is the explicit form of the `phase: todo` half**, and it is a
+    separate field precisely because such a row now ALSO carries its `defer_date` into
+    `seen["defer"]` (so the stand-down line can name it). Without this check the date
+    alone would flip an unapproved row into `sleep-until` — sleeping past an approval
+    nobody has given. The row's date is named by `reopen_trigger()`; the verdict still
+    stands the subject down.
+
     ⚠️ **The runnable guard is not redundant.** A runnable row resets `count` to 0 before
     this is called, so the two conditions cannot both hold today — but this module's whole
     invariant is failing toward ARMED, and a future change to the counter must not be able
@@ -369,7 +404,11 @@ def verdict_for(seen: dict, count: int) -> str:
         return "armed"
     if seen["runnable"]:
         return "armed"
-    if seen["quiet"] and set(seen["quiet"]) == set(seen["defer"]):
+    if (
+        seen["quiet"]
+        and set(seen["quiet"]) == set(seen["defer"])
+        and not seen["unapproved"]
+    ):
         return "sleep-until"
     return "stood-down"
 
