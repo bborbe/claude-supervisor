@@ -10,6 +10,14 @@ list` held 20 panes, none of them 109, and `get-text` exited 1.
 The guard matters more than the others because compaction is a **no-ask**
 action: a phantom candidate is a run that reports success and does nothing.
 
+A pane is a lease, not an identity, and pane existence alone was measured
+insufficient. Measured 2026-11-16: `--compactable --threshold-tokens 500000`
+offered 14 candidates whose recorded `session_id` was absent from
+`~/.claude/sessions/*.json` (14 of 14 dead) while every recorded pane existed
+and was occupied by a different, live session — a send would have compacted 11
+unrelated live sessions. Session liveness is read from that registry, and a dead
+session is withheld however live its recorded pane looks.
+
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
@@ -63,7 +71,8 @@ class PaneStateTest(unittest.TestCase):
 def row(**kw):
     # module-level, not a method: `self` is one of the row's own keys and would
     # otherwise collide with the bound instance parameter.
-    base = {"blocked": False, "busy": False, "self": False, "addressable": True}
+    base = {"blocked": False, "busy": False, "self": False, "addressable": True,
+            "alive": True}
     return dict(base, **kw)
 
 
@@ -74,10 +83,18 @@ class IsCandidateTest(unittest.TestCase):
     def test_phantom_pane_is_never_a_candidate(self):
         self.assertFalse(cu.is_candidate(row(addressable=False)))
 
+    def test_dead_session_is_never_a_candidate(self):
+        # A pane id is a lease: the recorded pane can be live while its session is
+        # gone, and the live occupant is a different session entirely.
+        self.assertFalse(cu.is_candidate(row(alive=False)))
+
     def test_blocked_busy_and_self_are_not_candidates(self):
         self.assertFalse(cu.is_candidate(row(blocked=True)))
         self.assertFalse(cu.is_candidate(row(busy=True)))
         self.assertFalse(cu.is_candidate(row(**{"self": True})))
+
+
+_ALL = object()  # "every fixture session is live" — distinct from None (unreadable registry)
 
 
 class _RenderHarness:
@@ -87,7 +104,9 @@ class _RenderHarness:
     `TestCase` base would re-run every one of its tests in each subclass.
     """
 
-    def run_main(self, context, attention, live, argv=None):
+    def run_main(self, context, attention, live, argv=None, sessions=_ALL):
+        if sessions is _ALL:
+            sessions = {body.get("session_id") for body in context.values()}
         with tempfile.TemporaryDirectory() as ctx, tempfile.TemporaryDirectory() as att:
             for d, files in ((ctx, context), (att, attention)):
                 for name, body in files.items():
@@ -97,6 +116,7 @@ class _RenderHarness:
             with mock.patch.object(cu, "CONTEXT", ctx), \
                  mock.patch.object(cu, "ATTENTION", att), \
                  mock.patch.object(cu, "live_panes", lambda: live), \
+                 mock.patch.object(cu, "live_sessions", lambda: sessions), \
                  mock.patch.object(cu, "CLAUDE_CODE_SESSION_ID", ""), \
                  mock.patch("sys.argv", ["context-usage.py"] + (argv or [])), \
                  redirect_stdout(buf):
@@ -126,6 +146,34 @@ class RenderTest(_RenderHarness, unittest.TestCase):
             argv=["--compactable"],
         )
         self.assertNotIn("Compaction candidates", out)
+
+    def test_dead_session_with_a_live_pane_is_not_offered(self):
+        # The 2026-11-16 shape: the recorded pane exists (worn by another live
+        # session now), but the session that wrote the record has exited.
+        out = self.run_main(
+            {"s1.json": {"session_id": "s1", "used_percentage": 75, "pane": "1039",
+                         "session_name": "ghost"}},
+            {},
+            {"1039"},
+            argv=["--compactable"],
+            sessions=set(),
+        )
+        self.assertNotIn("Compaction candidates", out)
+        self.assertIn("session gone", out)
+        self.assertNotIn("1039", out)
+
+    def test_unreadable_registry_keeps_the_row(self):
+        # `None` is "cannot tell", never "nothing is live": the record is kept.
+        out = self.run_main(
+            {"s1.json": {"session_id": "s1", "used_percentage": 75, "pane": "1039",
+                         "session_name": "real"}},
+            {},
+            {"1039"},
+            argv=["--compactable"],
+            sessions=None,
+        )
+        self.assertIn("Compaction candidates", out)
+        self.assertIn("1039", out)
 
     def test_live_pane_is_listed(self):
         out = self.run_main(
