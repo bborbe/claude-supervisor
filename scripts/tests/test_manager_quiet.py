@@ -18,6 +18,10 @@ The load-bearing properties, in the order the criterion grades them:
    vault that is not a vault root all leave the loop armed and the counter untouched.
 5. **The slug agrees with `manager-liveness.py`'s** — a stand-down recorded under a
    slug nothing else reads is a stand-down nothing else can see.
+6. **A wake-counted subject page is never offered `sleep-until`.** The marker
+   `quiet_check_exempt` turns the date-gated branch into `armed`, because a sleep
+   suppresses the very wakes the criterion counts. The negative control — the same
+   fixture with the marker removed — still reaches `sleep-until`.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -25,6 +29,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import tempfile
 import time
@@ -574,3 +579,85 @@ class TestDeferParsersAreNotTheFault(Base):
         self.assertEqual(state, "deferred")
         self.assertEqual(detail, parsed)
         self.assertEqual(self.m.defer_date.display('"2026-11-14"'), "2026-11-14")
+
+
+class TestWakeCountedExemption(Base):
+    """Property 6 — a wake-counted subject page is never offered `sleep-until`.
+
+    Some subjects are advanced only by the manager's own wakes (a soak counted as "≥N
+    wakable ticks"), and `pane-wake-guard.py` returns `skip:sleeping` for a `SLEEPING`
+    subject — so the quiet check's own remedy suppresses the criterion. The marker
+    `quiet_check_exempt` on the subject page turns the date-gated branch into `armed`.
+
+    ⚠️ **The negative control is the same fixture with the marker removed.** It must reach
+    `sleep-until` on the same code, or the positive half proves nothing. And the counter is
+    pre-seeded to `{"tick": 0, "count": 1}`: `QUIET_TICKS_TO_STAND_DOWN` is 2, so a fresh
+    fixture returns `armed` whatever the marker says and the `sleep-until` half would be
+    unreachable on any code.
+    """
+
+    REASON = "Wire the Sweep Gate Verdict SC2 — the >=5 wakable-ticks floor"
+    EXEMPT_GOAL = (
+        "---\npage_type: goal\nstatus: in_progress\n"
+        'quiet_check_exempt: "%s"\n'
+        "---\n\nA goal.\n"
+    ) % REASON
+
+    def seed(self, count=1):
+        """One tick short of the stand-down, so the NEXT read is what decides."""
+        with open(os.path.join(self.state, "%s.quiet" % self.m.slug("AGoal")),
+                  "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"tick": 0, "count": count}) + "\n")
+
+    def deferred(self):
+        self.task("Later", extra='defer_date: "2099-01-01"\n')
+
+    def _argv(self):
+        return ["--subject", "AGoal", "--vault", self.vault,
+                "--today", "2026-10-15", "--state-dir", self.state]
+
+    def test_a_wake_counted_subject_stays_armed_instead_of_sleeping(self):
+        self.deferred()
+        self.write("24 Goals/AGoal.md", self.EXEMPT_GOAL)
+        self.seed()
+        r = self.tick()
+        self.assertEqual(r["verdict"], "armed")
+        self.assertEqual(r["exempt"]["reason"], self.REASON)
+
+    def test_the_same_fixture_without_the_marker_sleeps(self):
+        """The negative control: the marker flips the verdict, not the fixture."""
+        self.deferred()
+        self.seed()
+        r = self.tick()
+        self.assertEqual(r["verdict"], "sleep-until")
+        self.assertEqual(r["exempt"]["reason"], "")
+
+    def test_the_exemption_blocks_sleep_until_only_never_stood_down(self):
+        self.task("Waiting", status="hold")
+        self.write("24 Goals/AGoal.md", self.EXEMPT_GOAL)
+        self.seed()
+        self.assertEqual(self.tick()["verdict"], "stood-down")
+
+    def test_an_absent_page_is_not_an_exemption(self):
+        self.assertEqual(
+            self.m.exemption(self.vault, ["Gone"], [{"goals": ["Gone"]}])["reason"],
+            "",
+        )
+
+    def test_the_marker_is_reached_through_the_rows_not_the_subject_name(self):
+        """A subject with no tracked rows has nothing to exempt."""
+        self.write("24 Goals/AGoal.md", self.EXEMPT_GOAL)
+        self.assertEqual(self.m.exemption(self.vault, ["AGoal"], [])["reason"], "")
+
+    def test_the_cli_prints_the_exempt_line_naming_key_and_reason(self):
+        self.deferred()
+        self.write("24 Goals/AGoal.md", self.EXEMPT_GOAL)
+        self.seed()
+        self.arm()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.m.main(self._argv())
+        self.assertEqual(rc, 0)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("armed\t"))
+        self.assertIn("Exempt: quiet_check_exempt — " + self.REASON, lines)

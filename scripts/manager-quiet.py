@@ -34,6 +34,29 @@ exactly this), and elsewhere it lands in the *runnable* bucket above — the saf
 direction. A subject whose clock-bound work is not deferred stays armed, which is a
 missed stand-down, not a false one.
 
+**A subject whose page is wake-counted is never offered `sleep-until`.** For some
+subjects this check's own remedy is the defect: a goal whose success criterion is advanced
+only by the manager's wakes — a soak counted as "≥N wakable ticks" — loses a tick for every
+hour slept, because `pane-wake-guard.py` returns `skip:sleeping` for a `SLEEPING` subject
+and nothing types into a parked manager. The check therefore reads a marker from the
+**subject page** and, when it is set, answers `armed` instead of `sleep-until`.
+
+⚠️ **The marker is `quiet_check_exempt`, and its value IS the reason.** It lives in the
+frontmatter of the subject page and is read through the **tracked rows' `goals:`** — never
+from the `--subject` argument alone, and never from the tracked set itself: `read_task`
+returns only `status` / `phase` / `defer_date` / `blocked_by`, so the criterion the marker
+protects has no producer on that side. Resolving through the rows is what keeps the
+exemption attached to the tree this manager actually drives — a subject with no tracked
+rows has nothing to exempt, and a row cross-listed to an unrelated goal does not lend that
+goal's marker. The value is echoed verbatim on an `Exempt:` line, so the line names the
+protected criterion by construction rather than by convention.
+
+⚠️ **It blocks `sleep-until` only, never `stood-down`.** The two verdicts answer different
+questions: a sleep is "every quiet row waits on a clock", where a wake would have mattered;
+a stand-down is "no row advances without a human", where no wake helps. Exempting the
+second would keep a genuinely finished subject paying a full-context tick every interval —
+the cost this check exists to remove.
+
 **Quiet shapes**, each read from frontmatter or the blocker resolver, never inferred:
 
   * `status` in `completed` / `aborted`  -> TERMINAL, excluded from the set entirely
@@ -71,9 +94,11 @@ TAB `<consecutive_quiet>`, where `<verdict>` is `armed`, `sleep-until` or `stood
 disarm. `sleep-until` means the same threshold was reached but **every** quiet row is
 quiet for a future `defer_date`, so the subject is waiting on a clock rather than
 finished: the caller arms a wakeup at the trigger instead of disarming, and a second line
-on stdout names that instant (`Sleep until <instant>`). An unreadable subject exits 2
-with a reason on stderr and **writes nothing** — a failed read must not advance a counter
-toward a stand-down.
+on stdout names that instant (`Sleep until <instant>`). When the subject page carries
+`quiet_check_exempt`, a line beginning `Exempt:` follows the verdict line, naming the key
+and the reason it holds — and the verdict is `armed`, never `sleep-until`. An unreadable
+subject exits 2 with a reason on stderr and **writes nothing** — a failed read must not
+advance a counter toward a stand-down.
 """
 import argparse
 import importlib.util
@@ -120,6 +145,14 @@ UNSURFACED_STATUSES = frozenset({"backlog", "hold"})
 # the operator's `todo -> planning` flip IS the approval. It must read quiet even though
 # it now carries `status: next`, which the set above no longer covers.
 UNAPPROVED_PHASE = "todo"
+
+#: The subject-page marker that keeps a wake-counted subject off `sleep-until`. Its value
+#: is the reason, echoed verbatim on the `Exempt:` line — see the module docstring.
+EXEMPT_KEY = "quiet_check_exempt"
+
+#: The two folders `resolve_subject` reads. Repeated here so the marker's page lookup
+#: agrees with that resolution rather than inventing a third convention.
+SUBJECT_DIRNAMES = ("24 Goals", "23 Topics")
 
 EXIT_OK = 0
 EXIT_UNREADABLE = 2
@@ -306,21 +339,67 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
     return {"kind": "runnable", "defer": None, "blocked": [], "unapproved": False}
 
 
+def _subject_page(vault: str, name: str) -> str | None:
+    """The page for one member name, in the folders `resolve_subject` reads."""
+    for dirname in SUBJECT_DIRNAMES:
+        path = os.path.join(vault, dirname, f"{name}.md")
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def exemption(vault: str, members: list, tracked: list) -> dict:
+    """`{"reason", "pages"}` — the wake-counted marker on this subject's own pages.
+
+    Resolved through the **tracked rows' `goals:`** rather than from the subject name.
+    A task row carries only `status` / `phase` / `defer_date` / `blocked_by`, so the
+    criterion this marker protects has no producer on the tracked side; the page is where
+    it lives. Intersecting with `members` keeps the read on the subject's own pages — a
+    row cross-listed to an unrelated goal must not lend that goal's marker to a subject
+    that does not own it.
+
+    ⚠️ **An unreadable or absent page is NOT an exemption.** The marker is an opt-in
+    exception, so its absence is the default. This module's fail-toward-ARMED rule governs
+    task rows — an unreadable row counts as runnable — and it does not turn a missing
+    exception into a granted one.
+    """
+    pd = load_predispatch()
+    named = {g for task in tracked for g in (task.get("goals") or [])}
+    reasons, pages = [], []
+    for name in sorted(named & set(members)):
+        path = _subject_page(vault, name)
+        if path is None:
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                fm = pd.split_frontmatter(fh.read())
+        except OSError:
+            continue
+        reason = (pd.fm_scalar(fm or "", EXEMPT_KEY) or "").strip().strip("'\"")
+        if reason:
+            reasons.append(reason)
+            pages.append(name)
+    return {"reason": reasons[0] if reasons else "", "pages": pages}
+
+
 def survey(vault: str, members: list, today_key) -> dict:
-    """`{"runnable", "quiet", "terminal", "defer", "blocked", "unapproved"}` for one subject's set.
+    """`{"runnable", "quiet", "terminal", "defer", "blocked", "unapproved", "exempt"}`.
 
     The task set is `manager-predispatch.py`'s `resolve_tracked` — a member may be a
     goal (admits tasks whose `goals:` name it) or a task named directly — so this check
     and the sweep see the same rows. `defer` and `blocked` are keyed by task name and
     carry only the rows that are quiet *for that reason*; `unapproved` lists the quiet
     rows sitting at `phase: todo`, whose reopening needs an approval rather than a date.
+    `exempt` is the subject page's `quiet_check_exempt` marker, resolved from the same
+    tracked set — see `exemption()`.
     """
     pd = load_predispatch()
     tasks_dir = os.path.join(vault, pd.TASKS_DIRNAME)
     index = pd.task_index(tasks_dir)
+    tracked = pd.resolve_tracked(vault, members)
     out = {"runnable": [], "quiet": [], "terminal": [], "defer": {}, "blocked": {},
-           "unapproved": []}
-    for task in pd.resolve_tracked(vault, members):
+           "unapproved": [], "exempt": exemption(vault, members, tracked)}
+    for task in tracked:
         path = os.path.join(tasks_dir, task["name"] + ".md")
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
@@ -395,6 +474,12 @@ def verdict_for(seen: dict, count: int) -> str:
     nobody has given. The row's date is named by `reopen_trigger()`; the verdict still
     stands the subject down.
 
+    ⚠️ **`exempt` turns the date-gated branch into `armed`, and only that branch.** A
+    subject whose page carries `quiet_check_exempt` is one whose criterion is advanced by
+    its own wakes, so a sleep suppresses the very thing it is counted on. The exemption is
+    a resolved input, never a vault read here — `survey()` resolves it once, so this stays
+    a pure function of `(seen, count)`.
+
     ⚠️ **The runnable guard is not redundant.** A runnable row resets `count` to 0 before
     this is called, so the two conditions cannot both hold today — but this module's whole
     invariant is failing toward ARMED, and a future change to the counter must not be able
@@ -409,6 +494,13 @@ def verdict_for(seen: dict, count: int) -> str:
         and set(seen["quiet"]) == set(seen["defer"])
         and not seen["unapproved"]
     ):
+        # The wake-counted exemption: this subject is quiet on a clock, which is exactly
+        # the shape `sleep-until` would answer — but its criterion advances only through
+        # wakes, and `pane-wake-guard.py` skips a `SLEEPING` subject. Staying armed is the
+        # whole point of the marker; the module docstring states why it stops here and
+        # does not also block `stood-down`.
+        if (seen.get("exempt") or {}).get("reason"):
+            return "armed"
         return "sleep-until"
     return "stood-down"
 
@@ -463,6 +555,7 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
         "consecutive_quiet": count,
         "verdict": verdict_for(seen, count),
         "trigger": reopen_trigger(seen),
+        "exempt": seen["exempt"],
     }
 
 
@@ -496,6 +589,12 @@ def main(argv: list) -> int:
         f"{result['verdict']}\t{len(result['runnable'])}\t"
         f"{len(result['quiet'])}\t{result['consecutive_quiet']}"
     )
+    exempt = result.get("exempt") or {}
+    if exempt.get("reason"):
+        # Echoed verbatim from the marker's own value, so the line names the protected
+        # criterion by construction rather than by convention — and it comes from the SAME
+        # read that produced the verdict, like the sleep and stand-down lines below.
+        print(f"Exempt: {EXEMPT_KEY} — {exempt['reason']}")
     if result["verdict"] == "sleep-until":
         # The wake instant comes from the SAME read that produced the verdict — a caller
         # that recomputed it could arm the wakeup for a different date than the one the
