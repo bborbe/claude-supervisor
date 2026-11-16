@@ -52,8 +52,10 @@ store could not be read (`due` only — see below).
 `due` NAMES WHY IT RESOLVED NOTHING. A wake that resolves no session has three
 shapes, and until 2026-11-16 all three printed one undifferentiated line:
 
-  store=readable · no park watches due     nothing was waiting — a real negative
-  UNREADABLE … reason=absent|unreadable    the store could not be read; exit 4
+  store=readable · no park watches due     the store was read — a real negative
+  store=absent · no park watches due       the store directory does not exist
+                                           (fresh install, or a wrong path)
+  UNREADABLE … reason=…                    present but unlistable; exit 4
   resume: <task> [<id>] live=yes|no|unknown  the member, with its liveness
   resume: none recorded live=none          the watch carries no member at all
 
@@ -140,26 +142,33 @@ def state_dir() -> Path:
 
 
 def store_state() -> tuple[str, str]:
-    """`("readable", "")` or `("unreadable", <why>)` for the watch store.
+    """`("readable", "")`, `("absent", why)` or `("unreadable", why)` for the watch store.
 
-    ⚠️ **An absent store is NOT an empty one.** `all_watches` returns `[], []`
-    when the directory does not exist — the normal shape on a first run, and
-    also the shape of a store that was relocated, unmounted, or pointed at by a
-    stale `PARK_EVENT_STATE_DIR`. `due` printed "no park watches due" for both
-    and exited 0, so a wake that could not read the store was indistinguishable
-    from a wake with nothing to do, and the round recorded every parked row as
-    abandoned on the strength of it. Measured 2026-11-15 on
-    `Nine Sessions Sit Parked Past the Fifteen-Minute Bound and Nothing Exits
-    Them`: its `sample-15-window-opens` fired into an empty read and the row's
-    session was recorded dead while `session-liveness.py --check` read LIVE.
+    ⚠️ **An absent store is not an empty one, and it is not an unreadable one either.**
+    `all_watches` returns `[], []` when the directory does not exist, and `due` used
+    to print "no park watches due" for that and for a genuinely empty store alike, so
+    a wake that could not see the store was indistinguishable from a wake with nothing
+    to do. Measured 2026-11-15 on `Nine Sessions Sit Parked Past the Fifteen-Minute
+    Bound and Nothing Exits Them`: its `sample-15-window-opens` fired into an empty
+    read and the row's session was recorded dead while `session-liveness.py --check`
+    read LIVE.
+
+    The three values are deliberately distinct rather than folded:
+
+    - `absent` — the directory is not there. On a fresh install that is the ordinary
+      "nothing has ever parked" state, so it exits 0 and prints `store=absent`; a
+      caller that sees it every tick knows to check the path, not that a worker died.
+    - `unreadable` — the directory is there but cannot be listed. That is a fault and
+      exits 4: no claim about what is parked can be made.
+    - `readable` — the store was read, so "nothing due" is a real negative.
     """
     directory = state_dir()
     try:
         if not directory.exists():
-            return "unreadable", "absent"
+            return "absent", f"{directory} does not exist"
         os.listdir(directory)
     except OSError as exc:
-        return "unreadable", f"unreadable ({exc.__class__.__name__})"
+        return "unreadable", f"{directory} could not be listed ({exc.__class__.__name__})"
     return "readable", ""
 
 
@@ -677,15 +686,15 @@ def cmd_due(args: argparse.Namespace) -> int:
     # The store is read BEFORE any verdict, because "nothing due" is a claim
     # about a store that was read, and an unreadable store cannot make it.
     store, reason = store_state()
-    if store != "readable":
+    if store == "unreadable":
         if args.json:
             print(json.dumps({"store": "unreadable", "reason": reason,
                               "path": str(state_dir())}, indent=2, sort_keys=True))
         else:
             print(
-                f"UNREADABLE store={state_dir()} reason={reason} — no watch state could be "
-                f"read, so this is NOT an empty store and no parked row may be recorded "
-                f"abandoned on it"
+                f"UNREADABLE store={state_dir()} reason={reason} — the store is there but "
+                f"could not be read, so no claim about what is parked can be made and no "
+                f"parked row may be recorded abandoned on it"
             )
         return EXIT_STORE_UNREADABLE
     watches, corrupt = all_watches()

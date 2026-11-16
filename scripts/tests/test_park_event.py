@@ -383,17 +383,18 @@ class ParkEventTest(unittest.TestCase):
         }
 
     def test_due_distinguishes_an_absent_store_from_an_empty_one(self):
-        # The defect: both printed "no park watches due" and exited 0, so a
-        # store that could not be read was indistinguishable from a store with
-        # nothing due.
+        # The defect: both printed "no park watches due" and exited 0, so a store
+        # that could not be read was indistinguishable from a store with nothing
+        # due. An absent store stays exit 0 — a fresh install has none — but it
+        # must carry its own token, because a caller seeing it every tick needs to
+        # check the path rather than conclude a worker died.
         absent = self.run_script(
             "due",
             extra_env={"PARK_EVENT_STATE_DIR": str(self.state / "missing"),
                        "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
-        self.assertNotEqual(absent.returncode, 0, absent.stdout)
-        self.assertIn("UNREADABLE", absent.stdout)
-        self.assertIn("reason=absent", absent.stdout)
-        self.assertNotIn("no park watches due", absent.stdout)
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        self.assertIn("store=absent", absent.stdout)
+        self.assertNotIn("UNREADABLE", absent.stdout)
 
         empty = self.run_script("due", extra_env={"PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
         self.assertEqual(empty.returncode, 0, empty.stderr)
@@ -401,6 +402,22 @@ class ParkEventTest(unittest.TestCase):
         # The honest negative carries its own token, so a caller distinguishes
         # the two by the output rather than by the exit code alone.
         self.assertIn("store=readable", empty.stdout)
+
+    def test_due_refuses_a_store_it_cannot_list(self):
+        # Present but unlistable is a fault, not an empty store: exit 4, and no
+        # claim about what is parked.
+        broken = pathlib.Path(self._tmp.name) / "broken"
+        broken.mkdir()
+        broken.chmod(0o000)
+        self.addCleanup(broken.chmod, 0o755)
+        proc = self.run_script(
+            "due",
+            extra_env={"PARK_EVENT_STATE_DIR": str(broken),
+                       "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(proc.returncode, 4, proc.stdout)
+        self.assertIn("UNREADABLE", proc.stdout)
+        self.assertIn("reason=", proc.stdout)
+        self.assertNotIn("no park watches due", proc.stdout)
 
     def test_due_marks_a_member_whose_session_is_absent(self):
         self.run_script("register", "--task", "Some Task", "--event", "a metric",
@@ -461,11 +478,15 @@ class ParkEventTest(unittest.TestCase):
         self.assertEqual(payload[0]["live"], {"aaaaaaaa": "no"})
 
     def test_due_json_does_not_render_an_unreadable_store_as_an_empty_list(self):
+        broken = pathlib.Path(self._tmp.name) / "broken-json"
+        broken.mkdir()
+        broken.chmod(0o000)
+        self.addCleanup(broken.chmod, 0o755)
         proc = self.run_script(
             "due", "--json",
-            extra_env={"PARK_EVENT_STATE_DIR": str(self.state / "missing"),
+            extra_env={"PARK_EVENT_STATE_DIR": str(broken),
                        "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
-        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.returncode, 4, proc.stdout)
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["store"], "unreadable")
         self.assertNotIn("due", payload)
