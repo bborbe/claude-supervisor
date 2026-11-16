@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Print the attention board's own open-card count, with the board URL.
+"""Print the attention board's own undimmed-card count, with the board URL.
 
 A manager that used to hand the operator one jump link per open gate prints ONE
 line naming the board and how much is waiting on it, and lets the operator work
 from the board instead of from a chat list that dies with the turn that wrote it.
+
+⚠️ **The line is `Board page: <n> undimmed cards`, and that name is load-bearing.**
+It was `Board: <n> open`, which reads as the store's open count and is not one:
+this counts the cards the page RENDERED, while `GET /api/1.0/attention` returns
+the items the STORE holds open — measured 2026-10-01 at 2 rendered against 4 API
+items on the same store. The store reading is `scripts/attention-store.py`, printed
+beside this line; neither number may be quoted as the other.
 
 **The count is read from the BOARD, not from the store API.** `GET
 /api/1.0/attention` is not the board's row set: measured 2026-10-01, back to back
@@ -143,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps({"open": open_cards, "url": store, "available": True}))
     else:
-        print(f"Board: {open_cards} open — {store}")
+        print(f"Board page: {open_cards} undimmed cards — {store}")
     return EXIT_OK
 
 
