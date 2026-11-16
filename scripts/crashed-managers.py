@@ -126,9 +126,11 @@ POST_TIMEOUT = 60
 # detail) — and `IDLE` means a round and that work signal are both old while the gate is still
 # watching, i.e. armed and woken but producing nothing. Nothing here cards it; the topic tier
 # is what acts on a slot that produces nothing.
-# `WORKING` (no round, but the transcript moved) is not a lapse either.
-CADENCE_STATES = ("OK", "WORKING", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID",
-                  "WRONG-BRANCH")
+# `WORKING` (no round, but the transcript moved) is not a lapse either, and neither is
+# `LAPSED` — past the hard cap the arm file is dead while the transcript still moves. LAPSED
+# names that state so the keep-alive leg can count it; it is not in any restart set.
+CADENCE_STATES = ("OK", "WORKING", "LAPSED", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED",
+                  "INVALID", "WRONG-BRANCH")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
@@ -410,8 +412,12 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         # nothing — and treating it as coverage would suppress a real goal-manager crash. The
         # topic's own cadence is the only thing that says the loop is actually running.
         topic_stem = entry[: -len(".md")]
+        # ⚠️ `LAPSED` belongs in this set for the same reason `STOPPED` does: the session is
+        # alive and writing, but its arm file is past the hard cap, so no round is coming and
+        # it covers nothing. Counting it as coverage is how a dead goal-manager loop is
+        # suppressed by a live-looking topic manager.
         if cadence_state(topic_stem, "topic") in (
-            "STOPPED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
+            "STOPPED", "LAPSED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
         ):
             continue
         return True

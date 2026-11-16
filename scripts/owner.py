@@ -126,8 +126,8 @@ _ABSENT_WORD = re.compile(r"ABSENT\b")
 #: ⚠️ `IDLE` and `WORKING` must be here: a word missing from this list reads as
 #: `UNREADABLE`, so a live `IDLE` manager read as "cannot tell" instead of an owner — the
 #: opening for a second writer that step 9 below exists to close.
-LOOP_STATES = ("OK", "WORKING", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID",
-               "WRONG-BRANCH")
+LOOP_STATES = ("OK", "WORKING", "LAPSED", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED",
+               "INVALID", "WRONG-BRANCH")
 PROBE_FAILED = "UNREADABLE"
 
 #: `manager-liveness.py`'s tiers. A loop record carries its branch in the slug
@@ -248,8 +248,10 @@ def verdict_of(session: str, loop: str) -> tuple:
     # `OK` manager does, so a caller must not open a second writer for it; the action it
     # needs is the operator's attention (the topic tier renders it), never a fresh spawn.
     # `WORKING` — no round inside the limit, but the transcript moved — is an owner too:
-    # the session is mid-turn on the subject.
-    if session == "LIVE" and loop in ("OK", "WORKING", "IDLE", "STALE"):
+    # the session is mid-turn on the subject. `LAPSED` — the arm file is past the hard cap
+    # while the transcript still moves — is an owner as well, and for the stronger reason:
+    # the session is demonstrably alive, so a second writer must not be opened onto it.
+    if session == "LIVE" and loop in ("OK", "WORKING", "LAPSED", "IDLE", "STALE"):
         return OWNER, "live-armed"
     # 10. A caller that named a session but no subject has no loop to read. That is not an owner
     #     on the evidence, and it is not "no owner" either.
