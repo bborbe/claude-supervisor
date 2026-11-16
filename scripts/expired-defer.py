@@ -64,17 +64,22 @@ _RECURRING = re.compile(r"^recurring:\s*(.*)$", re.M)
 RECURRING_CREATOR = "recurring-task-creator"
 
 
-def frontmatter(text):
-    """The frontmatter block, or None when the file does not open with `---`.
+def frontmatter(handle):
+    """The frontmatter block from an open handle, or None when the file does not open with `---`.
 
-    Read to the closing delimiter rather than to a byte cap — see the module docstring.
+    Streams line by line and stops at the closing delimiter, so a task body is never read.
+    Reading whole files first made a full three-root scan take minutes, which is unusable
+    for a line that rides every fleet round; the frontmatter is all this script needs.
+    ⚠️ The block itself is read in full — there is no byte cap (see the module docstring).
     """
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    first = handle.readline()
+    if first.strip() != "---":
         return None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            return "\n".join(lines[1:index])
+    lines = []
+    for line in handle:
+        if line.strip() == "---":
+            return "\n".join(lines)
+        lines.append(line.rstrip("\n"))
     return None
 
 
@@ -113,11 +118,10 @@ def scan(roots, today):
                 path = os.path.join(dirpath, name)
                 try:
                     with open(path, encoding="utf-8", errors="replace") as handle:
-                        text = handle.read()
+                        block = frontmatter(handle)
                 except OSError as exc:
                     print("expired-defer: cannot read %s: %s" % (path, exc), file=sys.stderr)
                     continue
-                block = frontmatter(text)
                 if block is None:
                     continue
                 defer_date = expired(block, today)

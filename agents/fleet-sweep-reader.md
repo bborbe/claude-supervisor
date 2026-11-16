@@ -193,8 +193,9 @@ work while no rotation can reach it. Run `python3 $P/expired-defer.py` and paste
 `EXPIRED_DEFER_DATE` lint rule, so do not re-derive the count with a `grep`. ⚠️ **A failed run
 prints `expired-defer=UNKNOWN (read failed)`, never `0`** — the same rule `LEDGER` and
 `DETECTORS` already carry, because an unreadable root is not an empty one. ⚠️ **Cost:** the scan
-walks every task file; measured 31 s for `private-personal/25 Tasks` alone, so budget minutes,
-not seconds, when the three roots are all present.
+opens every task file, and the vault volume is I/O-bound — measured 31 s for
+`private-personal/25 Tasks` alone and **3 m 12 s for all three roots** on a loaded host. Budget
+minutes, not seconds, and do not read a slow round as a stuck one.
 
 ⚠️ **The `LEGS` section is seeded here and owned by `commands/steps/output-shape.md` item 14 — never restate its formats.** Row 5b runs *after* this digest is written, so no reading exists; a fabricated `0` would be indistinguishable from a leg that ran and found nothing. Write the `not run` line verbatim; the leg replaces it via `scripts/fleet-legs.py`. ⚠️ **Never write a count here** — this leg does not measure those populations.
 
