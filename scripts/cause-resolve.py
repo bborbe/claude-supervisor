@@ -48,6 +48,27 @@ the mechanism, so the resolver reports the ledger row as context and never deriv
 from it. Reading a fact from the store that owns it means not reading a mechanism out of a
 store that never wrote one.
 
+## Which half is proven where
+
+The **negative** half is proven on real rounds: a session that quoted a sibling's reap line
+resolves `unverified`, and a round of all-`unverified` causes is a correct round rather than
+a silent one.
+
+The **positive** half — `asserted` — is *not* observable on a real round, and the reason is
+structural rather than a missing sample. The reaper writes
+`job=idle-reaper action=closed sid=<sid>` to the **daemon log** when it closes a session. A
+session's own `events.jsonl` can carry that line only if the session read the daemon log
+**after** it was reaped, which cannot happen. Measured 2026-11-15 over every `*.jsonl` under
+the Claude projects and state trees: 173 `action=closed` lines, every one naming a
+**foreign** session, none naming its own file — the borrowing this resolver refuses is the
+only shape that exists.
+
+So the positive half is reachable only from a seeded fixture, and
+`scripts/tests/test_cause_resolve.py` is its **only** proof: its positive control fails an
+always-`unverified` stub, which is exactly the failure a round of all-`unverified` causes
+would otherwise hide. A change that breaks the `asserted` path turns that test red; no
+production observation would notice.
+
 ## Usage
 
     python3 scripts/cause-resolve.py --session <sid> [--json]
