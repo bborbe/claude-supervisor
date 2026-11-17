@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.333.1
 
 - perf: **`flagged-rows.py` resolves panes in-process instead of spawning an interpreter per session id.** `pane_of` ran `python -c …` once per session — 17 rows at 2.4 s each, 40.7 s of a 51 s run — to importlib-load `who-needs-me.py` only to call `pane_for`, which itself re-reads the session registry and runs `wezterm cli list`. The resolution rules now live in `pane_for_maps(session_id, registry, pmap, records)`, which `pane_for` is a thin wrapper over, so every refusal (unknown id, ambiguous prefix, unreadable registry, unreadable pane list, nameless session with its recorded pane gone, no title match, two panes sharing a title) is the CLI's own and the two paths cannot drift. `flagged-rows.py` loads the module once per run and reads the registry, the pane list and the store once, whatever the row count. Change set: `scripts/who-needs-me.py`, `scripts/flagged-rows.py`, `scripts/tests/test_flagged_rows.py`, `CHANGELOG.md`.
 
