@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers a real turn over the wrapper's MCP `send_message`, releases a park over `…/answer`, or — with `--nudge` — uses the fire-and-forget REST route, which answers 202 without carrying a turn
+
 ## v0.334.1
 
 - fix: **the fleet round prints its two count lines even when the `Waiting on your keystroke` list fails.** `commands/steps/drive.md` led that list with the board and store lines, and the whole list is skipped when the round's pane re-read fails — so the round's only measure of operator load vanished with it. Measured 2026-11-17: rounds `00-50` and `02-07` each printed `Waiting on your keystroke — re-read failed: …` and neither `.drive` carried a single count line. Both lines read the store over HTTP and need no pane, so they now print as their own step before the list, with the prose stating they must print on every round whatever the pane read does. Change set: `commands/steps/drive.md`, `CHANGELOG.md`.
@@ -30,8 +34,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - fix: **a registry-alive, heartbeat-degraded flagged row resolves to a named `degraded` branch instead of the permanent `unknown` dead end.** The two sources answer different questions — the identity registry proves the *process* exists, the heartbeat proves the *session* is working — so folding their disagreement into `unknown` discarded the owner the same run had already resolved. `resolve_branch` now takes `registry_ok` (the registry read succeeded) and returns `degraded` for an `UNKNOWN` / `AMBIGUOUS` / `MALFORMED` row with a known owner; `unknown` survives only when the registry itself is unreadable, where no owner is known. `degraded` never spawns (no duplicate beside an existing manager) and never resumes (no second writer on a live process). Measured 2026-11-16 on `private-personal`: 8 goals + 1 topic read `unknown`; the cleanest, `No Session Lingers Without Working`, is pid 95579 alive 2d+ with its last heartbeat 6.5 h old. Change set: `scripts/flagged-rows.py`, `scripts/tests/test_flagged_rows.py`, `scripts/tests/schema/flagged-rows.schema.json` (the `branch` enum gains `degraded`), `CHANGELOG.md`.
 
 ## v0.332.0
-
-- feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers a real turn over the wrapper's MCP `send_message`, releases a park over `…/answer`, or — with `--nudge` — uses the fire-and-forget REST route, which answers 202 without carrying a turn
 
 ## v0.331.2
 
