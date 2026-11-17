@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`scripts/deliver-message.py` calls the MCP tool the wrapper actually serves — `send_agent_message`, not `send_message`.** `tools/list` on the live daemon returns `spawn_agent, send_agent_message, list_agents, agent_status, stop_agent, answer_permission, …`, so every default delivery since `v0.335.0` failed `unknown tool "send_message"` while `--nudge` (REST, 202) kept working; measured 2026-11-17 against a live headless worker whose registry row was moved aside. The arguments follow the tool — `agent_id` (the same value as `session_id` for a worker this daemon spawned) and `text`. ⚠️ A successful call is still not proof of a delivered turn: on a headless worker the call returns no result and the transcript keeps only its spawn prompt, which the docstring now says rather than implying the route carries one. The same change lands the instrument precedence rule in `docs/fleet-surface.md` — one line per instrument stating its question and what may not be concluded from it. Change set: `scripts/deliver-message.py`, `docs/fleet-surface.md`, `CHANGELOG.md`.
+
 ## v0.337.3
 
 - docs: the README tool table lists `run_slash_command(agent_id, command)`, the roster tool claude-wrapper v0.32.0 serves (`bborbe/claude-wrapper#91`): one allowlisted `/compact` or `/reload-plugins` run in a local worker as a real command — a headless worker receives it on stdin, where `send_agent_message` can only hand back a `SendMessage` name and a peer message runs no command, and a tab worker has it typed into its pane. Anything else is refused with `not allowlisted`; A2A and cluster workers are refused by name.

@@ -303,9 +303,21 @@ def main():
     # says it "cannot delegate to the REST message route: POST …/message answers 202
     # {"status":"sent"} and carries no answer". Measured 2026-11-17: a 202 was accepted
     # while the worker was mid-turn, and the text never became a turn in its transcript.
-    # So a real turn goes over MCP `send_message`; `--nudge` keeps REST for a bare poke.
+    # So a real turn goes over MCP `send_agent_message`; `--nudge` keeps REST for a bare poke.
+    #
+    # ⚠️ **The exposed tool is `send_agent_message`, not `send_message`.** `tools/list` on the
+    # live daemon returns `spawn_agent, send_agent_message, list_agents, agent_status,
+    # stop_agent, answer_permission, …` — a call to `send_message` fails `unknown tool`, and
+    # it did so on every invocation of the 0.332.0–0.337.3 builds (measured 2026-11-17). Its
+    # argument is `agent_id`, not `session_id`; the two hold the same value for a worker this
+    # daemon spawned, which is the only case this script serves.
+    #
+    # ⚠️ **A successful call is still not proof of a delivered turn.** Measured the same day
+    # on a headless worker: `send_agent_message` returned no result and the worker's
+    # transcript kept exactly one user turn — its spawn prompt. Report the call's own
+    # outcome, never a delivery this route cannot evidence.
     use_mcp = not is_answer and not args.nudge
-    channel = "send_message" if use_mcp else "rest"
+    channel = "send_agent_message" if use_mcp else "rest"
 
     if args.dry_run:
         print(json.dumps({"session_id": args.session_id, "liveness": verdict,
@@ -314,8 +326,8 @@ def main():
         return 0
 
     if use_mcp:
-        result, error, unknown = mcp_call("send_message",
-                                          {"session_id": args.session_id, "text": args.text})
+        result, error, unknown = mcp_call("send_agent_message",
+                                          {"agent_id": args.session_id, "text": args.text})
         if unknown:
             # The request may have been executed. Saying "nothing sent" here would invite a
             # retry and a second delivery, so the outcome is reported as unknown (exit 2).
@@ -329,7 +341,7 @@ def main():
                           "delivered": delivered,
                           "result": result if delivered else error}))
         if not delivered:
-            print(f"REFUSED: send_message failed: {error}", file=sys.stderr)
+            print(f"REFUSED: send_agent_message failed: {error}", file=sys.stderr)
             return 1
         return 0
 
