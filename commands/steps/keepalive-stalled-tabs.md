@@ -18,6 +18,20 @@ import json, os, subprocess, sys
 vault, f, script = sys.argv[1:4]
 if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
 tasks = f.split("|")[2]        # prints topics|goals|tasks|name — [0] is TOPICS
+topics_dir, goals_dir = (os.path.basename(f.split("|")[i].strip()) for i in (0, 1))
+def page_kind(path):
+    """goal / topic / '' — the page's own page_type, else the folder it lives in."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return ""
+    if not lines or lines[0].strip() != "---": return ""
+    for line in lines[1:]:
+        if line.strip() == "---": break
+        if line.startswith("page_type:"):
+            return line.split(":", 1)[1].strip().strip("\"'")
+    return ""
 snap = os.environ.get("FLEET_SNAPSHOT_PATH") or os.path.expanduser(
     "~/.claude/state/fleet-snapshot.json")
 try:                           # absent after fleet-reset.py, and on a first round
@@ -31,6 +45,11 @@ for sid, row in sorted(sessions.items()):
     except (TypeError, ValueError): continue
     tf = row.get("task_file") or ""
     if count < 2 or not tf: continue
+    kind = page_kind(tf)
+    if not kind:               # most goal pages carry no page_type (88/258 measured 2026-09-27)
+        folder = os.path.basename(os.path.dirname(tf))
+        kind = "topic" if folder == topics_dir else "goal" if folder == goals_dir else ""
+    if kind in ("goal", "topic"): continue   # a live manager is never a restart candidate
     try:
         out = subprocess.run(
             [sys.executable or "python3", script, "--vault", vault,
@@ -44,7 +63,7 @@ for sid, row in sorted(sessions.items()):
 PY
 ```
 
-⚠️ **A heredoc, not `python3 -c '…'`** — the comments hold apostrophes, which terminate a single-quoted `-c` string: the invocation died with a bash syntax error before the first row. ⚠️ **The snapshot, not a sweep payload** — no producer emits rows with `class`/`mode`, so `stall_count >= 2` is the whole population test, and `restart-worker.py` refuses `headless-target` itself. ⚠️ **That counter is not the whole `stalled` verdict** (the reader also needs `--ages` reading `quiet`, which the snapshot lacks), so this population is a **superset** — safe, because the act is a card, not a restart. ⚠️ **One `python3` call, never a shell `for`** — `allowed-tools` grants fixed command prefixes, so a loop escalates a prompt every round.
+⚠️ **A heredoc, not `python3 -c '…'`** — the comments hold apostrophes, which terminate a single-quoted `-c` string: the invocation died with a bash syntax error before the first row. ⚠️ **The snapshot, not a sweep payload** — no producer emits rows with `class`/`mode`, so `stall_count >= 2` is the whole population test within one page kind, and `restart-worker.py` refuses `headless-target` itself. ⚠️ **Manager-owned rows are excluded first, by the resolved page's kind** — its own `page_type: goal`/`topic`, else the folder it lives in (`24 Goals/`, the topics dir), because most goal pages carry no `page_type`. A live goal or topic manager is never a candidate: `restart-worker.py` refuses `busy-target`, so a card for one is noise about a session nobody would restart. ⚠️ **What remains is still a superset of the reader's `stalled` verdict for tab workers** (the reader also needs `--ages` reading `quiet`, which the snapshot lacks), and that residue is safe because the act is a card, not a restart. ⚠️ **One `python3` call, never a shell `for`** — `allowed-tools` grants fixed command prefixes, so a loop escalates a prompt every round.
 
 ## Act on the verdict — the script's first line
 
