@@ -103,6 +103,20 @@ class CardBeforeRearm(_Base):
         self.assertNotIn("session-exit-record.py", scripts,
                          "a card that did not land must not be papered over by a re-arm")
 
+    def test_failed_rearm_is_reported(self):
+        """A card that says "re-armed" over a re-arm that failed is the same lie in reverse."""
+        def failing(argv, **kwargs):
+            self.calls.append(argv)
+            name = pathlib.Path(argv[1]).name
+            if name == "exit-record-coverage.py":
+                return _Done(json.dumps({"unrecorded": [SILENT], "unknown": []}))
+            if name == "attention-ask.py":
+                return _Done("item-42")
+            return _Done("", returncode=1)
+
+        k.subprocess.run = failing
+        self.assertEqual(k.main(["--now", str(NOW)]), 1)
+
     def test_every_tick_writes_the_liveness_file(self):
         k.main(["--now", str(NOW)])
         self.assertEqual(pathlib.Path(k.HEARTBEAT).read_text().strip(), str(int(NOW)))

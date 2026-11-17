@@ -36,7 +36,11 @@ COVERAGE = os.path.join(HERE, "exit-record-coverage.py")
 RECORD = os.path.join(HERE, "session-exit-record.py")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
-STATE_DIR = os.path.expanduser(os.environ.get("SESSION_EXIT_DIR") or "~/.claude/state/session-exit")
+# ⚠️ The SAME override the store owner reads (`session-exit-record.py` `state_dir()`), not a
+# second name for it: a keeper pointed at a different directory would watch an empty store and
+# report every pane healthy forever.
+STATE_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSION_EXIT_DIR") or "~/.claude/state/session-exit")
 HEARTBEAT = os.path.join(STATE_DIR, "keeper-heartbeat")
 
 # A stable producer identity: a launchd tick has no Claude session to borrow one from.
@@ -130,13 +134,18 @@ def card(row, beat_at, now):
 
 
 def rearm(pane, pid, session):
-    """Start a fresh observer for a live pane — the same call the spawn line makes."""
+    """Start a fresh observer for a live pane — the same call the spawn line makes.
+
+    Returns whether it actually ran. A failure is reported by the caller, never swallowed: the
+    card is already on the board, so a silent re-arm failure would leave the pane unrecorded
+    with a card that says it was re-armed.
+    """
     try:
-        subprocess.run([sys.executable, RECORD, "observe", "--pane", str(pane), "--pid", str(pid),
-                        "--session", session], capture_output=True, timeout=SWEEP_TIMEOUT)
+        out = subprocess.run([sys.executable, RECORD, "observe", "--pane", str(pane), "--pid", str(pid),
+                              "--session", session], capture_output=True, timeout=SWEEP_TIMEOUT)
     except (subprocess.TimeoutExpired, OSError):
         return False
-    return True
+    return out.returncode == 0
 
 
 def main(argv=None):
@@ -177,7 +186,11 @@ def main(argv=None):
                   f"unrecorded rather than hiding the death", file=sys.stderr)
             rc = 1
             continue
-        rearm(pane, pid, session)
+        if not rearm(pane, pid, session):
+            print(f"exit-observer-keeper: pane {pane} carded ({item}) but the RE-ARM FAILED — it "
+                  f"stays unrecorded", file=sys.stderr)
+            rc = 1
+            continue
         print(f"exit-observer-keeper: pane {pane} carded ({item}) and re-armed (pid {pid})")
     return rc
 
