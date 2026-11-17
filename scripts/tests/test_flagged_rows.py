@@ -957,24 +957,153 @@ class TaskFlagScalar(unittest.TestCase):
         self.assertFalse(fr.flag_admits(page("flag: 1"), "task"))
 
 
-class PaneCache(unittest.TestCase):
-    """`pane_of` imports a 2300-line module per call, so duplicate sids share one."""
+class PaneBatch(unittest.TestCase):
+    """Pane resolution is batched: one registry read and one pane list per run.
 
-    def test_a_repeated_session_id_probes_once(self):
-        ctx = {"liveness_cache": {}}
-        with unittest.mock.patch.object(fr.subprocess, "run") as run:
-            run.return_value = unittest.mock.Mock(returncode=0, stdout="12\n", stderr="")
-            self.assertEqual(fr.pane_of(ctx, "sid"), "12")
-            self.assertEqual(fr.pane_of(ctx, "sid"), "12")
-            self.assertEqual(run.call_count, 1)
+    Measured 2026-11-16: `pane_of` spawned a fresh interpreter per session id — 17
+    rows, 40.7 s of a 51 s run — because each spawn importlib-loaded
+    `who-needs-me.py` only to call `pane_for`, which itself re-reads the registry and
+    `wezterm cli list`. Both halves are gone: the module loads in-process once, and
+    the three inputs are read once and shared.
+    """
 
-    def test_a_failed_probe_is_cached_as_none(self):
+    SID = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    def setUp(self):
+        self.registry = {self.SID: "Session A"}
+        self.panes = {"204": {"pane_id": 204, "title": "✳ Session A"}}
+        self.records = [{"session_id": self.SID, "pane": "204", "kind": "idle", "ts": 1}]
+        self.reads = {"registry": 0, "panes": 0, "records": 0}
+        self.wnm = fr._who_needs_me()
+
+    def fake(self):
+        test = self
+
+        class Fake:
+            def read_registry(_self):
+                test.reads["registry"] += 1
+                return None if test.registry is None else dict(test.registry)
+
+            def wezterm_panes(_self):
+                test.reads["panes"] += 1
+                return None if test.panes is None else dict(test.panes)
+
+            def load(_self, _suffix):
+                test.reads["records"] += 1
+                return list(test.records)
+
+            def pane_for_maps(_self, sid, registry, pmap, records):
+                return test.wnm.pane_for_maps(sid, registry, pmap, records)
+
+        return Fake()
+
+    def test_the_three_inputs_are_read_once_per_run(self):
+        """Three DIFFERENT sids still cost one read each — batching, not caching."""
         ctx = {"liveness_cache": {}}
-        with unittest.mock.patch.object(fr.subprocess, "run") as run:
-            run.return_value = unittest.mock.Mock(returncode=1, stdout="", stderr="x")
-            self.assertIsNone(fr.pane_of(ctx, "sid"))
-            self.assertIsNone(fr.pane_of(ctx, "sid"))
-            self.assertEqual(run.call_count, 1)
+        with unittest.mock.patch.object(fr, "_who_needs_me", self.fake):
+            for sid in (self.SID[:4], self.SID[:8], self.SID):
+                self.assertEqual("204", fr.pane_of(ctx, sid))
+        self.assertEqual({"registry": 1, "panes": 1, "records": 1}, self.reads)
+
+    def test_no_interpreter_is_spawned_for_a_pane(self):
+        with unittest.mock.patch.object(fr.subprocess, "run") as run, \
+             unittest.mock.patch.object(fr, "_who_needs_me", self.fake):
+            self.assertEqual("204", fr.pane_of({"liveness_cache": {}}, self.SID))
+        run.assert_not_called()
+
+    def test_a_repeated_session_id_reads_nothing_again(self):
+        ctx = {"liveness_cache": {}}
+        with unittest.mock.patch.object(fr, "_who_needs_me", self.fake):
+            self.assertEqual("204", fr.pane_of(ctx, self.SID))
+            self.assertEqual("204", fr.pane_of(ctx, self.SID))
+        self.assertEqual(1, self.reads["panes"])
+
+
+class PaneRefusals(unittest.TestCase):
+    """Every `pane_for` refusal survives the batch path, text included.
+
+    `pane_of` delegates to `pane_for_maps`, which `pane_for` itself wraps, so these
+    assert the CLI's own reason strings rather than a second copy of them. A refusal
+    that silently became a `None` pane would read to the operator as "no pane", which
+    is the dead end `pane_for`'s docstring exists to prevent.
+    """
+
+    SID = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    OTHER = "11111111-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+    def setUp(self):
+        self.wnm = fr._who_needs_me()
+        self.registry = {self.SID: "Session A"}
+        self.panes = {"204": {"pane_id": 204, "title": "✳ Session A"}}
+        self.records = [{"session_id": self.SID, "pane": "204", "kind": "idle", "ts": 1}]
+
+    def resolve(self, sid, registry="same", pmap="same"):
+        return self.wnm.pane_for_maps(
+            sid,
+            self.registry if registry == "same" else registry,
+            self.panes if pmap == "same" else pmap,
+            self.records)
+
+    def test_an_empty_session_id(self):
+        self.assertEqual((None, "pane-for: no session id given"), self.resolve(""))
+
+    def test_an_unreadable_registry(self):
+        pane, reason = self.resolve(self.SID, registry=None)
+        self.assertIsNone(pane)
+        self.assertEqual(
+            "pane-for: session registry unreadable — cannot decide liveness", reason)
+
+    def test_an_unknown_session_id(self):
+        self.assertEqual(
+            (None, "pane-for: no live session id matches deadbeef"), self.resolve("deadbeef"))
+
+    def test_an_ambiguous_prefix(self):
+        self.registry[self.OTHER] = "Session B"
+        pane, reason = self.resolve(self.SID[:8])
+        self.assertIsNone(pane)
+        self.assertEqual(
+            "pane-for: 2 live session ids match 11111111 — pass the full id", reason)
+
+    def test_an_unreadable_pane_list(self):
+        pane, reason = self.resolve(self.SID, pmap=None)
+        self.assertIsNone(pane)
+        self.assertTrue(reason.startswith("pane-for: "), reason)
+        self.assertNotIn("None", reason)
+
+    def test_a_nameless_session_with_no_recorded_pane(self):
+        self.registry[self.SID] = ""
+        self.records[0]["pane"] = None
+        pane, reason = self.resolve(self.SID)
+        self.assertIsNone(pane)
+        self.assertEqual(
+            "pane-for: session 11111111 is live but carries no name, and its recorded "
+            "pane (none) is gone", reason)
+
+    def test_no_title_matches(self):
+        self.records[0]["pane"] = "85"
+        self.panes = {"205": {"pane_id": 205, "title": "✳ Other"}}
+        pane, reason = self.resolve(self.SID)
+        self.assertIsNone(pane)
+        self.assertEqual(
+            "pane-for: session 11111111 is live but no pane resolves — recorded pane 85 "
+            "is gone and no WezTerm pane is titled 'Session A'", reason)
+
+    def test_two_panes_sharing_a_title(self):
+        self.records[0]["pane"] = "85"
+        self.panes = {
+            "204": {"pane_id": 204, "title": "✳ Session A"},
+            "205": {"pane_id": 205, "title": "✳ Session A"},
+        }
+        pane, reason = self.resolve(self.SID)
+        self.assertIsNone(pane)
+        self.assertEqual(
+            "pane-for: session 11111111 is live but 2 WezTerm panes are titled "
+            "'Session A' — ambiguous", reason)
+
+    def test_a_stale_recorded_pane_falls_back_to_the_current_name(self):
+        self.records[0]["pane"] = "85"
+        self.panes = {"1391": {"pane_id": 1391, "title": "✳ Session A"}}
+        self.assertEqual(("1391", None), self.resolve(self.SID))
 
 
 class SubjectLivenessPrecedence(unittest.TestCase):
@@ -1066,14 +1195,36 @@ class ProbeTimeoutTest(unittest.TestCase):
         with unittest.mock.patch.object(fr.subprocess, "run", side_effect=self._hang):
             self.assertEqual(fr.liveness_of(self.SID), "UNKNOWN")
 
-    def test_a_hung_pane_probe_reads_no_pane_and_is_cached(self):
+    def test_a_hung_pane_list_reads_no_pane_and_is_read_once(self):
+        """A wedged mux now costs one read per run, not one spawn per row.
+
+        The per-sid spawn is gone, so the bound lives in `wezterm_panes()`'s own
+        PANE_LIST_TIMEOUT/retry. What this pins is the consequence: an unreadable
+        pane list yields no pane for every row, and is read ONCE for the run.
+        """
         ctx = {"liveness_cache": {}}
-        with unittest.mock.patch.object(fr.subprocess, "run",
-                                        side_effect=self._hang) as run:
+        wnm = fr._who_needs_me()
+        reads = []
+        sid = self.SID
+
+        class Fake:
+            def read_registry(_self):
+                return {sid: "Session A"}
+
+            def wezterm_panes(_self):
+                reads.append(1)
+                return None
+
+            def load(_self, _suffix):
+                return []
+
+            def pane_for_maps(_self, session_id, registry, pmap, records):
+                return wnm.pane_for_maps(session_id, registry, pmap, records)
+
+        with unittest.mock.patch.object(fr, "_who_needs_me", Fake):
             self.assertIsNone(fr.pane_of(ctx, self.SID))
-            # Cached: a second row sharing the session must not pay the timeout again.
             self.assertIsNone(fr.pane_of(ctx, self.SID))
-            self.assertEqual(run.call_count, 1)
+        self.assertEqual(1, len(reads))
 
     def _live_row(self, no_pane):
         root = tempfile.mkdtemp()
