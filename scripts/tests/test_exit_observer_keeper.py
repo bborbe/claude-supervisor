@@ -147,5 +147,19 @@ class NothingSilent(_Base):
                          ["exit-record-coverage.py"])
 
 
+class UnresolvablePanes(_Base):
+    """Under launchd there is no `wezterm`, so the sweep resolves nothing — and must not read clean."""
+
+    def setUp(self):
+        super().setUp()
+        self.saved_run = k.subprocess.run
+        self.addCleanup(lambda: setattr(k.subprocess, "run", self.saved_run))
+        k.subprocess.run = lambda argv, **kw: (
+            self.calls.append(argv) or _Done(json.dumps({"unrecorded": [], "unknown": [{"name": "x"}]})))
+
+    def test_an_unresolvable_sweep_is_not_a_healthy_fleet(self):
+        self.assertEqual(k.main(["--now", str(NOW)]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

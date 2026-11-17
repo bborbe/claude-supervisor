@@ -39,14 +39,20 @@
     </array>
 
     <!--
-      System directories only. The keeper calls its siblings through `sys.executable` and reads
-      the store; it needs no user-writable tool, and putting one ahead of /usr/bin would let
-      anything dropped there shadow a system tool.
+      ⚠️ `wezterm` is not optional here, and it is not on the default list. The coverage sweep
+      resolves manager panes with `wezterm cli list`; without it every manager comes back
+      `unknown`, the sweep reports an EMPTY `unrecorded` list, and the keeper reads that as a
+      healthy fleet — the exact false-clean this job exists to remove. Measured on review of
+      #945: under the system-only PATH the feature was a functional no-op.
+
+      `/Applications/WezTerm.app/Contents/MacOS` rather than `~/.local/bin`: the binary lives in
+      both, and the app bundle is root-owned, so it cannot be shadowed by anything dropped in a
+      user-writable directory ahead of it. `/usr/bin` and `/bin` stay first for everything else.
     -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/Applications/WezTerm.app/Contents/MacOS</string>
     </dict>
 
     <key>StartInterval</key>

@@ -60,11 +60,13 @@ def beat(now):
         pass
 
 
-def silent(now):
-    """`[{pane, name, session_id, line}]` for manager panes whose writer has gone silent.
+def sweep(now):
+    """`(silent_rows, unknown_count)`; `None` when the sweep could not be run or parsed.
 
-    `None` means the sweep could not be run or parsed — a different fault from "nothing is
-    wrong", and never reported as one.
+    ⚠️ `unknown_count` is reported, never folded into "nothing to do". A sweep that cannot
+    resolve a pane — under launchd there is no `wezterm` on PATH, so it resolves none — returns
+    an EMPTY `unrecorded` list, which is indistinguishable from a healthy fleet unless the
+    unknown count is carried out of here. That is the same false-clean this whole row is about.
     """
     try:
         out = subprocess.run([sys.executable, COVERAGE, "--json"], capture_output=True,
@@ -72,8 +74,9 @@ def silent(now):
         doc = json.loads(out.stdout)
     except (subprocess.TimeoutExpired, ValueError, OSError):
         return None
-    return [row for row in doc.get("unrecorded", [])
+    rows = [row for row in doc.get("unrecorded", [])
             if "silent exit recorder" in row.get("line", "")]
+    return rows, len(doc.get("unknown", []))
 
 
 def identity(pane):
@@ -158,16 +161,23 @@ def main(argv=None):
     if not args.dry_run:
         beat(now)
 
-    rows = silent(now)
-    if rows is None:
+    result = sweep(now)
+    if result is None:
         print("exit-observer-keeper: coverage sweep failed — cannot tell whether any observer is "
               "dead; not reporting that as fine", file=sys.stderr)
         return 1
-    if not rows:
-        print("exit-observer-keeper: every manager pane has a live writer")
-        return 0
-
+    rows, unknown = result
     rc = 0
+    if unknown:
+        # Never "all live": a sweep that could not resolve a pane proves nothing about it.
+        print(f"exit-observer-keeper: the sweep could not resolve {unknown} manager pane(s) — "
+              f"they are NOT counted as healthy", file=sys.stderr)
+        rc = 1
+    if not rows:
+        if not unknown:
+            print("exit-observer-keeper: every manager pane has a live writer")
+        return rc
+
     for row in rows:
         pane = str(row.get("pane", ""))
         ident = identity(pane)
