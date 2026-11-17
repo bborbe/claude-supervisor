@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a registry-alive, heartbeat-degraded flagged row resolves to a named `degraded` branch instead of the permanent `unknown` dead end.** The two sources answer different questions — the identity registry proves the *process* exists, the heartbeat proves the *session* is working — so folding their disagreement into `unknown` discarded the owner the same run had already resolved. `resolve_branch` now takes `registry_ok` (the registry read succeeded) and returns `degraded` for an `UNKNOWN` / `AMBIGUOUS` / `MALFORMED` row with a known owner; `unknown` survives only when the registry itself is unreadable, where no owner is known. `degraded` never spawns (no duplicate beside an existing manager) and never resumes (no second writer on a live process). Measured 2026-11-16 on `private-personal`: 8 goals + 1 topic read `unknown`; the cleanest, `No Session Lingers Without Working`, is pid 95579 alive 2d+ with its last heartbeat 6.5 h old. Change set: `scripts/flagged-rows.py`, `scripts/tests/test_flagged_rows.py`, `scripts/tests/schema/flagged-rows.schema.json` (the `branch` enum gains `degraded`), `CHANGELOG.md`.
+
 ## v0.332.0
 
 - feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers over the wrapper's `POST …/sessions/<id>/message` or releases a park over `…/answer`
