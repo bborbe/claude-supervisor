@@ -305,23 +305,18 @@ REPLAY_MARK = "⟳replay"
 # (2026-10-01). Hop 3b drops those panes, so what remains in the kept set is the
 # manager's own gates and its workers'.
 #
-# ⚠️ `SIBLING_PRODUCER` is now the OVERRIDE rather than the default (see below): it
-# is resolved as a SIBLING of this file, not by name, because the two scripts ship
-# side by side and a bare `who-needs-me.py` would resolve against whatever cwd the
-# manager's pane happens to hold.
+# ⚠️ **A `--producer` caller must pass an ABSOLUTE command; the sibling path below is
+# the one that used to be this file's default.** It is
+# `os.path.join(os.path.dirname(os.path.realpath(__file__)), "who-needs-me.py") + " --section needs-you"`.
 # ⚠️ `realpath`, not `abspath`: `abspath` normalises `..` but does NOT resolve a
 # symlink, so a symlinked install would look for the producer beside the LINK
 # rather than beside the script and raise `FileNotFoundError` at the first poll —
 # a failure that only appears once the loop is running, which is the worst place
-# for it. The intent stated above is "the two scripts ship side by side", and only
-# `realpath` answers that for every way the script can be reached.
-SIBLING_PRODUCER = (
-    os.path.join(os.path.dirname(os.path.realpath(__file__)), "who-needs-me.py")
-    + " --section needs-you"
-)
+# for it. A bare `who-needs-me.py` would resolve against whatever cwd the manager's
+# pane happens to hold.
 
 # ⚠️ **THE DEFAULT FEED SOURCE IS THE SERVICE, NOT A SPAWNED INTERPRETER — changed
-# 2026-11-17.** `--interval` used to re-run `SIBLING_PRODUCER` through
+# 2026-11-17.** `--interval` used to re-run the sibling `who-needs-me.py` through
 # `subprocess.run` on every poll: a fresh Python interpreter plus 2 788 lines of
 # parsing, per manager, per minute. Measured across the fleet that was ~1.3–2.7
 # cores and the largest single consumer on the machine. The three inputs that work
