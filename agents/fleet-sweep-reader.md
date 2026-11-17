@@ -152,10 +152,11 @@ The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads i
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 48 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 48 plus the `LEGS` block as seeded here (header + two `not run` lines = three) — exactly these sections, each printed as `(none)` rather than dropped. The eight over 40 are `UNCLAIMABLE`'s header, its five recent rows, its counts line and its status line. ⚠️ **`CLOSERS` and `DETECTORS` are exempt from that allowance and are never collapsed to a summary**: their rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
+Return **≤ 49 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 49 plus the `LEGS` block as seeded here (header + two `not run` lines = three) — exactly these sections, each printed as `(none)` rather than dropped. The nine over 40 are `UNCLAIMABLE`'s header, its five recent rows, its counts line and its status line. ⚠️ **`CLOSERS` and `DETECTORS` are exempt from that allowance and are never collapsed to a summary**: their rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
 
 ```
 <line 1 of this round's .digest, pasted verbatim — fleet-snapshot.py composes it>
+expired-defer=<n>  — or: UNKNOWN (read failed), never 0
 CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: UNKNOWN (pass not run)
   <name> [<session id 8>] · <status> · <age — transcript, from --ages> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
@@ -183,6 +184,19 @@ LEGS
   keep-alive: not run — no reading recorded this round
 NOTES   runbook/command disagreements, unreadable inputs
 ```
+
+⚠️ **`expired-defer=<n>` is produced by `scripts/expired-defer.py`, one call per round.** A
+task at `status: in_progress` with a `defer_date` earlier than today is a dead park: the date
+has passed, nothing moves it, and `close-worker.py` refuses to close it — so it reads as live
+work while no rotation can reach it. Run `python3 $P/expired-defer.py` and paste its single
+`expired-defer=<n>` line verbatim; the script is the one parse shared with `vault-cli`'s
+`EXPIRED_DEFER_DATE` lint rule, so do not re-derive the count with a `grep`. ⚠️ **A failed run
+prints `expired-defer=UNKNOWN (read failed)`, never `0`** — the same rule `LEDGER` and
+`DETECTORS` already carry, because an unreadable root is not an empty one. ⚠️ **Cost:** the scan
+opens every task file, and the vault volume is I/O-bound — re-measured 2026-11-17 at **69 s** for
+`private-personal/25 Tasks` alone and **over 300 s** for all three roots on a loaded host (an
+earlier read of 31 s / 3 m 12 s was taken under lighter load). Budget minutes, not seconds, and
+do not read a slow round as a stuck one.
 
 ⚠️ **The `LEGS` section is seeded here and owned by `commands/steps/output-shape.md` item 14 — never restate its formats.** Row 5b runs *after* this digest is written, so no reading exists; a fabricated `0` would be indistinguishable from a leg that ran and found nothing. Write the `not run` line verbatim; the leg replaces it via `scripts/fleet-legs.py`. ⚠️ **Never write a count here** — this leg does not measure those populations.
 

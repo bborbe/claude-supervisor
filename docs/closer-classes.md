@@ -121,4 +121,4 @@ own execution rules.
 **Join by PANE id, never by name.** The pane id is the one key both sides carry: a `Last closers` row renders it in its `[<pane>]` column, and a `CLASSIFICATION` row carries it inside the jump link it prints (`…/jump?pane=<id>`). Names are not a key — `row()` truncates a name at 50 characters and two sessions routinely share a prefix. A `Last closers` row rendering `[ hst]` or `[   ?]` owns no pane and no link to join on: carry it only where the session id resolves unambiguously, and otherwise emit no `CLOSERS` row for it — which fail-closes, correctly, because a pane-less closer was not observed.
 
 Carry a `CLOSERS` row only for sessions that also appear in the digest's
-`CLASSIFICATION` section; the digest's 40-line payload cap depends on that filter.
+`CLASSIFICATION` section; the digest's 41-line payload cap depends on that filter.
