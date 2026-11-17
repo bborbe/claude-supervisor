@@ -1553,10 +1553,15 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
         # A bare `attention-ask.py post` in backticks is a PROSE reference to the
         # verb, not an invocation, so the closing backtick is excluded — otherwise
         # "in the order `attention-ask.py post` takes them" reads as a call site.
+        # `commands/steps/covered-subject-invariant.md` is deliberately ABSENT: as
+        # of the cron-poster-owns-the-ask change it posts nothing at all (the
+        # attention-controller `sweep-gate-notify-job` raises that card as
+        # `sweep-gate`/`cron`), so it is no longer a posting site and has no
+        # invocation to carry the flag. Listing it here would pin the retired
+        # second asker in place.
         sites = [
             "agents/goal-drive.md",
             "commands/open.md",
-            "commands/steps/covered-subject-invariant.md",
             "commands/steps/drive.md",
             "commands/steps/goal-gates.md",
             "commands/steps/goal-under-target.md",
@@ -1581,7 +1586,7 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
                         f"{site}: the invocation at offset {match.start()} does "
                         "not pass --producer-kind manager",
                     )
-        self.assertGreaterEqual(seen, 10, "the site list stopped covering the tree")
+        self.assertGreaterEqual(seen, 9, "the site list stopped covering the tree")
 
 
 class StoreTokenTest(unittest.TestCase):
