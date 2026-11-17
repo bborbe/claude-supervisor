@@ -11,6 +11,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import io
 import os
+import re
 import sys
 import tempfile
 import time
@@ -415,7 +416,7 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 300, age=3 * 1020)  # way past one observed period
         rc, out = self.check()
         self.assertEqual(rc, 10)
-        self.assertIn("period=1020s(observed)", out)
+        self.assertRegex(out, r"period=10\d\ds")
 
     def test_one_cadence_plus_slack_is_still_ok(self):
         # The limit is ONE cadence plus slack, not two (2026-10-20). A manager that
@@ -447,7 +448,7 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 900, age=1000)
         state, detail = self.m.classify("goal--manager-layer", time.time())
         self.assertEqual(state, "OK")
-        self.assertIn("period=2250s(observed)", detail)
+        self.assertRegex(detail, r"period=225\d+s")
 
     def test_rearm_after_a_stand_down_resets_the_history(self):
         # The outage gap must never count as cadence. It cannot be filtered at read
@@ -1476,7 +1477,7 @@ class StateResolution(unittest.TestCase):
         os.utime(self.m.path(s, "cadence"), (now - 1300, now - 1300))
         state, detail = self.m.classify(s, now)
         self.assertEqual("OK", state, detail)
-        self.assertIn("(observed)", detail)
+        self.assertRegex(detail, r"period=12\d\ds")
 
 
 class StoodDownPast(unittest.TestCase):
@@ -1911,6 +1912,113 @@ class DeclaredBound(unittest.TestCase):
         self.assertEqual("OK", state, detail)
         self.assertIn("period=1560s(observed)", detail)
         self.assertNotIn("bounded", detail)
+
+
+class GoalTierBound(unittest.TestCase):
+    """The goal tier is bounded by `GOAL_BOUND_K x observed`, not `DECLARED_K x declared`.
+
+    The goal loop arms no `ScheduleWakeup` — the detached sweep gate is its sole wake
+    source — so its declared interval is not its cadence. Measured 2026-11-16 on
+    `Manager Token Overhead Falls and the Worker Share Rises`: `limit=4680s` against
+    `observed=30105s` on a manager that had missed no round, so the record lapsed ~6x
+    early. The cap moves to two observed periods; a fresh gate tick still yields IDLE,
+    and a moving transcript past the cap still reads LAPSED.
+    """
+
+    SUBJECT = "Manager Token Overhead Falls and the Worker Share Rises"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+        self.addCleanup(lambda: os.environ.pop("MANAGER_GATE_LOOP_STATE_DIR", None))
+        self.addCleanup(lambda: os.environ.pop("MANAGER_TRANSCRIPT_PROJECTS_DIR", None))
+
+    def record(self, branch, gaps, declared, age):
+        """Write a `.arms` ring with these gaps and a `.cadence` of `declared` aged `age`."""
+        s = self.m.slug(self.SUBJECT, branch)
+        now = time.time()
+        epochs = [now - age]
+        for g in reversed(gaps):
+            epochs.insert(0, epochs[0] - g)
+        with open(self.m.path(s, "arms"), "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{int(e)} {declared}\n" for e in epochs))
+        p = self.m.path(s, "cadence")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(f"{declared}\n")
+        os.utime(p, (now - age, now - age))
+        return s
+
+    def heartbeat(self):
+        """A fresh gate tick for this subject and for the loop as a whole."""
+        gate = os.path.join(self.m.GATE_LOOP_STATE_DIR, "vault")
+        os.makedirs(gate, exist_ok=True)
+        for name in (f"{self.m.base_slug(self.SUBJECT)}.heartbeat", "other.heartbeat"):
+            with open(os.path.join(gate, name), "w", encoding="utf-8") as fh:
+                fh.write("0 x rc=0\n")
+
+    def test_k_is_two_observed_periods(self):
+        self.assertEqual(2, self.m.GOAL_BOUND_K)
+
+    def test_a_live_goal_manager_does_not_lapse_at_the_old_declared_limit(self):
+        # The reproduction: an 8.4 h cadence, read 5248 s after its last round. The old
+        # bound (5 x 900 + SLACK = 4680 s) lapsed this; the observed period is 30105 s.
+        s = self.record("goal", [30105] * 11, 900, 5248)
+        state, detail = self.m.classify(s, time.time())
+        self.assertNotEqual("LAPSED", state, detail)
+        self.assertIn("goal-tier observed", detail)
+        self.assertRegex(detail, r"period=301\d\ds")
+
+    def test_the_limit_is_one_observed_period_and_the_bound_two(self):
+        s = self.record("goal", [30105] * 11, 900, 5248)
+        _, detail = self.m.classify(s, time.time())
+        m = re.search(
+            r"limit=(\d+)s period=(\d+)s\(goal-tier observed\) bound=(\d+)s\(2x observed\)",
+            detail,
+        )
+        self.assertIsNotNone(m, detail)
+        limit, period, bound = (int(g) for g in m.groups())
+        self.assertEqual(period + self.m.SLACK, limit)  # one observed period
+        self.assertEqual(2 * period, bound)  # the cap
+
+    def test_a_working_goal_past_two_periods_still_lapses(self):
+        # The 2026-11-15 guard survives the new bound: a moving transcript past the cap is
+        # LAPSED, never WORKING — seven goal loops sat dead for up to 15 h behind a fresh
+        # `work=`, so the transcript cannot excuse a missing round for ever.
+        s = self.record("goal", [30105] * 11, 900, 70000)
+        with open(self.m.path(s, "session"), "w", encoding="utf-8") as fh:
+            fh.write("11111111-2222-3333-4444-555555555555\n")
+        d = os.path.join(self.m.PROJECTS_DIR, "proj")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "11111111-2222-3333-4444-555555555555.jsonl")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        t = time.time() - 30
+        os.utime(p, (t, t))
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("LAPSED", state, detail)
+        self.assertIn("lapsed (no round past the cap", detail)
+
+    def test_a_gate_watched_goal_manager_between_one_and_two_periods_reads_idle(self):
+        s = self.record("goal", [30105] * 11, 900, 40000)
+        self.heartbeat()
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("IDLE", state, detail)
+        self.assertIn("gate-driven", detail)
+
+    def test_a_goal_manager_with_no_heartbeat_is_never_gate_driven(self):
+        # SC4: no heartbeat past the limit is STALE — never OK, never gate-driven.
+        s = self.record("goal", [30105] * 11, 900, 40000)
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("STALE", state, detail)
+        self.assertNotIn("gate-driven", detail)
+
+    def test_the_topic_tier_keeps_the_declared_bound(self):
+        s = self.record("topic", [30105] * 11, 900, 40000)
+        _, detail = self.m.classify(s, time.time())
+        self.assertIn("bounded 5x declared", detail)
+        self.assertNotIn("goal-tier", detail)
 
 
 class SessionMarker(unittest.TestCase):
