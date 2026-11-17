@@ -452,9 +452,18 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
     evidence of death.
 
     ⚠️ **A prefix is resolved the way `_check` resolves one against the endpoint**, because the
-    argument is a full id or a prefix and `read_registry` is keyed by the full id only. A prefix
-    matching no registry entry, like a full id matching none, is not evidence about that session
-    and keeps its ABSENT — so the genuinely-dead case is not lost to this guard.
+    argument is a full id or a prefix and `read_registry` is keyed by the full id only.
+    ⚠️ **A match set that is EMPTY is UNKNOWN, never ABSENT — and this inverts the 2026-10-12
+    contract deliberately.** The earlier rule was that an id matching no registry entry "keeps
+    its ABSENT — so the genuinely-dead case is not lost to this guard". Measured 2026-11-17:
+    four live sessions read ABSENT during their startup window, because a freshly spawned
+    session has no registry entry until Claude Code writes one — seconds to minutes after the
+    process starts. "The registry has not heard of it" is a statement about the registry's
+    COVERAGE, exactly like the endpoint's, so it cannot license the one verdict that authorises
+    a resume. The trade-off is real and is accepted: a genuinely dead id whose entry has already
+    been deleted can no longer be called ABSENT, so a reaper relying on this verdict must
+    corroborate with the registry or a process check. An entry the registry DOES hold and
+    computes as `alive: False` is death, and still ABSENT — the `non_dead` guard below.
 
     Returns `(ABSENT, "no session id matches <sid>", None)` — the original wording, byte for
     byte, so no caller's message parsing moves — or `(UNKNOWN, <why>, None)`.
@@ -469,6 +478,18 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
     keys = list(identity)
     exact = next((k for k in keys if k.lower() == sid), None)
     matched = [exact] if exact is not None else [k for k in keys if k.lower().startswith(sid)]
+    if not matched:
+        # ⚠️ **The startup shape, and the whole point of this branch.** A session spawned
+        # moments ago is absent from the registry until it is written; an id that no entry
+        # matches is therefore a measurement this probe cannot make, not a session it can call
+        # dead. This is the same rule as an unreadable registry two blocks up — "I could not
+        # measure the precondition" is never "the precondition holds".
+        return UNKNOWN, (
+            "the identity registry holds no entry for %s, so the endpoint's coverage of live "
+            "sessions could not be measured for it and ABSENT cannot be licensed (a session "
+            "spawned moments ago is absent from the registry until it is written)"
+            % sid
+        ), None
     non_dead = [k for k in matched if (identity.get(k) or {}).get("alive") is not False]
     if non_dead:
         # ⚠️ **The cause is part of the message, not a new exit code.** A distinct code would

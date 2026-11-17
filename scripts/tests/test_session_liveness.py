@@ -42,6 +42,11 @@ LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
 # rather than imported so the suite fails loudly if the module renumbers it.
 MALFORMED = 4
 
+# A pid beyond this OS's range, so `session-identity.read_registry` computes `alive: False` from
+# a fixture record without a real process. Used by every case that needs the genuinely-dead
+# shape now that a missing registry entry reads UNKNOWN.
+DEAD_PID = 4194303
+
 
 def load():
     spec = importlib.util.spec_from_file_location(
@@ -220,10 +225,13 @@ class SessionLiveness(unittest.TestCase):
 
     def test_absent_id_differs_from_a_resolving_prefix(self):
         # (b) and (c) must NOT agree, or the probe is a constant-return stub.
+        # ⚠️ **The non-matching id reads UNKNOWN since 2026-11-17**, not ABSENT: with no registry
+        # entry the licence path cannot measure coverage. The case still discriminates — LIVE vs
+        # not-LIVE is the property under test, not which non-LIVE verdict it is.
         sid = "3fd529af-1111-2222-3333-444455556666"
         with self.fixture([row(sid)]) as fx:
             self.assertEqual(self.check("3fd529af", fx.url)[0], LIVE)
-            self.assertEqual(self.check("deadbeef", fx.url)[0], ABSENT)
+            self.assertEqual(self.check("deadbeef", fx.url)[0], UNKNOWN)
 
     def test_prefix_match_is_case_insensitive(self):
         with self.fixture([row("ABCDEF12-1111-2222-3333-444455556666")]) as fx:
@@ -237,10 +245,45 @@ class SessionLiveness(unittest.TestCase):
         # ⚠️ The probe must be a WELL-FORMED id (lowercase alphanumerics). A non-id string is now
         # refused as malformed before any verdict, so it can no longer stand in for "an id that
         # matches nothing" — keeping those two apart is the point of the shape guard.
+        #
+        # ⚠️ **Updated 2026-11-17: a 404 alone no longer licenses ABSENT.** The identity
+        # registry must also hold the session and compute it as dead (`alive: False`), because a
+        # 404 for a session the registry has not written yet is the startup shape that read
+        # ABSENT for four live workers — see
+        # `test_a_404_with_no_registry_entry_is_unknown_not_absent` below. This case now plants
+        # that dead entry, which is SC4's guard: the fix must not swallow the genuinely-dead case
+        # into UNKNOWN, or a reaper loses the one verdict that lets it reclaim a dead session.
+        sid = "doesnotexist"
+        self.plant(sid, pid=DEAD_PID)
         with self.fixture([]) as fx:
-            rc, out = self.check("doesnotexist", fx.url)
+            rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
+
+    def test_a_404_with_no_registry_entry_is_unknown_not_absent(self):
+        """The startup shape: a fresh spawn the identity registry has not written yet.
+
+        ⚠️ **Measured 2026-11-17, and it is the cheapest reproduction of this defect.** A
+        headless worker spawned at 11:13:24 (`99659e2d-cea3-4375-906c-73403f8fe2bc`, pid 39507)
+        probed ABSENT while `pgrep` showed the process running and `~/.claude/sessions/` held no
+        file for it yet. `_absent_licensed` read an empty match set, so `non_dead` was empty, the
+        `if non_dead:` guard was skipped, and the function fell through to `return ABSENT`.
+
+        ⚠️ **The assertion must not mention a pid.** `--check` has no process probe at all — its
+        only liveness source is the identity registry — so a clause about "whose pid is alive"
+        asserts identically whether the process exists or not. The pid is the harness's
+        corroboration in the live probe, never this test's input.
+
+        ⚠️ **This is the opposite population from `test_a_404_is_absent_not_unknown`.** A
+        registry-live session reaches the `non_dead` guard and already answers UNKNOWN with
+        `cause: expired`; a test over that shape passes on the unfixed build and proves nothing.
+        The failing shape is *no entry at all*.
+        """
+        sid = "99659e2d-cea3-4375-906c-73403f8fe2bc"
+        with self.fixture([]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
 
     def test_unreachable_endpoint_is_unknown_not_absent(self):
         # The SC4 direction. A dead socket means the probe could not run, and folding that into
@@ -344,7 +387,10 @@ class SessionLiveness(unittest.TestCase):
 
     def test_a_stale_row_is_absent_not_live(self):
         # A row the store holds but marks not live — positively reported, so ABSENT is licensed.
+        # ⚠️ **Since 2026-11-17 the registry must also hold the session and compute it dead.**
+        # The row alone is not the licence; see `_absent_licensed` and the startup-shape case.
         sid = "57a1e111-1111-2222-3333-444455556666"
+        self.plant(sid, pid=DEAD_PID)
         with self.fixture([row(sid, live=False)]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
@@ -401,12 +447,16 @@ class SessionLiveness(unittest.TestCase):
         self.assertIn("no session id given", err)
         self.assertEqual(out, "", "an empty id must not fall through to the listing")
 
-    def test_a_well_formed_non_matching_id_is_still_absent(self):
-        # The unchanged control: the guard rejects non-ids, never ids that simply match nothing.
+    def test_a_well_formed_non_matching_id_is_not_malformed(self):
+        # The unchanged control, restated for the 2026-11-17 rule: the shape guard rejects
+        # non-ids, never ids that simply match nothing — a well-formed id reaches the verdict
+        # path. ⚠️ **The verdict there is now UNKNOWN**, not ABSENT: with no registry entry the
+        # coverage precondition cannot be measured. The property this case still pins is the
+        # LAYER — `MALFORMED` (exit 4) would mean the argument was rejected before any verdict.
         with self.fixture([]) as fx:
             rc, out, err = self.check_streams("zzzzzzzz", fx.url)
-        self.assertEqual(rc, ABSENT)
-        self.assertIn("ABSENT — no session id matches zzzzzzzz", err)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("holds no entry for zzzzzzzz", err)
         self.assertEqual(out, "")
 
     def test_the_ambiguous_recovery_prefix_is_not_malformed(self):
@@ -527,17 +577,20 @@ class SessionLiveness(unittest.TestCase):
 
     def test_a_not_live_cluster_row_with_a_fresh_marker_is_absent(self):
         # A fresh marker means the mirror DID read the cluster, so the staleness is the ordinary
-        # death case and ABSENT is licensed.
+        # death case and ABSENT is licensed — once the registry also holds the session dead.
         open(os.path.join(self.heartbeat, "_cluster-reachability.json"), "w").close()
         sid = "c1u57e00-1111-2222-3333-444455556666"
+        self.plant(sid, pid=DEAD_PID)
         with self.fixture([row(sid, live=False, source="cluster")]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
 
     def test_a_not_live_non_cluster_row_is_absent_even_with_a_stale_marker(self):
-        # The marker is consulted ONLY for a cluster row: a local stale row keeps its ABSENT.
+        # The marker is consulted ONLY for a cluster row: a local stale row keeps its ABSENT,
+        # once the registry also holds the session dead.
         sid = "10ca1500-1111-2222-3333-444455556666"
+        self.plant(sid, pid=DEAD_PID)
         with self.fixture([row(sid, live=False, source="mcp-timer")]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
@@ -593,8 +646,10 @@ class SessionLiveness(unittest.TestCase):
                     self.assertEqual(rc_main, MALFORMED, hostile)
                     self.assertNotIn("ABSENT", err)
                     # Layer 2 — reached directly, `_check` still encodes it.
+                    # ⚠️ **UNKNOWN, not ABSENT, since 2026-11-17** — the encoding guarantee is
+                    # the property here, and a hostile id matches no registry entry.
                     rc, _, _ = self.m._check(hostile, fx.url, registry_dir=self.registry)
-                    self.assertEqual(rc, ABSENT, hostile)
+                    self.assertEqual(rc, UNKNOWN, hostile)
         finally:
             self.m._get_json = real
         self.assertTrue(seen)
@@ -881,11 +936,14 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("coverage of live sessions is", out)
 
-    def test_an_unmatched_id_keeps_its_absent_even_when_the_registry_is_populated(self):
-        # SC2's control, and the half a careless fix loses: a POPULATED registry with no match
-        # for the argument is still the genuine ABSENT. A guard that answered UNKNOWN for every
-        # unmatched id would erase the death verdict the whole instrument exists to give — the
-        # failure mode in the opposite direction from the incident.
+    def test_an_unmatched_id_reads_unknown_when_the_registry_is_populated(self):
+        # The control, restated for the 2026-11-17 rule. This case used to pin "a POPULATED
+        # registry with no match for the argument is still the genuine ABSENT". That rule is the
+        # defect: a freshly spawned session IS an unmatched id against a populated registry, so
+        # answering ABSENT there is how four live workers were called dead in one night. The
+        # death verdict is not lost — an entry the registry DOES hold and computes dead is still
+        # ABSENT, pinned by
+        # `test_an_endpoint_row_reporting_not_live_is_absent_when_the_registry_holds_it_dead`.
         self.plant("aaaa1111-1111-2222-3333-444455556666")
         with self.fixture([]) as fx:
             # ⚠️ **A WELL-FORMED id that matches nothing — never a prose string.** Since #277
@@ -894,8 +952,8 @@ class SessionLiveness(unittest.TestCase):
             # `does-not-exist-xyz` would assert the wrong layer. Master's own 404 case made the
             # same correction; this is that rule applied to a case added in the same PR.
             rc, out = self.check("deadbeef-1111-2222-3333-444455556666", fx.url)
-        self.assertEqual(rc, ABSENT)
-        self.assertIn("no session id matches", out)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("holds no entry for", out)
 
     def test_an_endpoint_row_reporting_not_live_is_absent_when_the_registry_holds_it_dead(self):
         # SC2's second half, and the half a careless fix loses: a not-live row for a session the
