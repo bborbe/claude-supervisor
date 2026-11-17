@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.330.2
 
 - fix: **the covered-subject invariant stops being a second asker for a card the cron poster already owns, and reports a stale poster instead.** The open-card card is raised model-free by the attention-controller `sweep-gate-notify-job` (producer `sweep-gate`, kind `cron`); two posters on one dedup key do not collapse, because the store's suppression is a point read of `(producer_id, dedup_key)`, so a manager-posted twin sits beside the cron card as a second open row for one ask — measured 2026-11-16, 21 open `open-card-invariant:*` items, all `sweep-gate`/`cron`, none `manager`. The fleet round's own card could never fire anyway: `invariant_card()` returns `None` before producing a payload while any card is attributed to the subject, so its card and its `--row` claim never existed. The step now posts nothing and claims nothing; `--invariant` stays as a diagnostic whose payload means the cron poster missed a subject (reported once per round), and a new read of `last-pass.json` (`SWEEP_GATE_LOOP_STATE_DIR`, bar `max(3 × duration_s, 1800 s)`, derived from the record's own measured pass) emits one stale-poster line when the asker has stopped. Change set: `commands/steps/covered-subject-invariant.md`, `scripts/tests/test_attention_ask.py`, `CHANGELOG.md`.
 
