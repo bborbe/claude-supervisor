@@ -104,7 +104,7 @@ class _RenderHarness:
     `TestCase` base would re-run every one of its tests in each subclass.
     """
 
-    def run_main(self, context, attention, live, argv=None, sessions=_ALL):
+    def run_main(self, context, attention, live, argv=None, sessions=_ALL, me=""):
         if sessions is _ALL:
             sessions = {body.get("session_id") for body in context.values()}
         with tempfile.TemporaryDirectory() as ctx, tempfile.TemporaryDirectory() as att:
@@ -117,7 +117,7 @@ class _RenderHarness:
                  mock.patch.object(cu, "ATTENTION", att), \
                  mock.patch.object(cu, "live_panes", lambda: live), \
                  mock.patch.object(cu, "live_sessions", lambda: sessions), \
-                 mock.patch.object(cu, "CLAUDE_CODE_SESSION_ID", ""), \
+                 mock.patch.object(cu, "CLAUDE_CODE_SESSION_ID", me), \
                  mock.patch("sys.argv", ["context-usage.py"] + (argv or [])), \
                  redirect_stdout(buf):
                 cu.main()
@@ -314,6 +314,43 @@ class TokenBoundRenderTest(_RenderHarness, unittest.TestCase):
             {"s1.json": ctx_row(used_percentage=15, context_window_size=None)},
             {}, {"1039"}, argv=["--threshold-tokens", "500000", "--compactable"])
         self.assertNotIn("Compaction candidates", out)
+
+
+class SelfPctTest(_RenderHarness, unittest.TestCase):
+    """`--self-pct` — the one reading a manager needs and every other view hides.
+
+    Measured 2026-11-17: a Fleet Manager self-declared "out of context" at 419,584
+    tokens — 42% of its 967k window — because `is_candidate` excludes a self row and
+    the `--compactable` view (the sweep's `context70` hand-back) drops it from `shown`
+    entirely. It could read every peer's percentage and never its own.
+    """
+
+    def test_self_pct_prints_the_own_row_even_under_compactable(self):
+        out = self.run_main(
+            {"me.json": {"session_id": "me", "used_percentage": 42, "pane": "1039",
+                         "session_name": "fleet-manager"}},
+            {}, {"1039"}, argv=["--self-pct", "--compactable"], me="me")
+        self.assertEqual(out.strip(), "42")
+
+    def test_self_pct_is_unknown_when_no_row_exists(self):
+        out = self.run_main(
+            {"other.json": {"session_id": "other", "used_percentage": 80, "pane": "1039"}},
+            {}, {"1039"}, argv=["--self-pct"], me="me")
+        self.assertEqual(out.strip(), "UNKNOWN")
+
+    def test_self_pct_is_unknown_when_the_session_id_is_unset(self):
+        # An unset id makes every row non-self — UNKNOWN, never the highest row.
+        out = self.run_main(
+            {"other.json": {"session_id": "other", "used_percentage": 80, "pane": "1039"}},
+            {}, {"1039"}, argv=["--self-pct"], me="")
+        self.assertEqual(out.strip(), "UNKNOWN")
+
+    def test_self_pct_is_unknown_when_the_store_is_empty(self):
+        # An empty/unreadable context dir must answer UNKNOWN, not the "no data yet" prose —
+        # the caller parses this output as a percentage, and a sentence where a number
+        # belongs reads as a malformed reading.
+        out = self.run_main({}, {}, {"1039"}, argv=["--self-pct"], me="me")
+        self.assertEqual(out.strip(), "UNKNOWN")
 
 
 if __name__ == "__main__":
