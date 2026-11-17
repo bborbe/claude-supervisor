@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers a real turn over the wrapper's MCP `send_message`, releases a park over `…/answer`, or — with `--nudge` — uses the fire-and-forget REST route, which answers 202 without carrying a turn
+
 ## v0.334.3
 
 - fix: **the exit-observer keeper is one long-lived process, not a per-minute launchd tick.** The tick re-ran the whole sweep every 60 s, and a sweep costs ~24 s on an idle host — ~40 % of a core, and worse, it cannot hold a sub-minute detection bound: the moment one sweep runs long, detection is one sweep plus a tick. It now sweeps once at start, refreshes the pane list every `REFRESH_SECONDS` (600), and between refreshes only `stat`s each watched `pane-<N>.log`, whose mtime is the writer's last sign of life because the log is appended on every heartbeat. `POLL_SECONDS` is 5, so detection is the 45 s staleness threshold plus one poll, and the loop costs nothing between sweeps. ⚠️ **The refresh is driven by elapsed time alone** — an earlier revision also re-swept when the pane set came back empty, and an empty pane set is the HEALTHY fleet, so it swept continuously instead of every 600 s; a test now pins that (it failed `2 != 1` against the old predicate). A failed sweep retries after `RETRY_SECONDS` (60) rather than a full interval, so a transient failure does not cost ten minutes of blindness. The plist swaps `StartInterval` for `KeepAlive` + `RunAtLoad`, which is only safe because the job rewrites `keeper-heartbeat` every pass and `fleet-board.py` renders `keeper ok|stale|absent` from it — a long-lived watcher whose own death is watched. The card-before-re-arm ordering, the `unknown` count, and the `SUPERVISOR_SESSION_EXIT_DIR` override are unchanged. Change set: `scripts/exit-observer-keeper.py`, `scripts/tests/test_exit_observer_keeper.py`, `launchd/com.bborbe.exit-observer-keeper.plist`, `CHANGELOG.md`.
@@ -38,8 +42,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - fix: **a registry-alive, heartbeat-degraded flagged row resolves to a named `degraded` branch instead of the permanent `unknown` dead end.** The two sources answer different questions — the identity registry proves the *process* exists, the heartbeat proves the *session* is working — so folding their disagreement into `unknown` discarded the owner the same run had already resolved. `resolve_branch` now takes `registry_ok` (the registry read succeeded) and returns `degraded` for an `UNKNOWN` / `AMBIGUOUS` / `MALFORMED` row with a known owner; `unknown` survives only when the registry itself is unreadable, where no owner is known. `degraded` never spawns (no duplicate beside an existing manager) and never resumes (no second writer on a live process). Measured 2026-11-16 on `private-personal`: 8 goals + 1 topic read `unknown`; the cleanest, `No Session Lingers Without Working`, is pid 95579 alive 2d+ with its last heartbeat 6.5 h old. Change set: `scripts/flagged-rows.py`, `scripts/tests/test_flagged_rows.py`, `scripts/tests/schema/flagged-rows.schema.json` (the `branch` enum gains `degraded`), `CHANGELOG.md`.
 
 ## v0.332.0
-
-- feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers over the wrapper's `POST …/sessions/<id>/message` or releases a park over `…/answer`
 
 ## v0.331.2
 
