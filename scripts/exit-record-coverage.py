@@ -8,7 +8,7 @@ script nothing read the store, so the absence was invisible until the manager di
 nothing to attribute — measured 2026-11-01, when the fleet manager died at midday with no
 record.
 
-**The test is a spawn line whose pid is still alive, not "the pane has a log".** Two traps:
+**The test is a spawn line whose pid is still alive, not "the pane has a log".** Three traps:
 
 1. A fresh manager spawn writes `kind=spawn … session=-`: its session id does not exist until
    the tab registers one (`server/tab-spawn.mjs`), so requiring the line to name the session
@@ -17,6 +17,14 @@ record.
 2. The store is keyed on the pane, and wezterm reuses pane ids. A record left by an earlier,
    dead pane would make a hand-opened manager on the reused id look recorded. A spawn line
    whose `pid` is dead is therefore no evidence for the pane's current occupant.
+3. **A live spawn line proves the writer started, not that it is still running.** The observer
+   is a detached child and nothing re-arms it: measured 2026-11-16, pane 59's writer died at
+   `2026-11-15T19:14:17Z` while its wrapper pid stayed alive another 14 h 32 m, and this check
+   read that pane **covered** for the whole gap. A live spawn must therefore be corroborated by
+   a **fresh heartbeat** — every line's `pid=` is the *wrapped* pid, never the observer's, so
+   heartbeat recency is the only evidence the writer lives. A pane whose newest heartbeat (or,
+   with no heartbeat at all, whose newest live spawn line) is older than
+   `HEARTBEAT_STALE_SECONDS` is UNRECORDED: its death would leave no end line.
 
 **Pane resolution is by title, and an unresolved pane is UNKNOWN, never clean.** The registry
 carries no pane id. The pane title is Claude Code's session name behind a leading status glyph
@@ -35,6 +43,7 @@ import os
 import re
 import sys
 import unicodedata
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -113,29 +122,94 @@ def has_live_spawn(lines, alive):
     return False
 
 
-def coverage(managers, panes, records, alive):
+HEARTBEAT_STALE_SECONDS = 45
+"""How old a writer's last evidence may be before its pane counts as UNRECORDED.
+
+`cmd_observe` appends a heartbeat every `--interval` (default 30 s) on both its kqueue and
+its polling path, so 45 s is 1.5 intervals: a writer killed just after a beat is caught
+45 s later, one killed just before is caught after 15 s, and both land inside the 60 s
+bound the response has to meet. Raising it lets a dead writer hide longer; lowering it
+flags a writer that is merely between beats.
+"""
+
+
+def _stamp(line):
+    """A record line's UTC timestamp, or `None` when the line carries no parseable one."""
+    try:
+        return datetime.strptime(line.split("\t", 1)[0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def last_seen(lines, alive):
+    """When the writer was last provably alive: newest heartbeat, else newest live spawn.
+
+    `None` means no line proves the writer ever ran. Every line's `pid=` is the *wrapped*
+    pid, so a heartbeat's presence is the only liveness signal the store carries — its
+    timestamp is the reading, and the spawn line is the fallback for a writer that died
+    before its first beat.
+    """
+    beats = [t for t in (_stamp(ln) for ln in lines if field(ln, "kind") == "heartbeat") if t]
+    if beats:
+        return max(beats)
+    spawns = []
+    for line in lines:
+        if field(line, "kind") != "spawn" or field(line, "writer") != "trap":
+            continue
+        pid, stamp = field(line, "pid"), _stamp(line)
+        if stamp and pid.isdigit() and alive(int(pid)):
+            spawns.append(stamp)
+    return max(spawns) if spawns else None
+
+
+def stale_panes(records, alive, now, threshold=HEARTBEAT_STALE_SECONDS):
+    """`{pane: age_in_seconds}` for panes whose writer has gone silent past `threshold`.
+
+    A pane with no record at all is absent here — it is already UNRECORDED for having no
+    spawn line, and giving it a second reason would only blur the two cases.
+    """
+    out = {}
+    for pane, lines in records.items():
+        seen = last_seen(lines, alive)
+        if seen is None:
+            continue
+        age = (now - seen).total_seconds()
+        if age > threshold:
+            out[str(pane)] = int(age)
+    return out
+
+
+def coverage(managers, panes, records, alive, stale=None):
     """`{"unrecorded": [...], "unknown": [...]}` for the given manager sessions.
 
     `managers` is `{session_id: name}`, `panes` `{pane_id: title}`, `records`
     `{pane_id: [record lines]}`. Each unrecorded entry carries `session_id`, `name`, `pane`
     and the rendered `line`. Pure — the caller reads the live stores.
+
+    `stale` is `stale_panes()`'s `{pane: age_seconds}`: a pane with a live spawn line but a
+    silent writer is unrecorded too, and its line says which of the two failures it is.
     """
     unrecorded, unknown = [], []
+    stale = stale or {}
     for sid in sorted(managers):
         name = managers[sid]
         pane = resolve_pane(name, panes)
         if pane is None:
             unknown.append({"session_id": sid, "name": name})
             continue
-        if has_live_spawn(records.get(str(pane), []), alive):
+        age = stale.get(str(pane))
+        if has_live_spawn(records.get(str(pane), []), alive) and age is None:
             continue
+        reason = ("runs with a silent exit recorder (last heartbeat %d s old)" % age
+                  if age is not None else
+                  "runs without the exit recorder (no live `kind=spawn` line)")
         unrecorded.append({
             "session_id": sid,
             "name": name,
             "pane": str(pane),
             "line": (
-                f"⚠️ UNRECORDED: {printable(name)} — pane {pane}, session {sid[:8]} runs without the exit "
-                "recorder (no live `kind=spawn` line); its death would leave no record"
+                f"⚠️ UNRECORDED: {printable(name)} — pane {pane}, session {sid[:8]} {reason}; "
+                "its death would leave no record"
             ),
         })
     return {"unrecorded": unrecorded, "unknown": unknown}
@@ -201,11 +275,12 @@ def all_unknown(managers):
     return {"unrecorded": [], "unknown": [{"session_id": s, "name": n} for s, n in sorted(managers.items())]}
 
 
-def live_coverage(managers, pane_map):
+def live_coverage(managers, pane_map, now=None):
     """`coverage()` over the live store. `pane_map` is `wezterm_panes()`'s answer or `None`.
 
     `None` (an unreadable `wezterm cli list`) makes every manager `unknown` — it cannot
-    prove a pane either way.
+    prove a pane either way. `now` is injected so a test can pin the clock the staleness
+    threshold is measured against.
 
     ⚠️ Known limit: `alive()` is `kill(pid, 0)`, so a dead spawn's pid recycled by an
     unrelated process reads as live and the pane as recorded — a false clean. It needs a
@@ -220,8 +295,10 @@ def live_coverage(managers, pane_map):
     # consulted. Resolving here costs one extra pass over the pane titles (tens of
     # panes against a handful of managers) and saves opening every file in the store.
     resolved = {resolve_pane(name, panes) for name in managers.values()}
-    return coverage(managers, panes, read_records(panes={p for p in resolved if p is not None}),
-                    _record_module().alive)
+    records = read_records(panes={p for p in resolved if p is not None})
+    alive = _record_module().alive
+    return coverage(managers, panes, records, alive,
+                    stale=stale_panes(records, alive, now or datetime.now(timezone.utc)))
 
 
 def main(argv=None):
