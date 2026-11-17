@@ -230,6 +230,35 @@ def _mcp_text(result):
     return first.get("text") if isinstance(first, dict) else None
 
 
+def _mcp_delivery_verdict(result):
+    """`delivered` / `refused` / `unknown` from the tool's own hand-back.
+
+    ⚠️ **A non-error result is not a delivery.** `send_agent_message` answers a headless
+    worker with a *successful* hand-back carrying `sent: false` and the registry name it would
+    be reached by — measured 2026-11-17, and the reason its own docstring records that the
+    call produces no turn. Reading `result is not None` as delivered therefore reports a
+    message that reached nobody: the success-without-evidence shape this file exists to
+    remove, pointing the wrong way.
+
+    An explicit `sent: true` (or `delivered: true`) is the only positive signal, and
+    `sent: false` is a refusal. A hand-back carrying neither is `unknown` — the shape is not
+    documented, and guessing in either direction is what this function replaces.
+    """
+    raw = _mcp_text(result)
+    try:
+        payload = json.loads(raw) if raw else None
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("sent", "delivered"):
+            value = payload.get(key)
+            if value is True:
+                return "delivered"
+            if value is False:
+                return "refused"
+    return "unknown"
+
+
 def resolve_agent_handle(session_id):
     """The roster's `agent_id` for this session — the handle `send_agent_message` takes.
 
@@ -390,15 +419,21 @@ def main():
                               "delivered": None, "delivery": "unknown", "error": error}))
             print("REFUSED: no response from the wrapper; delivery unknown", file=sys.stderr)
             return 2
-        delivered = error is None and result is not None
+        delivery = _mcp_delivery_verdict(result) if error is None else "refused"
         print(json.dumps({"session_id": args.session_id, "liveness": verdict,
                           "controls": controls, "channel": channel,
-                          "delivered": delivered,
-                          "result": result if delivered else error}))
-        if not delivered:
-            print(f"REFUSED: send_agent_message failed: {error}", file=sys.stderr)
-            return 1
-        return 0
+                          "delivered": {"delivered": True, "refused": False}.get(delivery),
+                          "delivery": delivery,
+                          "result": result if error is None else error}))
+        if delivery == "delivered":
+            return 0
+        if delivery == "unknown":
+            print("REFUSED: the wrapper answered without a delivery signal; delivery unknown",
+                  file=sys.stderr)
+            return 2
+        print(f"REFUSED: send_agent_message did not deliver: {error or _mcp_text(result)}",
+              file=sys.stderr)
+        return 1
 
     status, body, transport_failed = post(path, payload)
     if transport_failed:

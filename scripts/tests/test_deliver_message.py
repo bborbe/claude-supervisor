@@ -90,6 +90,34 @@ class ResolveAgentHandleTest(unittest.TestCase):
         self.assertTrue(why)
 
 
+class McpDeliveryVerdictTest(unittest.TestCase):
+    """A non-error hand-back is not a delivery — the shape that printed `delivered: true`
+    for a message that reached nobody."""
+
+    def setUp(self):
+        self.mod = load()
+
+    def _verdict(self, payload):
+        text = json.dumps(payload) if not isinstance(payload, str) else payload
+        return self.mod._mcp_delivery_verdict({"content": [{"type": "text", "text": text}]})
+
+    def test_explicit_sent_true_is_delivered(self):
+        self.assertEqual(self._verdict({"sent": True}), "delivered")
+
+    def test_explicit_delivered_true_is_delivered(self):
+        self.assertEqual(self._verdict({"delivered": True}), "delivered")
+
+    def test_sent_false_is_a_refusal_not_a_delivery(self):
+        """The headless hand-back: `sent: false` plus the registry name."""
+        self.assertEqual(self._verdict({"sent": False, "name": "agent-x"}), "refused")
+
+    def test_hand_back_without_a_signal_is_unknown(self):
+        self.assertEqual(self._verdict({"name": "agent-x"}), "unknown")
+
+    def test_unparseable_hand_back_is_unknown(self):
+        self.assertEqual(self._verdict("not json"), "unknown")
+
+
 class DeliveryCallShapeTest(unittest.TestCase):
     """The exact JSON-RPC arguments, pinned — this is the shape both shipped defects sat in."""
 
@@ -102,7 +130,7 @@ class DeliveryCallShapeTest(unittest.TestCase):
         if name == "list_agents":
             rows = [{"agent_id": FOREIGN_HANDLE, "session_id": SESSION}]
             return roster_payload(rows), None, False
-        return {"content": [{"type": "text", "text": "ok"}]}, None, False
+        return {"content": [{"type": "text", "text": json.dumps({"sent": True})}]}, None, False
 
     def _run(self, argv):
         out, err = io.StringIO(), io.StringIO()
@@ -127,6 +155,29 @@ class DeliveryCallShapeTest(unittest.TestCase):
         self.assertEqual(args["agent_id"], FOREIGN_HANDLE)
         self.assertEqual(args["text"], "hello")
         self.assertNotIn("message", args)
+
+    def test_headless_hand_back_reports_not_delivered(self):
+        """`sent: false` from the tool must exit non-zero and print `delivered: false`."""
+
+        def record(name, arguments):
+            if name == "list_agents":
+                rows = [{"agent_id": FOREIGN_HANDLE, "session_id": SESSION}]
+                return roster_payload(rows), None, False
+            return {"content": [{"type": "text",
+                                 "text": json.dumps({"sent": False, "name": "agent-x"})}]}, None, False
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(self.mod, "mcp_call", side_effect=record), \
+                mock.patch.object(self.mod, "liveness", return_value=("LIVE", "stub")), \
+                mock.patch.object(self.mod, "roster_row",
+                                  return_value=({"controls": ["message"]}, None)), \
+                mock.patch.object(sys, "argv",
+                                  ["deliver-message.py", "--session-id", SESSION,
+                                   "--text", "hi"]), \
+                redirect_stdout(out), redirect_stderr(err):
+            code = self.mod.main()
+        self.assertEqual(code, 1, out.getvalue())
+        self.assertIn('"delivered": false', out.getvalue())
 
     def test_nudge_keeps_the_rest_route_and_calls_no_tool(self):
         code, out, _ = self._run(["--session-id", SESSION, "--text", "hello", "--nudge"])
