@@ -859,6 +859,8 @@ an answered attention card, ships as its own task. Neither is re-implemented her
 only by a probe that positively reports the id absent — an unreadable probe is `unknown`, never
 `no`. A round that folds any of these into "the session died" records a live worker as abandoned;
 measured 2026-11-15 on `ebd76359`, recorded dead while `session-liveness.py --check` read LIVE.
+`--json` carries the same verdicts as `{store, reason, due}` — never a bare list, which cannot say
+whether the store was read.
 
 ⚠️ **An empty `blocked_by` is not a cleared wait**, and `hold` is not a finished dependency:
 "every name is terminal" is vacuously true of an empty set, and `hold` marks a block of unknown

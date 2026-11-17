@@ -403,6 +403,8 @@ class ParkEventTest(unittest.TestCase):
         # the two by the output rather than by the exit code alone.
         self.assertIn("store=readable", empty.stdout)
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores mode bits, so chmod 0o000 stays readable")
     def test_due_refuses_a_store_it_cannot_list(self):
         # Present but unlistable is a fault, not an empty store: exit 4, and no
         # claim about what is parked.
@@ -475,8 +477,23 @@ class ParkEventTest(unittest.TestCase):
                                extra_env={**env, "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         payload = json.loads(proc.stdout)
-        self.assertEqual(payload[0]["live"], {"aaaaaaaa": "no"})
+        self.assertEqual(payload["store"], "readable")
+        self.assertEqual(payload["due"][0]["live"], {"aaaaaaaa": "no"})
 
+    def test_due_json_names_the_store_on_every_branch(self):
+        # A bare list cannot say whether the store was read, so an absent store
+        # and an empty one would render identically — the same defect in JSON.
+        absent = self.run_script(
+            "due", "--json",
+            extra_env={"PARK_EVENT_STATE_DIR": str(self.state / "missing"),
+                       "PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        payload = json.loads(absent.stdout)
+        self.assertEqual(payload["store"], "absent")
+        self.assertEqual(payload["due"], [])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores mode bits, so chmod 0o000 stays readable")
     def test_due_json_does_not_render_an_unreadable_store_as_an_empty_list(self):
         broken = pathlib.Path(self._tmp.name) / "broken-json"
         broken.mkdir()
@@ -489,7 +506,7 @@ class ParkEventTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 4, proc.stdout)
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["store"], "unreadable")
-        self.assertNotIn("due", payload)
+        self.assertEqual(payload["due"], [])
 
     # --- release ------------------------------------------------------------
 

@@ -689,7 +689,8 @@ def cmd_due(args: argparse.Namespace) -> int:
     if store == "unreadable":
         if args.json:
             print(json.dumps({"store": "unreadable", "reason": reason,
-                              "path": str(state_dir())}, indent=2, sort_keys=True))
+                              "path": str(state_dir()), "due": []},
+                             indent=2, sort_keys=True))
         else:
             print(
                 f"UNREADABLE store={state_dir()} reason={reason} — the store is there but "
@@ -708,11 +709,12 @@ def cmd_due(args: argparse.Namespace) -> int:
         if when <= clock:
             due.append(record)
     if args.json:
-        # The same verdicts the text carries, so a machine caller is not left
-        # with a list that cannot say whether a member is dead or unreadable.
+        # ⚠️ An object, not a bare list: a list cannot say whether the store was
+        # read, so an unreadable store and an empty one would render identically.
         for record in due:
             record["live"] = {m: live_word(m) for m in (record.get("sessions") or [])}
-        print(json.dumps(due, indent=2, sort_keys=True))
+        print(json.dumps({"store": store, "reason": reason, "due": due},
+                         indent=2, sort_keys=True))
         return EXIT_OK
     if not due:
         print(f"no park watches due at {iso(clock)} store={store}")
