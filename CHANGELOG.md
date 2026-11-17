@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.332.0
 
 - feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers over the wrapper's `POST …/sessions/<id>/message` or releases a park over `…/answer`
 
