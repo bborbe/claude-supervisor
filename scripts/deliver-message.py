@@ -250,7 +250,12 @@ def _mcp_delivery_verdict(result):
     except ValueError:
         payload = None
     if isinstance(payload, dict):
-        for key in ("sent", "delivered"):
+        # ⚠️ **`delivered` is read before `sent`, because it is the more specific field.**
+        # A pane hand-back carries `sent: true` *beside* `delivered: false` when the turn
+        # stranded, so a `sent`-first read turns that into exactly the false success this
+        # function exists to remove. Where `delivered` is present it decides; `sent` is the
+        # fallback for the hand-back shapes that carry only one of the two.
+        for key in ("delivered", "sent"):
             value = payload.get(key)
             if value is True:
                 return "delivered"

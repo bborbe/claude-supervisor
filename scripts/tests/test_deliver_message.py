@@ -111,6 +111,13 @@ class McpDeliveryVerdictTest(unittest.TestCase):
         """The headless hand-back: `sent: false` plus the registry name."""
         self.assertEqual(self._verdict({"sent": False, "name": "agent-x"}), "refused")
 
+    def test_delivered_false_wins_over_sent_true(self):
+        """The pane hand-back: `sent: true` beside `delivered: false` is a stranding."""
+        self.assertEqual(self._verdict({"sent": True, "delivered": False}), "refused")
+
+    def test_delivered_true_wins_over_sent_false(self):
+        self.assertEqual(self._verdict({"sent": False, "delivered": True}), "delivered")
+
     def test_hand_back_without_a_signal_is_unknown(self):
         self.assertEqual(self._verdict({"name": "agent-x"}), "unknown")
 
