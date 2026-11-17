@@ -654,8 +654,28 @@ def permission_channel_sid(session_ids, projects_dir, now=None):
     return None
 
 
+def _freshest_transcript_age(session_ids, transcript_age):
+    """The smallest transcript age across a row's sessions, or None when none is readable.
+
+    `inf` is the caller's "no transcript", not a measurement, so it never wins the
+    comparison — a row with no readable transcript keeps its task-file reading.
+    """
+    if transcript_age is None:
+        return None
+    freshest = None
+    for sid in session_ids or ():
+        try:
+            age = transcript_age(sid)
+        except Exception:
+            continue
+        if age is None or age >= float("inf"):
+            continue
+        freshest = age if freshest is None else min(freshest, age)
+    return freshest
+
+
 def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None,
-                  projects_dir=None, in_flight_verdict=None):
+                  projects_dir=None, in_flight_verdict=None, transcript_age=None):
     """`(verdict, reason)` — denied | permission-channel | frozen | none | unread.
 
     Three carriers, all of which would otherwise render `progressing`:
@@ -669,9 +689,22 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
       reads such a worker `busy` or `waiting` and the feed calls it progressing,
       while every write it exists to make fails; measured 2026-10-28 on three
       sessions, one of them holding a live dev repair it could not run.
-    * **frozen** — the task file has not moved for a whole interval while its owner
-      is LIVE. That is shorter than the park cell's 2x threshold, and unlike it this
-      is a stuck claim rather than a check-in.
+    * **frozen** — neither the task file nor the session's transcript has moved for a
+      whole interval while its owner is LIVE. That is shorter than the park cell's 2x
+      threshold, and unlike it this is a stuck claim rather than a check-in.
+
+    ⚠️ **`frozen` is derived from the newer of two files, never the task file alone.**
+    A live session that spends a whole interval reasoning, reading or writing to its
+    transcript without touching its task file used to read `frozen` — a claim about the
+    session's working state derived from the wrong file. Measured 2026-11-16, twice in
+    one day: `A Park Wake That Finds No Session…` read `frozen 68m` with its transcript
+    written 0.0 min before the read, and `Night and Weekend Window…` read `frozen
+    134.9m` beside its own `in_flight` limb `transcript 18s` — the same document, the
+    same row. `transcript_age` is the same callable `in_flight()` reads, so this adds no
+    second definition of transcript age; the threshold is compared against
+    `min(task_file_age, transcript_age)`. An absent transcript (`inf`) leaves the
+    task-file reading untouched, which is what keeps the `unread` / no-transcript
+    population exactly as it was.
 
     ⚠️ **One veto, not a fourth carrier: `parked`.** The caller's `in_flight` verdict
     reads `parked` when the session registry says the worker is blocked on input, and
@@ -718,8 +751,15 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
     if mtime is None:
         return "unread", "no task-file mtime"
     age = now - float(mtime)
+    basis = "task file"
+    transcript = _freshest_transcript_age(session_ids, transcript_age)
+    if transcript is not None and transcript < age:
+        # The transcript is the newer of the two files: a session writing there is
+        # working, however still its task file is.
+        age = transcript
+        basis = "task file and transcript"
     if age >= interval:
-        return "frozen", f"task file frozen {int(age // 60)}m (>= {int(interval // 60)}m) while live"
+        return "frozen", f"{basis} frozen {int(age // 60)}m (>= {int(interval // 60)}m) while live"
     return "none", ""
 
 
@@ -823,7 +863,8 @@ def compute(subject, tracked_path, vault, interval, now=None,
         fv = feed_verdict(ids, gated, feed_state)
         ew = external_wait(ids, attention_dir)
         sv, sreason = stuck_verdict(row, ids, live, fv, interval, now, attention_dir,
-                                    projects_dir or PROJECTS_DIR, in_flight_verdict=fl)
+                                    projects_dir or PROJECTS_DIR, in_flight_verdict=fl,
+                                    transcript_age=wnm.session_transcript_age)
         out_rows[name] = {
             "ids": ids,
             "liveness": live,
@@ -909,7 +950,8 @@ def compute(subject, tracked_path, vault, interval, now=None,
         ew = external_wait(ids, attention_dir)
         sv, sreason = stuck_verdict({"mtime": None}, ids, live, fv, interval, now,
                                     attention_dir, projects_dir or PROJECTS_DIR,
-                                    in_flight_verdict=fl)
+                                    in_flight_verdict=fl,
+                                    transcript_age=wnm.session_transcript_age)
         out_rows[f"unrecorded:{sid[:8]}"] = {
             "ids": ids,
             "liveness": live,
