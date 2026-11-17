@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Exit-observer keeper — one tick a minute with no Claude session as its parent.
+
+  WHY A LAUNCHD AGENT: the thing being watched is a detached child that dies silently, and
+  nothing re-arms it. A watcher inside a session dies with that session; a detached loop is the
+  same failure one level up. `StartInterval` gives a FRESH PROCESS per tick, so there is no
+  loop to die — the shape `com.bborbe.fleet-keeper` already uses.
+
+  WHY NOT A STEP IN `fleet-keeper.py`: that script is pinned by `NoKillPathTest` to hold no
+  kill, resume, re-arm or spawn path (operator decision 2026-11-06, card `7653b7b6`). This job
+  re-arms, so it is its own process.
+
+  THE JOB'S OWN LIVENESS: every tick rewrites `~/.claude/state/session-exit/keeper-heartbeat`,
+  and `fleet-board.py` renders `exit-record-coverage.py`'s `keeper ok|stale|absent` line from
+  it. A dead keeper therefore leaves an ageing file that a round already shows — one existing
+  reader, no second instrument.
+
+  Install:
+    cp launchd/com.bborbe.exit-observer-keeper.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.exit-observer-keeper.plist
+
+  Reload after an upgrade:
+    launchctl kickstart -k gui/$UID/com.bborbe.exit-observer-keeper
+
+  The script path is the marketplace clone, not a version-pinned cache dir: a cache path would
+  pin the agent to one release and silently run stale code after every upgrade.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bborbe.exit-observer-keeper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/bborbe/.claude/plugins/marketplaces/claude-supervisor/scripts/exit-observer-keeper.py</string>
+    </array>
+
+    <!--
+      ⚠️ `wezterm` is not optional here, and it is not on the default list. The coverage sweep
+      resolves manager panes with `wezterm cli list`; without it every manager comes back
+      `unknown`, the sweep reports an EMPTY `unrecorded` list, and the keeper reads that as a
+      healthy fleet — the exact false-clean this job exists to remove. Measured on review of
+      #945: under the system-only PATH the feature was a functional no-op.
+
+      `/Applications/WezTerm.app/Contents/MacOS` rather than `~/.local/bin`: the binary lives in
+      both, and the app bundle is root-owned, so it cannot be shadowed by anything dropped in a
+      user-writable directory ahead of it. `/usr/bin` and `/bin` stay first for everything else.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/Applications/WezTerm.app/Contents/MacOS</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bborbe/Library/Logs/exit-observer-keeper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/bborbe/Library/Logs/exit-observer-keeper.log</string>
+</dict>
+</plist>

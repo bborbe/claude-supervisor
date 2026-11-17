@@ -367,5 +367,31 @@ class TestResolvePane(unittest.TestCase):
         self.assertIsNone(erc.resolve_pane(key, {"9": "✳ " + key + " Manager"}))
 
 
+class TestKeeperHealth(unittest.TestCase):
+    """The keeper re-arms dead writers; if IT dies, nothing does — so the sweep reads its beat."""
+
+    def _beat(self, age):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "keeper-heartbeat")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(f"{1800000000 - age}\n")
+            return erc.keeper_health(now=1800000000, path=path)
+
+    def test_fresh_beat_is_ok(self):
+        self.assertEqual(self._beat(10), ("ok", 10))
+
+    def test_old_beat_is_stale(self):
+        state, age = self._beat(erc.KEEPER_STALE_SECONDS + 60)
+        self.assertEqual(state, "stale")
+        self.assertIn("heartbeat", erc.keeper_line(state, age))
+
+    def test_absent_beat_is_not_ok(self):
+        """A keeper that never ran must not read as healthy."""
+        state, age = erc.keeper_health(now=1800000000, path="/nonexistent/keeper-heartbeat")
+        self.assertEqual((state, age), ("absent", None))
+        self.assertIn("never written", erc.keeper_line(state, age))
+
+
 if __name__ == "__main__":
     unittest.main()
