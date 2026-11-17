@@ -50,10 +50,12 @@ HEARTBEAT = os.path.join(STATE_DIR, "keeper-heartbeat")
 PRODUCER_ID = "exit-observer-keeper"
 
 POLL_SECONDS = 5        # between sweeps: one `stat` per watched pane, nothing else
-REFRESH_SECONDS = 600   # how often the pane list is re-swept (one ~24 s sweep each)
-RETRY_SECONDS = 60      # a failed sweep is retried sooner than a full refresh interval
+REFRESH_SECONDS = 600   # how often the pane list is re-swept (one ~55 s sweep each)
 OBSERVER_STALE = 45     # log silence that means the writer is gone (1.5 x its 30 s interval)
-SWEEP_TIMEOUT = 300     # a slow sweep must not wedge the loop forever
+# ⚠️ Must stay BELOW `exit-record-coverage.py`'s KEEPER_STALE_SECONDS (300): a sweep measured
+# ~55 s idle and >240 s under load, and if one blocks longer than that threshold the board
+# reports the keeper itself as stale. 120 s is the honest ceiling.
+SWEEP_TIMEOUT = 120
 
 
 class Loop:
@@ -86,7 +88,10 @@ class Loop:
                 print("exit-observer-keeper: coverage sweep failed — cannot tell whether any "
                       "observer is dead; not reporting that as fine", file=sys.stderr)
                 self.rc = 1
-                self.refreshed = now - REFRESH_SECONDS + RETRY_SECONDS
+                # A failed sweep waits a FULL refresh interval. Retrying after 60 s re-ran a
+                # ~55 s vault scan almost continuously, which kept the vault hot and every
+                # sweep slow — the retry was the reason the failures persisted.
+                self.refreshed = now
             else:
                 self.panes, self.unknown = result
                 self.refreshed = now
