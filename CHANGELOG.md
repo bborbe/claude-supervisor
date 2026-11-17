@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: the README tool table lists `run_slash_command(agent_id, command)`, the roster tool claude-wrapper v0.32.0 serves (`bborbe/claude-wrapper#91`): one allowlisted `/compact` or `/reload-plugins` run in a local worker as a real command — a headless worker receives it on stdin, where `send_agent_message` can only hand back a `SendMessage` name and a peer message runs no command, and a tab worker has it typed into its pane. Anything else is refused with `not allowlisted`; A2A and cluster workers are refused by name.
+
 ## v0.337.2
 
 - fix: **`flagged-rows.py` probes session liveness concurrently, so a daemon tick no longer spends minutes spawning ~68 interpreters one after another.** Rows are now prepared first, then every distinct session id the run needs (row, owner manager, fleet manager) is probed once through `session-liveness.py --check` on a `ThreadPoolExecutor` (`PROBE_WORKERS = 8`) and read back from one shared result; verdicts are unchanged. A new total deadline (`PROBE_DEADLINE = 60` s) turns any sid still unanswered into `UNKNOWN`, never `ABSENT`, because `ABSENT` licenses a second session; the per-probe `PROBE_TIMEOUT` stays. Measured 2026-11-17: ~68 sequential spawns took ~26 s by hand and 3m24s-12m30s under daemon load (load 120-300), skipping ticks while a run was in flight; a hand run now takes ~5 s against ~19 s before on the same machine. Change set: `scripts/flagged-rows.py`, `scripts/tests/test_flagged_rows.py`, `CHANGELOG.md`.
