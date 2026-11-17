@@ -282,6 +282,40 @@ def all_unknown(managers):
     return {"unrecorded": [], "unknown": [{"session_id": s, "name": n} for s, n in sorted(managers.items())]}
 
 
+KEEPER_STALE_SECONDS = 300
+
+
+def keeper_health(now=None, path=None):
+    """`(state, age_seconds)` for the exit-observer keeper's own heartbeat.
+
+    The keeper re-arms dead writers and cards them; if it dies, nothing does. Its liveness is a
+    file rather than a probe, so this — the sweep a round already runs — is what reads it: one
+    existing reader, no second instrument nobody consumes. `state` is `ok`, `stale`, or
+    `absent`; an `absent` file is not `ok`, because a keeper that never ran looks exactly like
+    one that stopped.
+    """
+    now = now if now is not None else datetime.now(timezone.utc).timestamp()
+    path = path or os.path.join(_record_module().state_dir(), "keeper-heartbeat")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            beat_at = float(handle.read().strip() or 0)
+    except (OSError, ValueError):
+        return "absent", None
+    age = int(now - beat_at)
+    return ("ok" if age <= KEEPER_STALE_SECONDS else "stale"), age
+
+
+def keeper_line(state, age):
+    """The keeper's state as an action line, or `None` when it is healthy."""
+    if state == "ok":
+        return None
+    if state == "absent":
+        return ("⚠️ The exit-observer keeper has never written a heartbeat — nothing is re-arming "
+                "a dead writer, so every pane above can stay unrecorded indefinitely.")
+    return (f"⚠️ The exit-observer keeper's heartbeat is {age} s old — if it has died, nothing is "
+            f"re-arming a dead writer and every pane above stays unrecorded.")
+
+
 def live_coverage(managers, pane_map, now=None):
     """`coverage()` over the live store. `pane_map` is `wezterm_panes()`'s answer or `None`.
 
@@ -320,6 +354,8 @@ def main(argv=None):
         print("exit-record-coverage: session registry unreadable", file=sys.stderr)
         return 1
     result = live_coverage(managers, fb.wnm.wezterm_panes())
+    state, age = keeper_health()
+    result["keeper"] = {"state": state, "age": age}
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -328,8 +364,11 @@ def main(argv=None):
         line = unknown_line(result)
         if line:
             print(line)
+        keeper = keeper_line(state, age)
+        if keeper:
+            print(keeper)
         print(f"checked {len(managers)} manager(s): {len(result['unrecorded'])} unrecorded, "
-              f"{len(result['unknown'])} unknown")
+              f"{len(result['unknown'])} unknown, keeper {state}")
     return 0
 
 
