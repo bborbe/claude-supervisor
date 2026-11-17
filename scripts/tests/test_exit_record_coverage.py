@@ -18,6 +18,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import os
 import unittest
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location(
@@ -32,9 +33,20 @@ def alive(pid):
     return pid == LIVE
 
 
-def spawn(pid, session="-", writer="trap"):
-    return (f"2026-11-02T10:00:00Z\tkind=spawn\tpane=7\tsession={session}\tpid={pid}"
+def spawn(pid, session="-", writer="trap", stamp="2026-11-02T10:00:00Z"):
+    return (f"{stamp}\tkind=spawn\tpane=7\tsession={session}\tpid={pid}"
             f"\trc=0\tsignal=-\tsender=-\twriter={writer}")
+
+
+def heartbeat(stamp="2026-11-02T10:00:20Z", pid=LIVE):
+    """A writer's beat. Its `pid=` is the *wrapped* pid — the observer's own is never recorded."""
+    return (f"{stamp}\tkind=heartbeat\tpane=7\tsession=-\tpid={pid}"
+            f"\trc=-\tsignal=-\tsender=-\twriter=observer")
+
+
+# The clock every fixture is measured against: 30 s after the spawn line, so a test that
+# wants a stale writer has to say so with an old timestamp rather than by accident.
+NOW = datetime(2026, 11, 2, 10, 0, 30, tzinfo=timezone.utc)
 
 
 MGR = {"aaaaaaaa-0000": "Fleet Manager"}
@@ -142,7 +154,7 @@ class TestLiveCoverage(unittest.TestCase):
 
     PANE_MAP = {"7": {"title": "✳ Fleet Manager"}}
 
-    def _run(self, lines_by_pane):
+    def _run(self, lines_by_pane, now=NOW):
         import tempfile
         saved = erc._record_module
         with tempfile.TemporaryDirectory() as directory:
@@ -151,13 +163,39 @@ class TestLiveCoverage(unittest.TestCase):
                     handle.write("".join(line + "\n" for line in lines))
             try:
                 erc._record_module = lambda: _TempStore(directory)
-                return erc.live_coverage(MGR, self.PANE_MAP)
+                return erc.live_coverage(MGR, self.PANE_MAP, now=now)
             finally:
                 erc._record_module = saved
 
     def test_live_spawn_in_the_store_reads_as_recorded(self):
         out = self._run({"7": [spawn(LIVE)]})
         self.assertEqual((out["unrecorded"], out["unknown"]), ([], []))
+
+    def test_stale_heartbeat_reads_as_unrecorded(self):
+        """The pane-59 case: the wrapper lives on, the writer went silent 14 h ago.
+
+        Fails before the staleness rule — `has_live_spawn` alone calls this pane covered.
+        """
+        out = self._run({"7": [spawn(LIVE, stamp="2026-11-02T09:00:00Z"),
+                               heartbeat("2026-11-02T09:30:00Z")]})
+        self.assertEqual([r["pane"] for r in out["unrecorded"]], ["7"])
+        self.assertIn("silent exit recorder", out["unrecorded"][0]["line"])
+
+    def test_reused_pane_old_heartbeat_before_a_new_spawn_is_recorded(self):
+        """Trap 2: the previous occupant's beats must not age the new spawn out."""
+        out = self._run({"7": [spawn(DEAD, stamp="2026-11-02T08:00:00Z"),
+                               heartbeat("2026-11-02T08:30:00Z"),
+                               spawn(LIVE, stamp="2026-11-02T10:00:00Z")]})
+        self.assertEqual((out["unrecorded"], out["unknown"]), ([], []))
+
+    def test_fresh_heartbeat_reads_as_recorded(self):
+        out = self._run({"7": [spawn(LIVE), heartbeat("2026-11-02T10:00:20Z")]})
+        self.assertEqual((out["unrecorded"], out["unknown"]), ([], []))
+
+    def test_live_spawn_with_no_heartbeat_ages_out(self):
+        """A writer that died before its first beat is caught by the spawn line's own age."""
+        out = self._run({"7": [spawn(LIVE)]}, now=datetime(2026, 11, 2, 10, 5, 0, tzinfo=timezone.utc))
+        self.assertEqual(len(out["unrecorded"]), 1)
 
     def test_empty_store_reads_as_unrecorded(self):
         out = self._run({})
