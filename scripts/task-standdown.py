@@ -5,7 +5,7 @@ Why this exists
 ---------------
 `/supervisor:stop` has always meant "stand this subject down" for a **manager**: it writes
 `<branch>--<base>.stopped` into the liveness state dir, the keepalive reads `STOPPED` as
-not-a-lapse, and only `--arm --resume` clears it. A **task** had no such tier. A worker
+not-a-lapse, and only `--arm --resume` or `--clear-standdown` clears it. A **task** had no such tier. A worker
 that ran `/supervisor:stop` either wrote nothing (`commands/stop.md` § `<constraints>`:
 *"Write no page, and no state file except the stop marker"*) or — worse — fell through
 step 2b's `(none recorded)` fallback onto its task's **goal** and stood down a goal

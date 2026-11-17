@@ -31,13 +31,23 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     marker vanished, the Fleet Manager read STALE and
                                     restarted a session that had deliberately stopped.
                                     Only --resume resumes.
-  --arm --resume                    ALSO clears <slug>.stopped. This is the one verb that
-                                    resumes a stood-down subject, and the two loop-start
-                                    arms (`commands/goal-loop.md` step 3,
-                                    `commands/topic-loop.md` step 3) pass it, so the
-                                    documented `Restart: /supervisor:goal-loop "<subject>"`
-                                    still comes back. A plain --arm (a round's liveness
-                                    reading) must never pass it.
+  --arm --resume                    ALSO clears <slug>.stopped. This is the arm that
+                                    resumes a stood-down subject; the topic and fleet
+                                    loop-start arms (`commands/topic-loop.md` step 3,
+                                    `commands/fleet-loop.md`) pass it. The goal tier's
+                                    step 3 arms plainly and clears with
+                                    `--clear-standdown`, so the documented
+                                    `Restart: /supervisor:goal-loop "<subject>"` still
+                                    comes back. A plain --arm (a round's liveness
+                                    reading) must never pass it. `--clear-standdown` is
+                                    the other verb that clears the marker, and it arms
+                                    nothing.
+  --clear-standdown --subject T    <slug>.stopped removed, nothing else written. The
+                                    explicit reopen: unlike `--arm --resume` it records
+                                    no liveness beat, starts no cadence sample and
+                                    consumes no reset epoch, so a reopen that is not
+                                    starting a loop stays distinguishable from one that
+                                    is. Idempotent — a subject with no marker exits 0.
   --stop  --subject T --branch B   <slug>.stopped + <slug>.reset. Run by `/supervisor:stop`,
                                     so a deliberately stood-down manager is not reported
                                     as a lapse. `.reset` is the epoch an arm consumes to
@@ -239,6 +249,16 @@ ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable perce
 # p90 4534 s → 5.04) and Development Pipeline Throughput (1.12). 5 × 900 + SLACK = 4680 s
 # still covers the Fleet Manager's measured 4534 s. The bound only ever lowers a limit.
 DECLARED_K = 5
+# The goal tier's cap is a multiple of its OBSERVED period, not of the declared interval:
+# the goal loop arms no `ScheduleWakeup` (`commands/goal-loop.md` § The goal loop arms no
+# wakeup), so the declared value describes the gate prompt, not this manager's cadence.
+# `DECLARED_K x declared` lapsed a live goal manager ~6x early — measured 2026-11-16,
+# `limit=4680s` against `observed=30105s` on `Manager Token Overhead Falls and the Worker
+# Share Rises`, which had missed no round. The cap stays, because a manager that stops
+# rounding must not teach the record its own silence: two observed periods is the
+# detection limit the parent goal states, and it bounds the work-fresh `LAPSED` path the
+# 2026-11-15 guard introduced. A gate-watched goal manager still reads `IDLE` at any age.
+GOAL_BOUND_K = 2
 EXIT_STALE = 10
 # `--state` for a subject that resolves no record under any branch and no page: a refusal,
 # distinct from argparse's 2 so a caller can tell "unresolvable name" from "bad flags".
@@ -335,8 +355,8 @@ def stopped_marker(subject: str, branch: str):
     subject the operator had deliberately ended.
 
     ⚠️ **Existence, not the timestamp.** Later stops rewrite the marker's content, so the
-    file existing is the load-bearing fact; `--arm --resume` is the one verb that clears
-    it. The RESOLVED path is returned, never a re-composed `<branch>--<slug>`: a legacy
+    file existing is the load-bearing fact; `--arm --resume` and `--clear-standdown` are
+    the two verbs that clear it, and a plain `--arm` never does. The RESOLVED path is returned, never a re-composed `<branch>--<slug>`: a legacy
     pre-split record (`<slug>.stopped`, no branch prefix) counts too, through `resolve()`,
     and a caller that re-derived the name would report a file that does not exist.
 
@@ -1230,6 +1250,42 @@ def stop(subject: str, branch: str) -> int:
     return 0
 
 
+def clear_standdown(subject: str, branch: str) -> int:
+    """Clear a stand-down marker WITHOUT arming anything.
+
+    The operator's explicit reopen. `--arm --resume` also clears the marker, but it is an
+    arm: it records a liveness beat and starts a fresh cadence sample. That is the right
+    act for a loop start and the wrong one for a reopen that is not starting a loop — the
+    clear must be observable as a decision, not as a side effect of taking a reading.
+
+    ⚠️ **Arms nothing.** No `.cadence`, no `.arms`, no `.session`, no `.reset` epoch. A
+    clear that armed would be indistinguishable from a round's reading, and a reading
+    that cleared the marker is exactly the 2026-11-07 defect (`docs/subject-resolution.md`).
+
+    ⚠️ **Every twin goes.** `resolve()` returns the prefixed record first, so deleting only
+    that would leave a legacy `<slug>.stopped` standing and the subject still stood down —
+    `stopped_marker()` would then report the twin and `open-queue.py` would keep skipping.
+    Both candidates are removed when present.
+
+    Idempotent: a subject carrying no marker is a success, not an error — the operator
+    asked for "not stood down", which is the state it is already in.
+    """
+    s = slug(subject, branch)
+    removed = []
+    candidates = [path(s, "stopped")]
+    base = legacy_base(s)
+    if base:
+        candidates.append(path(base, "stopped"))
+    for candidate in candidates:
+        try:
+            os.remove(candidate)
+            removed.append(candidate)
+        except FileNotFoundError:
+            pass
+    print(f"cleared {s}" if removed else f"not stopped {s}")
+    return 0
+
+
 def stood_down_past(minutes: float, now: float | None = None) -> int:
     """Every subject whose stand-down is older than MINUTES: `<age-seconds>\\t<slug>`.
 
@@ -1430,21 +1486,41 @@ def classify(s: str, now: float) -> tuple:
     # cadence, and a planted-lapse probe took 681 s on a 300 s cadence. One period
     # plus SLACK reports the first missed re-arm instead.
     #
-    # ⚠️ BOUNDED by `DECLARED_K × declared`. The observed period is learnt from the
-    # manager's own re-arms, so a manager that stops rounding stretches it: every long
-    # gap raises the p90 and the limit follows, until a manager silent for most of a day
-    # reads OK. The bound caps what the observation may excuse, and it only ever lowers.
+    # ⚠️ BOUNDED. The observed period is learnt from the manager's own re-arms, so a
+    # manager that stops rounding stretches it: every long gap raises the p90 and the
+    # limit follows, until a manager silent for most of a day reads OK. The bound caps
+    # what the observation may excuse, and it only ever lowers. The model-cadence tiers
+    # are bounded by `DECLARED_K x declared`; the goal tier, whose declared interval is
+    # not its cadence, by `GOAL_BOUND_K x observed` — a different multiple of a different
+    # quantity, but the same principle: the cap must not grow with the observed period.
     period = observed_period(s)
-    bound = DECLARED_K * interval
-    if period and period > bound:
-        # `period=` carries the BOUNDED value: `answer-path-check.py` sizes its reach window
-        # from that field, so the unbounded observation goes in a field of its own.
-        limit = bound + SLACK
-        basis = f"period={bound}s(bounded {DECLARED_K}x declared) observed={int(period)}s"
-    elif period:
-        limit, basis = period + SLACK, f"period={int(period)}s(observed)"
+    if s.startswith("goal--") and period:
+        # The goal tier's cadence IS the observed period: the detached sweep gate is its
+        # sole wake source, so an ageing `.cadence` between gate wakes is expected and the
+        # declared interval is not the cadence. The cap moves to `GOAL_BOUND_K x observed`
+        # (see that constant) and the limit follows one observed period, which is when the
+        # next gate wake is due.
+        # `period=` carries the OBSERVED value here, unlike the model-cadence branch: the
+        # goal tier's cadence IS the observed period, and `answer-path-check.py` multiplies
+        # it by two to size its reach window, which is then the same two-period detection
+        # limit the bound uses. The cap goes in its own field.
+        bound = GOAL_BOUND_K * period
+        limit = period + SLACK
+        basis = (
+            f"period={int(period)}s(goal-tier observed)"
+            f" bound={int(bound)}s({GOAL_BOUND_K}x observed)"
+        )
     else:
-        limit, basis = interval + SLACK, f"period={interval}s(reported)"
+        bound = DECLARED_K * interval
+        if period and period > bound:
+            # `period=` carries the BOUNDED value: `answer-path-check.py` sizes its reach window
+            # from that field, so the unbounded observation goes in a field of its own.
+            limit = bound + SLACK
+            basis = f"period={bound}s(bounded {DECLARED_K}x declared) observed={int(period)}s"
+        elif period:
+            limit, basis = period + SLACK, f"period={int(period)}s(observed)"
+        else:
+            limit, basis = interval + SLACK, f"period={interval}s(reported)"
     if legacy:
         # Say so: a pre-split record is a manager that has not re-armed since the
         # split, and the age is measured against a file nothing will refresh.
@@ -1592,6 +1668,15 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--arm", action="store_true", help="record a re-arm (manager, every tick)")
     mode.add_argument("--stop", action="store_true", help="mark a deliberate stand-down")
+    mode.add_argument(
+        "--clear-standdown",
+        action="store_true",
+        dest="clear_standdown",
+        help="clear a stand-down marker and arm NOTHING — no cadence, no arms, no "
+             "session, no reset epoch. The explicit reopen; `--arm --resume` also "
+             "clears the marker but records a liveness beat, which is the wrong act "
+             "for a reopen that is not starting a loop",
+    )
     mode.add_argument("--check", action="store_true", help="report subjects that turned stale")
     mode.add_argument(
         "--stood-down-past",
@@ -1690,7 +1775,7 @@ def main() -> int:
             ap.error("--state requires --subject (or the deprecated --topic)")
         return state(a.subject, a.branch, a.vault, time.time())
     if not a.subject:
-        ap.error("--subject (or the deprecated --topic) is required with --arm/--stop/--sleep")
+        ap.error("--subject (or the deprecated --topic) is required with --arm/--stop/--sleep/--clear-standdown")
     a.branch = a.branch or detect_branch(a.subject, a.vault)
     if a.arm:
         if not a.interval or a.interval <= 0:
@@ -1700,6 +1785,11 @@ def main() -> int:
         # sitting on the arm's own path.
         join_reach_thread()
         return code
+    if a.clear_standdown:
+        # The explicit reopen. Deliberately NOT an arm: an arm is the round's liveness
+        # reading, and a reading that cleared the marker erased the stand-down (measured
+        # 2026-11-07). This verb exists so the clear can be a decision of its own.
+        return clear_standdown(a.subject, a.branch)
     if a.resume:
         # Resuming is an ARM, never a stop: the flag clears a marker, so silently
         # ignoring it on `--stop` would leave the operator believing they had resumed.
