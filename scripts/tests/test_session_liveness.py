@@ -285,6 +285,46 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
 
+    def test_no_registry_entry_and_a_stale_not_live_heartbeat_is_absent(self):
+        """The exited shape: Claude Code deleted the registry entry on exit.
+
+        ⚠️ **Measured 2026-11-17 after #952:** every exited worker has no registry entry and
+        read UNKNOWN forever, so 21 of 21 flagged rows with a recorded session read
+        `degraded`, none `resume`. The endpoint still holds the record, `live: false` with an
+        age past its window — the one thing a just-spawned session cannot have.
+        """
+        sid = "4b8275b0-1111-2222-3333-444455556666"
+        with self.fixture([row(sid, live=False, age_seconds=24646)]) as fx:
+            rc, out = self.check(sid, fx.url)
+            rc_prefix, _ = self.check("4b8275b0", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT", out)
+        self.assertEqual(rc_prefix, ABSENT)
+
+    def test_no_registry_entry_and_no_heartbeat_record_is_unknown(self):
+        # A session spawned moments ago may have written neither yet: the 404 stays UNKNOWN.
+        sid = "99659e2d-cea3-4375-906c-73403f8fe2bc"
+        with self.fixture([]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_no_registry_entry_and_a_fresh_heartbeat_is_not_absent(self):
+        # A fresh record is `live: true` — the session is stamping, so it is LIVE, never ABSENT.
+        sid = "f4e5b1e0-1111-2222-3333-444455556666"
+        with self.fixture([row(sid, live=True, age_seconds=3)]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertNotEqual(rc, ABSENT)
+        self.assertEqual(rc, LIVE)
+
+    def test_a_not_live_row_without_a_measurable_age_stays_unknown(self):
+        # `live: false` with no usable `age_seconds` does not prove how long it has been quiet.
+        sid = "a9e0a9e0-1111-2222-3333-444455556666"
+        for age in (None, "soon", True, 0):
+            with self.fixture([row(sid, live=False, age_seconds=age)]) as fx:
+                rc, _ = self.check(sid, fx.url)
+            self.assertEqual(rc, UNKNOWN, repr(age))
+
     def test_unreachable_endpoint_is_unknown_not_absent(self):
         # The SC4 direction. A dead socket means the probe could not run, and folding that into
         # "not live" is permission to resume onto a live conversation.
