@@ -207,9 +207,8 @@ python3 "$P/park-event.py" due
 ```
 
 One line per watch whose time has passed, naming **the task** for every session parked on it —
-`register --task` recorded the name for exactly this read, since `/supervisor:open` opens a task
-and a bare session id leaves nothing to open. A watch with several sessions is still
-**one line, one watch**: resuming it is one act per named task, not one per watch.
+`register --task` recorded it because `/supervisor:open` opens a task, and a bare id leaves
+nothing to open. Several sessions on one watch is still **one line**: one act per named task.
 
 After step 0's read on that parked session's **full** id, resume each named task through
 `/supervisor:open --task "<name>"`. A held one is left parked and its membership is **not**
@@ -229,23 +228,25 @@ python3 "$P/park-event.py" register --task "<name>" --event "<key>" \
   --recheck "<new ISO-8601>" --session "<parked-id>" --repark
 ```
 
-`register` adds whatever `--session` resolves to as a member, so a bare call from the round would
-park the **round** on the watch and the next `due` would name it as a session to resume.
-`--repark` does two things: it **moves `recheck_at` forward** to the instant given (the
-earliest-wake rule that governs a plain join does not apply — otherwise the watch stays due and
-re-fires every round), and it increments the counter `due` prints. At **three** re-parks it stops
-and routes the wait to the manager as a criterion challenge; the count is persisted on the record
-because the parked session has exited and nothing else remembers it.
+`register` adds whatever `--session` resolves to as a member, so a bare round call parks the
+**round** and the next `due` names it as a session to resume. `--repark` moves `recheck_at`
+forward (the earliest-wake rule does not apply — a stale instant re-fires every round) and
+increments the counter `due` prints; at **three** it stops and routes the wait to the manager as
+a criterion challenge, the count persisted on the record because the parked session has exited.
 
-**Count the watches this step found due — that number is the hand-back's `parked-due`.** `<n>` is
-the number of lines `park-event.py due` printed, one per watch whose re-check has passed (not one
-per session parked on it). It is the hand-back's `parked-due=` and nothing else — not a digest
-key, so it never goes through `fleet-legs.py`.
+**Count the watches this step found due — that is the hand-back's `parked-due`.** `<n>` is the
+number of lines `due` printed, one per watch (not per session parked on it) — not a digest key,
+so never through `fleet-legs.py`.
 
-⚠️ **This half is the only path that resumes automatically — keep `defer_date` set anyway.** The
-task's own `defer_date` resurfaces the row in every manager's open queue, but surfacing is not
-resuming: no reader of that queue starts the parked session, so a round that misses this step
-**strands** the worker — the field is never a reason to skip it.
+⚠️ **Read `due`'s exit code and `live=` field, not the line count alone.** Exit **4** = the store
+is present but unlistable: print `parked-due: unknown — store unreadable`, never `0`, and release
+or re-park nothing. Members carry `live=yes|no|unknown` (`none` = memberless watch); `live=unknown`
+is undecidable — report it, act on nothing. Folding any of these into "the session died" records a
+live worker as abandoned.
+
+⚠️ **The only path that resumes automatically — keep `defer_date` set anyway.** The task's own
+`defer_date` resurfaces the row in every open queue, but surfacing is not resuming: no reader
+starts the parked session, so a missed step **strands** the worker.
 
 ## 2b. Resume a decision-parked worker
 
