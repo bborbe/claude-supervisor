@@ -177,19 +177,24 @@ def mcp_call(name, arguments):
         headers={"Content-Type": "application/json",
                  "Accept": "application/json, text/event-stream"},
     )
+    # ⚠️ **Three outcomes, and the third is the dangerous one.** A transport failure or an
+    # unparseable reply means the request may already have been executed — reporting it as
+    # "nothing sent" invites the caller to retry and deliver twice. So it is flagged
+    # separately and mapped to exit 2 / "delivery unknown", the same shape the REST path
+    # uses. An HTTP error is a different thing: the server answered, so it did not act.
     try:
         with _OPENER.open(req, timeout=120) as resp:
             reply = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
-        return None, f"HTTP {exc.code}: {_decode(exc.read())}"
+        return None, f"HTTP {exc.code}: {_decode(exc.read())}", False
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return None, str(exc)
+        return None, str(exc), True
     if "error" in reply:
-        return None, reply["error"]
+        return None, reply["error"], False
     result = reply.get("result")
     if isinstance(result, dict) and result.get("isError"):
-        return None, result
-    return result, None
+        return None, result, False
+    return result, None, False
 
 
 def _decode(raw):
@@ -309,8 +314,15 @@ def main():
         return 0
 
     if use_mcp:
-        result, error = mcp_call("send_message",
-                                 {"session_id": args.session_id, "text": args.text})
+        result, error, unknown = mcp_call("send_message",
+                                          {"session_id": args.session_id, "text": args.text})
+        if unknown:
+            # The request may have been executed. Saying "nothing sent" here would invite a
+            # retry and a second delivery, so the outcome is reported as unknown (exit 2).
+            print(json.dumps({"session_id": args.session_id, "channel": channel,
+                              "delivered": None, "delivery": "unknown", "error": error}))
+            print("REFUSED: no response from the wrapper; delivery unknown", file=sys.stderr)
+            return 2
         delivered = error is None and result is not None
         print(json.dumps({"session_id": args.session_id, "liveness": verdict,
                           "controls": controls, "channel": channel,
