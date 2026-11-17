@@ -333,6 +333,93 @@ class TheParkLimb(Tmp):
         self.assertEqual(row["stuck"], "none")
 
 
+class TheFrozenTranscriptLeg(Tmp):
+    """`frozen` is read from the newer of the task file and the transcript.
+
+    Measured 2026-11-16, twice in one day: a live row read `frozen 68m` with its
+    transcript written 0.0 min before the read, and another read `frozen 134.9m`
+    beside its own `in_flight` limb `transcript 18s` — the same document, the same
+    row. A session's working state cannot be derived from its task file alone.
+
+    ⚠️ The negative control is load-bearing: narrowing the verdict must not delete it,
+    so a row whose task file *and* transcript are both stale still fires.
+    """
+
+    def ages(self, mapping):
+        return lambda sid: mapping.get(sid, float("inf"))
+
+    def test_a_fresh_transcript_keeps_a_live_row_off_frozen(self):
+        sid = "aaaabbbb"
+        now = time.time()
+        row = {"mtime": now - 68 * 60}  # stale task file, the measured shape
+        verdict, reason = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, now, self.attention, self.projects,
+            transcript_age=self.ages({sid: 18.0}))  # transcript written 18 s ago
+        self.assertEqual(verdict, "none", reason)
+
+    def test_a_stale_transcript_still_fires_frozen(self):
+        sid = "bbbbcccc"
+        now = time.time()
+        row = {"mtime": now - 3600}
+        verdict, reason = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, now, self.attention, self.projects,
+            transcript_age=self.ages({sid: 1800.0}))  # 30 min: stale, still frozen
+        self.assertEqual(verdict, "frozen", reason)
+        self.assertIn("task file and transcript", reason)
+
+    def test_a_row_with_no_transcript_keeps_the_task_file_reading(self):
+        sid = "ccccdddd"
+        now = time.time()
+        row = {"mtime": now - 3600}
+        verdict, reason = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, now, self.attention, self.projects,
+            transcript_age=self.ages({}))  # no transcript: `inf`
+        self.assertEqual(verdict, "frozen", reason)
+        self.assertIn("task file frozen", reason)
+
+    def test_compute_wires_the_transcript_age_through(self):
+        """`compute()` must pass its transcript age into `stuck_verdict()`.
+
+        The unit cases above call `stuck_verdict()` directly, so they would all pass
+        on a build that computed a fresh transcript and then dropped it at the call
+        site — which is exactly the pre-change behaviour this change removes.
+        """
+        sid = "dddddddd-1111-2222-3333-444444444444"
+        sessions = os.path.join(self.dir, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        # The transcript exists and was written now; the task file is an hour stale.
+        self.write_transcript(sid, [("Bash", "tu-1", False, time.time())])
+
+        wnm = rr._load("who-needs-me")
+        wnm._AGE_CACHE.clear()
+        predispatch = rr._load("manager-predispatch")
+        orig_resolve = predispatch.resolve_tracked_by_member
+        orig_live = rr.liveness
+        orig_projects = wnm.PROJECTS_DIR
+        try:
+            predispatch.resolve_tracked_by_member = lambda vault, members: (
+                [{"name": "A task", "mtime": time.time() - 3600,
+                  "session": sid, "sessions": [sid]}], list(members))
+            rr.liveness = lambda ids, endpoint, registry_dir: "LIVE"
+            path = os.path.join(self.dir, "tracked.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("A task\n")
+            doc = rr.compute("A subject", path, self.dir, 900, now=time.time(),
+                             attention_dir=self.attention, sessions_dir=sessions,
+                             projects_dir=self.projects,
+                             feed={"panes": set(), "owners": {}, "orphan_owners": [],
+                                   "state": "read", "error": None})
+        finally:
+            predispatch.resolve_tracked_by_member = orig_resolve
+            rr.liveness = orig_live
+            wnm.PROJECTS_DIR = orig_projects
+            wnm._AGE_CACHE.clear()
+
+        row = doc["rows"]["A task"]
+        self.assertEqual(row["in_flight"], "in-flight")
+        self.assertEqual(row["stuck"], "none", row["stuck_reason"])
+
+
 # The feed's pane column is right-aligned to four, so a real row reads `[ 417]`, and a
 # headless gate reads `[ hst]` with its store item id on the `answer:` continuation
 # line. The pre-fix pattern `^\s*\[(\d+)\]` matched 1 of these 3 rows (`[1234]`).
