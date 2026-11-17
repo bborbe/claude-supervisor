@@ -162,6 +162,41 @@ def post(path, payload):
         return 0, str(exc), True
 
 
+def mcp_call(name, arguments):
+    """Call one MCP tool on the wrapper and return (result, None) or (None, why).
+
+    The wrapper serves MCP at `/supervisor/mcp` over plain JSON-RPC and needs no
+    handshake for a single call — measured 2026-11-17, `tools/list` answered a bare POST.
+    Kept deliberately tiny: this file needs one tool, not a client library.
+    """
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}}
+    req = urllib.request.Request(
+        _base_url() + "/supervisor/mcp",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json",
+                 "Accept": "application/json, text/event-stream"},
+    )
+    # ⚠️ **Three outcomes, and the third is the dangerous one.** A transport failure or an
+    # unparseable reply means the request may already have been executed — reporting it as
+    # "nothing sent" invites the caller to retry and deliver twice. So it is flagged
+    # separately and mapped to exit 2 / "delivery unknown", the same shape the REST path
+    # uses. An HTTP error is a different thing: the server answered, so it did not act.
+    try:
+        with _OPENER.open(req, timeout=120) as resp:
+            reply = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}: {_decode(exc.read())}", False
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, str(exc), True
+    if "error" in reply:
+        return None, reply["error"], False
+    result = reply.get("result")
+    if isinstance(result, dict) and result.get("isError"):
+        return None, result, False
+    return result, None, False
+
+
 def _decode(raw):
     try:
         return json.loads(raw)
@@ -192,6 +227,11 @@ def main():
     mode.add_argument("--answer", metavar="REQUEST_ID", help="release the gate on this request id")
     parser.add_argument("--behavior", choices=("allow", "deny"), help="required with --answer")
     parser.add_argument("--message", help="the text carried with an answer")
+    parser.add_argument(
+        "--nudge",
+        action="store_true",
+        help="use the fire-and-forget REST route instead of a real turn (see the docstring)",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -258,10 +298,39 @@ def main():
         if args.message:
             payload["message"] = args.message
 
+    # ⚠️ **Two routes, and only one of them delivers a turn.** The REST `…/message` route
+    # answers 202 and is fire-and-forget by design — the wrapper's own `pkg/mcptools.go`
+    # says it "cannot delegate to the REST message route: POST …/message answers 202
+    # {"status":"sent"} and carries no answer". Measured 2026-11-17: a 202 was accepted
+    # while the worker was mid-turn, and the text never became a turn in its transcript.
+    # So a real turn goes over MCP `send_message`; `--nudge` keeps REST for a bare poke.
+    use_mcp = not is_answer and not args.nudge
+    channel = "send_message" if use_mcp else "rest"
+
     if args.dry_run:
         print(json.dumps({"session_id": args.session_id, "liveness": verdict,
-                          "controls": controls, "path": path, "delivered": False,
-                          "dry_run": True}))
+                          "controls": controls, "path": path, "channel": channel,
+                          "delivered": False, "dry_run": True}))
+        return 0
+
+    if use_mcp:
+        result, error, unknown = mcp_call("send_message",
+                                          {"session_id": args.session_id, "text": args.text})
+        if unknown:
+            # The request may have been executed. Saying "nothing sent" here would invite a
+            # retry and a second delivery, so the outcome is reported as unknown (exit 2).
+            print(json.dumps({"session_id": args.session_id, "channel": channel,
+                              "delivered": None, "delivery": "unknown", "error": error}))
+            print("REFUSED: no response from the wrapper; delivery unknown", file=sys.stderr)
+            return 2
+        delivered = error is None and result is not None
+        print(json.dumps({"session_id": args.session_id, "liveness": verdict,
+                          "controls": controls, "channel": channel,
+                          "delivered": delivered,
+                          "result": result if delivered else error}))
+        if not delivered:
+            print(f"REFUSED: send_message failed: {error}", file=sys.stderr)
+            return 1
         return 0
 
     status, body, transport_failed = post(path, payload)
