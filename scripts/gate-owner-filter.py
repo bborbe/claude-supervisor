@@ -289,8 +289,8 @@ REFUSAL_MARKER = "WHO-NEEDS-ME-REFUSED"
 # no longer emits and every row reads live.
 REPLAY_MARK = "⟳replay"
 
-# ⚠️ THE PRODUCER THIS FILTER POLLS IN `--interval` MODE, AND WHY THE LOOP LIVES
-# HERE RATHER THAN IN A SHELL WRAPPER. The rule's arm is a `Monitor` over
+# ⚠️ WHY THE POLL LOOP LIVES HERE RATHER THAN IN A SHELL WRAPPER. The rule's arm was
+# a `Monitor` over
 # `who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>`,
 # and `--feed` reads stdin ONCE -- so the Monitor fires on the first read and the
 # process exits, leaving the manager's push channel dead with no error. A shell
@@ -305,19 +305,40 @@ REPLAY_MARK = "⟳replay"
 # (2026-10-01). Hop 3b drops those panes, so what remains in the kept set is the
 # manager's own gates and its workers'.
 #
-# Resolved as a SIBLING of this file, not by name: the two scripts ship side by
-# side, and a bare `who-needs-me.py` would resolve against whatever cwd the
-# manager's pane happens to hold. `--producer` overrides it.
+# ⚠️ **A `--producer` caller must pass an ABSOLUTE command; the sibling path below is
+# the one that used to be this file's default.** It is
+# `os.path.join(os.path.dirname(os.path.realpath(__file__)), "who-needs-me.py") + " --section needs-you"`.
 # ⚠️ `realpath`, not `abspath`: `abspath` normalises `..` but does NOT resolve a
 # symlink, so a symlinked install would look for the producer beside the LINK
 # rather than beside the script and raise `FileNotFoundError` at the first poll —
 # a failure that only appears once the loop is running, which is the worst place
-# for it. The intent stated above is "the two scripts ship side by side", and only
-# `realpath` answers that for every way the script can be reached.
-PRODUCER = (
-    os.path.join(os.path.dirname(os.path.realpath(__file__)), "who-needs-me.py")
-    + " --section needs-you"
-)
+# for it. A bare `who-needs-me.py` would resolve against whatever cwd the manager's
+# pane happens to hold.
+
+# ⚠️ **THE DEFAULT FEED SOURCE IS THE SERVICE, NOT A SPAWNED INTERPRETER — changed
+# 2026-11-17.** `--interval` used to re-run the sibling `who-needs-me.py` through
+# `subprocess.run` on every poll: a fresh Python interpreter plus 2 788 lines of
+# parsing, per manager, per minute. Measured across the fleet that was ~1.3–2.7
+# cores and the largest single consumer on the machine. The three inputs that work
+# re-derives — the attention store, the WezTerm pane list and the session registry —
+# are all already held by the long-running `attention-controller`, which serves the
+# same answer as JSON at `GET /api/1.0/who-needs-me`. Reading that route costs one
+# HTTP request and spawns nothing.
+#
+# ⚠️ **`--producer` still wins when given, and that is deliberate rather than
+# leftover.** It is the test seam every fixture in `tests/test_gate_owner_filter.py`
+# drives (a real command string printing successive frames), and it is the escape
+# hatch on a host where the board is not running. What must NOT come back is the
+# spawn as the DEFAULT: the outcome this buys is "no interpreter per tick", and a
+# default that shells out re-buys the cost for every manager that never passes the
+# flag.
+WHO_NEEDS_ME_PATH = "/api/1.0/who-needs-me"
+
+#: The kinds `who-needs-me.py`'s `needs-you` section carries (`is_open_gate`:
+#: `kind in ("permission", "question")`). The endpoint returns open gates only, so
+#: this is belt-and-braces rather than the primary selection — but a section that
+#: later widens must not silently widen what wakes a manager.
+NEEDS_YOU_KINDS = ("permission", "question")
 
 # ⚠️ THE ARM'S MEMORY, AND WHY IT IS A FILE RATHER THAN `previous = None`. The loop
 # below is a change-detector WITHIN an arm; across arms it had no memory at all, so
@@ -1753,8 +1774,69 @@ def log_emissions(rows, items, scope, self_id, now=None, root=None):
         return exc
 
 
+def endpoint_snapshot(endpoint=None, timeout=10.0):
+    """`(rows, records, error)` — the feed and its headless rows from ONE service read.
+
+    `rows` is the `(pane, replayed)` shape `feed_rows` returns, so every hop
+    downstream is unchanged: a pane-bearing item yields its pane id, a headless item
+    yields `hst:<store item id>`, and `replayed` is the row's own flag rather than a
+    mark parsed off a render.
+
+    ⚠️ **`error` is not an empty feed.** A failed read must end the loop non-zero
+    exactly as a refused pipe does: a quiet fleet and an unreachable board leave the
+    same zero rows on the wire, and only one of them is a measurement.
+
+    ⚠️ **The headless records come from the SAME payload**, which is why this
+    returns both. `headless_items_checked` would otherwise make a second request per
+    poll for data this read already carries — and the board is the thing whose load
+    this change exists to keep down.
+    """
+    import urllib.request
+
+    base = (
+        endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080"
+    ).rstrip("/")
+    try:
+        with urllib.request.urlopen(base + WHO_NEEDS_ME_PATH, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+    except (OSError, ValueError) as exc:
+        return [], [], (
+            f"{REFUSAL_MARKER} who-needs-me endpoint read failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return [], [], (
+            f"{REFUSAL_MARKER} who-needs-me endpoint returned a non-object body"
+        )
+
+    rows, records, now = [], [], time.time()
+    for item in data["items"]:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") not in NEEDS_YOU_KINDS or item.get("state") != "open":
+            continue
+        replayed = bool(item.get("replayed"))
+        pane = str(item.get("pane") or "").strip()
+        if pane:
+            rows.append((pane, replayed))
+            continue
+        item_id = str(item.get("item_id") or "")
+        if not item_id:
+            continue
+        rows.append((HEADLESS_PREFIX + item_id, replayed))
+        records.append(
+            {
+                "pane": HEADLESS_PREFIX + item_id,
+                "session_id": item.get("session_id") or "",
+                "detail": item.get("text") or "",
+                "ts": now,
+            }
+        )
+    return rows, records, None
+
+
 def poll(args, items, scope=None):
-    """Poll the producer, emitting only panes that ENTER the kept set.
+    """Poll the feed, emitting only panes that ENTER the kept set.
 
     ⚠️ **The ownership inputs are re-read on EVERY poll, and that is the point of
     the loop rather than an optimisation to skip.** An arm runs for up to 30
@@ -1809,25 +1891,36 @@ def poll(args, items, scope=None):
     emissions_warned = False
     polls = 0
     while True:
-        proc = subprocess.run(
-            shlex.split(args.producer), capture_output=True, text=True
-        )
-        lines = proc.stdout.splitlines(keepends=True)
-        refusal = feed_refusal(lines)
-        if refusal:
-            return refusal_exit(refusal)
-        if proc.returncode != 0:
-            return producer_exit(args.producer, proc.returncode)
+        if args.producer:
+            proc = subprocess.run(
+                shlex.split(args.producer), capture_output=True, text=True
+            )
+            lines = proc.stdout.splitlines(keepends=True)
+            refusal = feed_refusal(lines)
+            if refusal:
+                return refusal_exit(refusal)
+            if proc.returncode != 0:
+                return producer_exit(args.producer, proc.returncode)
 
-        # ⚠️ Re-read INSIDE the loop, never hoisted — see the docstring. The
-        # ordering matters too: the marker is checked before the status, because
-        # a refusal is the more specific verdict and `who-needs-me.py` exits
-        # non-zero on that path as well.
-        feed = feed_rows(lines)
-        # Headless rows resolve through the store, re-read per poll: a headless gate is
-        # new by definition, so the arm-time `items` snapshot never carries it.
-        keys = [pane for pane, _ in feed]
-        records, error = headless_items_checked(keys, args.endpoint)
+            # ⚠️ Re-read INSIDE the loop, never hoisted — see the docstring. The
+            # ordering matters too: the marker is checked before the status,
+            # because a refusal is the more specific verdict and `who-needs-me.py`
+            # exits non-zero on that path as well.
+            feed = feed_rows(lines)
+            # Headless rows resolve through the store, re-read per poll: a headless
+            # gate is new by definition, so the arm-time `items` snapshot never
+            # carries it.
+            keys = [pane for pane, _ in feed]
+            records, error = headless_items_checked(keys, args.endpoint)
+        else:
+            # ⚠️ ONE read for both halves — see `endpoint_snapshot`. The service
+            # already carries the headless rows, so this asks the board once and
+            # spawns nothing at all. This is the DEFAULT path; `--producer` above
+            # is the explicit override.
+            feed, records, error = endpoint_snapshot(args.endpoint)
+            if error:
+                return refusal_exit(error)
+            keys = [pane for pane, _ in feed]
         poll_items = items + records
         rows = evaluate_panes(
             feed,
@@ -1844,7 +1937,7 @@ def poll(args, items, scope=None):
         # ⚠️ The store is re-read EVERY poll rather than hoisted. Nothing else
         # writes this file, but a hoisted read would let the `--max-polls` loop and
         # a restarted arm disagree about the same file — and the read is a ~0.2 ms
-        # open against a loop that already spawns a producer per poll.
+        # open against a loop that already reads the board per poll.
         now = time.time()
         new_panes, next_state = emit_decisions(
             kept, load_feed_state(state_path), poll_items, now, args.reemit_after
@@ -1963,8 +2056,13 @@ def main():
     )
     parser.add_argument(
         "--producer",
-        default=PRODUCER,
-        help="the feed command re-run on each poll (only with --interval)",
+        default=None,
+        help=(
+            "OVERRIDE the feed source: a command re-run on each poll (only with "
+            "--interval, and for `--pane` without --feed). Omit it to read the "
+            "service at GET /api/1.0/who-needs-me, which is the default and spawns "
+            "nothing per tick"
+        ),
     )
     parser.add_argument(
         "--max-polls",
@@ -2095,16 +2193,21 @@ def main():
         # removes. Produced once, with the same refusal / failed-producer handling the
         # poll loop uses: a producer that died and a quiet fleet leave the same rows on
         # the wire, and only one of them is a measurement.
-        proc = subprocess.run(
-            shlex.split(args.producer), capture_output=True, text=True
-        )
-        lines = proc.stdout.splitlines(keepends=True)
-        refusal = feed_refusal(lines)
-        if refusal:
-            return refusal_exit(refusal)
-        if proc.returncode != 0:
-            return producer_exit(args.producer, proc.returncode)
-        feed = feed_rows(lines)
+        if args.producer:
+            proc = subprocess.run(
+                shlex.split(args.producer), capture_output=True, text=True
+            )
+            lines = proc.stdout.splitlines(keepends=True)
+            refusal = feed_refusal(lines)
+            if refusal:
+                return refusal_exit(refusal)
+            if proc.returncode != 0:
+                return producer_exit(args.producer, proc.returncode)
+            feed = feed_rows(lines)
+        else:
+            feed, _, error = endpoint_snapshot(args.endpoint)
+            if error:
+                return refusal_exit(error)
     else:
         feed = []
 

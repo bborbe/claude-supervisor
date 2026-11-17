@@ -2903,5 +2903,110 @@ class ClosedCardsDoNotWakeTheFeed(unittest.TestCase):
         self.assertEqual(gf.headless_items(["hst:" + _CLOSED], dead_url()), [])
 
 
+class TheFeedIsReadFromTheServiceNotSpawned(unittest.TestCase):
+    """`--interval` reads `GET /api/1.0/who-needs-me`; `who-needs-me.py` is not spawned.
+
+    ⚠️ **The assertion is on the wire, not on a filename.** Measured 2026-11-16:
+    `--interval` re-ran `who-needs-me.py --section needs-you` through `subprocess.run`
+    on every poll — a fresh interpreter plus 2 788 lines of parsing, per manager, per
+    minute, ~1.3–2.7 cores across the fleet and the largest single consumer on the
+    machine. A probe keyed on the script's name passes a rename, so these cases assert
+    the fixture endpoint was READ (once per poll) and that the emitted row carries the
+    service's own fields.
+
+    ⚠️ **A failed read must end the loop non-zero.** A quiet fleet and an unreachable
+    board leave the same zero rows on the wire; only one of them is a measurement, and
+    the arm's whole contract is that it dies loudly rather than looking idle.
+    """
+
+    ITEM = "09a0a93c8c00ac7465719756af0e3e6c"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        for path in (self.state, self.registry):
+            os.makedirs(path)
+        _make_me_live(self.registry)
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+
+    def item(self, **over):
+        row = {
+            "item_id": self.ITEM,
+            "pane": "98765",
+            "kind": "permission",
+            "state": "open",
+            "session_id": "",
+            "headless": False,
+            "replayed": False,
+            "text": "Bash: date",
+        }
+        row.update(over)
+        return row
+
+    def poll(self, polls=2, endpoint=None):
+        """`--interval 0` with NO `--producer` — the default, service-backed path."""
+        return subprocess.run(
+            [sys.executable, _SCRIPT,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--endpoint", endpoint or self.endpoint.url,
+             "--feed-state-dir", os.path.join(self.dir, "feed-state"),
+             "--claims-file", os.path.join(self.dir, "no-claims.json"),
+             "--self", ME, "--no-scope", "--feed",
+             "--interval", "0", "--max-polls", str(polls)],
+            capture_output=True, text=True,
+        )
+
+    def test_the_service_is_read_once_per_poll_and_the_pane_emitted(self):
+        self.endpoint.set_feed([self.item()])
+        result = self.poll(polls=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+        self.assertEqual(self.endpoint.feed_reads, 3, "one read per poll, no more")
+
+    def test_a_headless_row_resolves_its_session_from_the_same_payload(self):
+        """The service carries the session, so no second `/api/1.0/attention` read."""
+        self.endpoint.set_feed(
+            [self.item(pane="", headless=True, session_id=ME)]
+        )
+        result = self.poll()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["hst:" + self.ITEM + "  session=" + ME],
+            result.stdout,
+        )
+
+    def test_the_replay_flag_comes_from_the_row_not_a_render(self):
+        """`⟳replay` is the guard against acting on a gate answered hours ago."""
+        self.endpoint.set_feed([self.item(replayed=True)])
+        result = self.poll()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("⟳replay", result.stdout)
+
+    def test_a_closed_or_other_kind_row_is_not_a_gate(self):
+        """`needs-you` is permission/question only — an ack row must not wake a manager."""
+        self.endpoint.set_feed(
+            [
+                self.item(item_id="a", kind="ack"),
+                self.item(item_id="b", state="closed"),
+                self.item(item_id="c", kind="question", pane="98766"),
+            ]
+        )
+        result = self.poll()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["98766"], result.stdout)
+
+    def test_an_unreachable_service_ends_the_loop_non_zero(self):
+        """Zero rows from a dead board is not a quiet fleet — the arm must die loudly."""
+        result = self.poll(endpoint=dead_url())
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("who-needs-me endpoint read failed", result.stderr)
+        self.assertNotIn("LIVENESS", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
