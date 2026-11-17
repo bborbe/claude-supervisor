@@ -170,13 +170,14 @@ LEGS = {
         "agent": "agents/fleet-round.md",
         "sites": ("commands/steps/round-dispatch.md",),
         "required": (
-            "round", "digest", "payload",
+            "round", "digest", "parks",
             "progressing", "stalled", "parked", "finished", "held",
             "orphan", "collision", "unmanaged",
             "revived", "blocked", "reaped",
             "legs", "restarted", "resumed", "parked-due", "nudged", "undelivered",
             "open-status", "selected", "opened", "open-resumed", "jumped", "refused",
-            "managers-reaped", "context70", "self-context",
+            "managers-reaped", "parks-answered", "parks-routed", "parks-escalated",
+            "context70", "self-context",
         ),
     },
 }

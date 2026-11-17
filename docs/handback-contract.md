@@ -40,11 +40,13 @@ The shape a sweep's **read half** and **act half** return to their caller. Ten a
     truncation pair `truncated` / `payload`. It carries **no digest count** — its persisted reading
     is the block payload, which `commands/steps/output-shape.md` item 3 renders.
   - the **round delegate** returns the **round's bucket counts, its leg tallies and its own fill
-    level** — `round` and the two artifact paths (`digest`, `payload`), every peer bucket
+    level** — `round` and the two artifact paths (`digest`, `parks`), every peer bucket
     (`progressing`, `stalled`, `parked`, `finished`, `held`, `orphan`, `collision`, `unmanaged`), the
     drive tallies (`revived`, `blocked`, `reaped`), the keep-alive tallies (`legs`, `restarted`,
     `resumed`, `parked-due`, `nudged`, `undelivered`), the open leg's (`open-status`, `selected`,
-    `opened`, `open-resumed`, `jumped`, `refused`), `managers-reaped`, `context70`, and
+    `opened`, `open-resumed`, `jumped`, `refused`), `managers-reaped`, the own-parks split
+    (`parks-answered`, `parks-routed`, `parks-escalated` — `parks-routed` is the manager's row 7
+    trigger), `context70`, and
     `self-context` — the manager's **own** fill level, the one reading `context-usage.py
     --compactable` hides and the reading that stops the loop guessing.
 - **The full payload never rides the hand-back.** A leg that rendered a table, classified a set or drafted a batch writes it to disk and hands back the verdict about it. Inlining the payload is the failure this half of the contract removes: it is the same information at many times the size, and it arrives in prose where nothing downstream can check it.

@@ -10,11 +10,22 @@ When: every tick — after the re-arm (row 1), before the read half
 
 ⚠️ **The round's machine half runs in ONE delegate.** Dispatch `supervisor:fleet-round`
 **once**, passing the round id, this session's id, the vault and the absolute tasks dir. The
-delegate reads the step files, runs rows 0, 2–6, 9, 12, 15, 16, 16b, 18 and 19 — dispatching
-the existing sweep, keep-alive, readings and open legs — persists the round, and returns the
-≤ 1 KB verdict plus the payload path. You keep rows 7, 8, 10, 11, 13, 14, 17 and 20: the
-provenance acts, the operator questions, the watchers, the voice and the render. The split, and
-why the manager no longer reads the step files, is `agents/fleet-round.md`.
+delegate reads the step files, runs rows 0, 2–6, 12, 15, 16, 16b and 18 — dispatching the
+existing sweep, keep-alive, readings and open legs — persists the round, and returns the ≤ 1 KB
+verdict plus the artifact paths. You keep rows 7, 8, 9, 10, 11, 13, 14, 17, 19 and 20: the
+provenance acts, the cause check, the operator questions, the watchers, the voice, the round
+tail and the render. The split, and why the manager no longer reads the step files, is
+`agents/fleet-round.md`.
+
+⚠️ **Row 19 (the tail) runs after the delegate returns, never before.** It judges the `re-arm`
+epoch and the receipt **you** wrote — an arm that has not landed yet reads `skipped: re-arm` on
+a round that armed perfectly — and it must run before the render, or a skip it finds cannot
+reach the block the operator reads.
+
+⚠️ **Row 7 reads the delegate's `parks=` file.** The delegate runs row 5d and hands back
+`parks-answered` / `parks-routed` / `parks-escalated` plus the `parks=` path; the routed parks
+there are yours to answer, and nothing else carries them. A round that skips that read leaves a
+class-C question to the 15-minute timeout.
 
 ⚠️ **The digest path is the delegate's to derive, never yours to pass.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, written by the sweep reader the

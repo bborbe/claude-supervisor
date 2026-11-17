@@ -47,17 +47,19 @@ def load_legs():
 
 
 def handback_fence(text: str) -> str | None:
-    """The fenced block under `**Hand-back**`, or None when there is not one.
+    """Every fenced block under `**Hand-back**`, joined, or None when there is not one.
 
-    Scoped to the fence on purpose, exactly as `check-handback-keys.keys_emitted` is: the
-    surrounding prose is not the hand-back, and counting it would measure the documentation.
+    ⚠️ **All fences, not the first.** A leg may put its counts in one block and its
+    per-row lines in a second (the open leg's `refused:` rows are exactly that), so reading
+    only the first would leave that leg's declared variable lines uncounted and its
+    exclusion inert — the check would report a pass for a measurement it never took.
     """
     _, sep, rest = text.partition("**Hand-back**")
     if not sep:
         return None
     body = rest.partition("</output_format>")[0]
-    m = re.search(r"```[a-z]*\n(.*?)```", body, re.DOTALL)
-    return m.group(1) if m else None
+    blocks = re.findall(r"```[a-z]*\n(.*?)```", body, re.DOTALL)
+    return "\n".join(blocks) if blocks else None
 
 
 def fixed_bytes(fence: str, variable: tuple[str, ...]) -> int:
