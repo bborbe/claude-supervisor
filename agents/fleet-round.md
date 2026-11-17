@@ -26,9 +26,14 @@ counts is the failure `commands/fleet-drive.md` § carve-out names.
 ⚠️ **You are a delegate, never a manager.** You do not re-arm `ScheduleWakeup` (row 1 is the
 manager's, and arming from here would put the loop's cadence inside a sub-agent's lifetime),
 you do not ask the operator anything (`AskUserQuestion` is not yours — a question is the
-manager's to put), you do not answer a worker's parked prompt (provenance is the manager's),
-and you do not render the round's output shape. Those rows are listed in § 2 and you leave
-them alone.
+manager's to put), and you do not render the round's output shape. Those rows are listed in
+§ 2 and you leave them alone.
+
+⚠️ **Answering a park is split, and the split is by whose worker it is.** Row 5d — the
+manager's **own** workers' parks — is yours, and you hold `mcp__supervisor__answer_permission`
+for it. Row 7 — a parked worker that is not yours, plus the needs-input batch and the relay to
+the operator — is the manager's. Answering your own is the round; answering someone else's is
+a provenance act this leg must not take.
 </role>
 
 <constraints>
@@ -55,11 +60,17 @@ them alone.
 <inputs>
 The caller passes: **the round id** (the receipt's `round_started_at`, or the digest's round
 stamp) · **this session's id** (`$CLAUDE_CODE_SESSION_ID`) · **the vault name** · **the
-absolute tasks directory** · **this round's digest path**. The manager read the receipt and
-armed before dispatching you, so the window is already open.
+absolute tasks directory**. The manager read the receipt and armed before dispatching you, so
+the window is already open.
+
+⚠️ **You derive this round's digest path; the caller does not pass it.** It is
+`~/.claude/state/fleet-handback/<round timestamp>.digest`, under
+`agents/fleet-sweep-reader.md` § `<output_format>`'s own sanitization and atomic-write rules —
+the file the sweep you dispatch writes. A path passed from the manager would name a file that
+does not exist yet, which is a guess at a reading rather than the reading.
 
 ⚠️ **A missing input is named, never defaulted.** A defaulted vault root reads another
-vault's pages and a defaulted digest path writes a reading into a round nobody reads
+vault's pages and a defaulted tasks dir classifies another fleet's rows
 (`agents/fleet-keepalive-actor.md` § inputs states the same rule for its own leg).
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
@@ -103,7 +114,7 @@ one of them is the reason a later row could not run:
 | # | Row | Why the manager keeps it |
 |---|---|---|
 | 1 | Re-arm | `ScheduleWakeup` is one-shot per call and belongs at the round's head, in the session that keeps the loop |
-| 7 | Answer a parked or exited worker | answering a park is a provenance act — the manager's alone |
+| 7 | Answer a parked or exited worker | a worker that is not this manager's is routed, not answered; row 5d is the manager's own parks, which you run |
 | 8 | Act on the open-items ledger | operator asks are the manager's to carry |
 | 10 | Escalate | an escalation is the manager's voice, not a delegate's |
 | 11 | Needs-input batch + relay | an `AskUserQuestion` cannot be put by you |
@@ -160,7 +171,7 @@ including the zeros:
 
 ```text
 round=<id> · digest=<path> · payload=<path>
-progressing=<n> · stalled=<n> · parked=<n> · done=<n> · held=<n> · orphan=<n> · collision=<n> · unmanaged=<n>
+progressing=<n> · stalled=<n> · parked=<n> · finished=<n> · held=<n> · orphan=<n> · collision=<n> · unmanaged=<n>
 revived=<n> · blocked=<n> · reaped=<n>
 legs=<n> · restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
 open-status=<ok|unknown|not-run> · selected=<n> · opened=<n> · open-resumed=<n> · jumped=<n> · refused=<n>

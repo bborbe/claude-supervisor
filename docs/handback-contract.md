@@ -41,7 +41,7 @@ The shape a sweep's **read half** and **act half** return to their caller. Ten a
     is the block payload, which `commands/steps/output-shape.md` item 3 renders.
   - the **round delegate** returns the **round's bucket counts, its leg tallies and its own fill
     level** — `round` and the two artifact paths (`digest`, `payload`), every peer bucket
-    (`progressing`, `stalled`, `parked`, `done`, `held`, `orphan`, `collision`, `unmanaged`), the
+    (`progressing`, `stalled`, `parked`, `finished`, `held`, `orphan`, `collision`, `unmanaged`), the
     drive tallies (`revived`, `blocked`, `reaped`), the keep-alive tallies (`legs`, `restarted`,
     `resumed`, `parked-due`, `nudged`, `undelivered`), the open leg's (`open-status`, `selected`,
     `opened`, `open-resumed`, `jumped`, `refused`), `managers-reaped`, `context70`, and

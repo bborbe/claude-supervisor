@@ -171,7 +171,7 @@ LEGS = {
         "sites": ("commands/steps/round-dispatch.md",),
         "required": (
             "round", "digest", "payload",
-            "progressing", "stalled", "parked", "done", "held",
+            "progressing", "stalled", "parked", "finished", "held",
             "orphan", "collision", "unmanaged",
             "revived", "blocked", "reaped",
             "legs", "restarted", "resumed", "parked-due", "nudged", "undelivered",
