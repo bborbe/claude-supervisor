@@ -208,9 +208,33 @@ def main():
     ap.add_argument("--over", type=float, metavar="PCT", help="only at/over PCT")
     ap.add_argument("--compactable", action="store_true",
                     help="over the bound AND not blocked AND not in a tool call")
+    ap.add_argument("--self-pct", action="store_true",
+                    help="print only THIS session's own used_percentage and exit — the one "
+                         "reading a manager needs in order to stop guessing, and the one every "
+                         "other filter hides, because a self row is never a compaction candidate")
     a = ap.parse_args()
 
     ctx = load(CONTEXT, "")
+
+    if a.self_pct:
+        # The manager's own fill level, and the one number it cannot get any other way:
+        # `is_candidate` excludes a self row, so the `--compactable` view — the view the
+        # sweep's `context70` hand-back is built on — drops it from `shown` entirely. A
+        # manager reading only that view sees no row for itself and infers exhaustion from
+        # nothing. Measured 2026-11-17: a Fleet Manager self-declared "out of context" at
+        # 42% of a 967k window.
+        #
+        # ⚠️ **Answered from `ctx` alone, before any other read.** It needs no pane list
+        # and no session registry — this call runs on every round, and paying two subprocess
+        # queries for a number already on disk is the cost this flag exists to avoid. It
+        # also runs BEFORE the empty-store early return below, so an unreadable or empty
+        # context dir answers `UNKNOWN` rather than that path's prose: a caller parsing
+        # this output must never receive a sentence where a percentage belongs.
+        d = ctx.get(CLAUDE_CODE_SESSION_ID) if CLAUDE_CODE_SESSION_ID else None
+        pct = d.get("used_percentage") if d else None
+        print(f"{float(pct):.0f}" if pct is not None else "UNKNOWN")
+        return 0
+
     if not ctx:
         print("No context data yet — the statusline publishes it on its next redraw.")
         return 0

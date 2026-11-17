@@ -156,6 +156,30 @@ LEGS = {
             "reason", "truncated", "payload",
         ),
     },
+    # The round itself, since 2026-11-17: the manager dispatches ONE `fleet-round` delegate
+    # that reads the step files, runs the legs and persists the round, so the manager's
+    # context holds the verdict instead of the rules. Its hand-back is the ONLY channel for
+    # every count the manager renders — the router cells it feeds (`orphan`, `collision`,
+    # `unmanaged`, `blocked`, `context70`) plus the four leg tallies the render reconciles.
+    # A dropped key here is a round that renders a blank where a measurement was.
+    # ⚠️ `held` is required because it is the bucket that wins over every other class in the
+    # render, and `self-context` because it is the manager's own fill level — the one reading
+    # `context-usage.py --compactable` hides, and the reading that stops the loop guessing
+    # (measured 2026-11-17: a manager declared "out of context" at 42% of its window).
+    "supervisor:fleet-round": {
+        "agent": "agents/fleet-round.md",
+        "sites": ("commands/steps/round-dispatch.md",),
+        "required": (
+            "round", "digest", "parks",
+            "progressing", "stalled", "parked", "finished", "held",
+            "orphan", "collision", "unmanaged",
+            "revived", "blocked", "reaped",
+            "legs", "restarted", "resumed", "parked-due", "nudged", "undelivered",
+            "open-status", "selected", "opened", "open-resumed", "jumped", "refused",
+            "managers-reaped", "parks-answered", "parks-routed", "parks-escalated",
+            "context70", "self-context",
+        ),
+    },
 }
 
 
