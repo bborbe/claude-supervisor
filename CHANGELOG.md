@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.333.0
 
 - feat: **the fleet digest carries `expired-defer=<n>`.** A task at `status: in_progress` with a `defer_date` earlier than today is a dead park — the date has passed, nothing moves it, and `close-worker.py` refuses to close it `task-not-terminal` — so it reads as live work while no rotation can reach it, and nothing reported it. `scripts/expired-defer.py` counts those rows across the three task roots and prints one line; `agents/fleet-sweep-reader.md` § `<output_format>` pastes it into the round's digest. The script keeps one definition of the state with `vault-cli`'s `EXPIRED_DEFER_DATE` lint rule (`pkg/ops/lint.go`, landing in `bborbe/vault-cli#381`): date-only in local time, and the same two exemptions `HOLD_WITH_DEFER_DATE` carries (`created_by: recurring-task-creator`, non-empty `recurring:`), whose `defer_date` is a schedule date rather than a snooze. A failed read renders `UNKNOWN (read failed)` and exits non-zero, never `0`. Change set: `scripts/expired-defer.py`, `agents/fleet-sweep-reader.md`, `commands/steps/sweep.md`, `docs/closer-classes.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
