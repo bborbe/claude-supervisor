@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.337.3
 
 - docs: the README tool table lists `run_slash_command(agent_id, command)`, the roster tool claude-wrapper v0.32.0 serves (`bborbe/claude-wrapper#91`): one allowlisted `/compact` or `/reload-plugins` run in a local worker as a real command — a headless worker receives it on stdin, where `send_agent_message` can only hand back a `SendMessage` name and a peer message runs no command, and a tab worker has it typed into its pane. Anything else is refused with `not allowlisted`; A2A and cluster workers are refused by name.
 
