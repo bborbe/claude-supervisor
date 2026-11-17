@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`session-liveness.py` answers ABSENT for a session whose heartbeat row has expired**, so an old session can be resumed. With no identity-registry entry and no usable heartbeat row (404, or a row with `live` and `age_seconds` null), the verdict stayed UNKNOWN forever — `flagged-rows.py` mapped it to `degraded`, which never resumes — because the stale-row rule of #954 needs a row to exist and the store drops rows after a retention window. ABSENT is now licensed when the transcript (`<config dir>/projects/*/<id>.jsonl`, newest match) has been idle over 15 minutes (`TRANSCRIPT_IDLE_SECONDS`), which disproves "spawned moments ago"; no transcript, a fresh one, or an unreadable endpoint keeps UNKNOWN, and the message names the evidence. Change set: `scripts/session-liveness.py`, `scripts/tests/test_session_liveness.py`, `docs/fleet-surface.md`, `CHANGELOG.md`.
+
 ## v0.338.1
 
 - fix: **the keeper backs off a full refresh after a failed sweep, and its sweep timeout sits below its own staleness threshold.** A failed sweep was retried after 60 s, and a sweep costs ~55 s (`build_task_index` 21 s + `build_grouping` 33 s, measured 2026-11-17), so the retry re-scanned the vault almost continuously — which kept the vault hot and every sweep slow enough to time out again. A failure now waits `REFRESH_SECONDS`. `SWEEP_TIMEOUT` drops 300 → 120, below `exit-record-coverage.py`'s `KEEPER_STALE_SECONDS` (300), because a sweep that blocks longer than that threshold makes the board report the keeper itself as stale — a false alarm the old value allowed by construction.
