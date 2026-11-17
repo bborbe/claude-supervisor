@@ -59,6 +59,18 @@ def write_page(directory, name, body):
         handle.write("---\n" + body + "---\n\nbody\n")
 
 
+def plant_dead(registry_dir, session_id):
+    """A registry record the identity reader computes as `alive: False`.
+
+    ⚠️ **Required since 2026-11-17.** An id with NO registry entry now reads UNKNOWN — the
+    startup shape, where a freshly spawned session has not been written yet — so a fixture that
+    wants the ABSENT verdict must plant an entry whose pid is gone. 4194303 is beyond this OS's
+    pid range, so the reader computes death without a real process.
+    """
+    with open(os.path.join(registry_dir, "%s.json" % session_id), "w", encoding="utf-8") as handle:
+        json.dump({"sessionId": session_id, "pid": 4194303, "name": "gone", "status": "busy"}, handle)
+
+
 class FixtureVault:
     """A throwaway vault root: `24 Goals/` and `23 Topics/` the scan reads."""
 
@@ -87,9 +99,12 @@ def run(vault, endpoint, registry_dir, *extra):
 class ReapTest(unittest.TestCase):
     def setUp(self):
         self.vault = FixtureVault()
-        # An EMPTY identity registry: readable, and holding nothing. ABSENT is licensed
-        # only while the registry can be read, so an absent directory would turn the
-        # `ABSENT` fixture into `UNKNOWN` and the silence assertion into a false pass.
+        # An EMPTY identity registry: readable, and holding nothing. ABSENT is licensed only
+        # while the registry can be read, so an absent directory would turn the ABSENT fixture
+        # into UNKNOWN and the silence assertion into a false pass.
+        # ⚠️ **And since 2026-11-17 an EMPTY registry is not enough on its own:** an id with no
+        # entry reads UNKNOWN (the startup shape), so a case that wants ABSENT calls
+        # `plant_dead` to give its session a dead entry.
         self.registry = tempfile.mkdtemp(prefix="subject-reap-registry-")
 
     # --- SC1 / SC3: terminal subject + live manager is the reap -----------------------
@@ -149,6 +164,7 @@ class ReapTest(unittest.TestCase):
         self.vault.goal("No Manager", status="completed")
         self.vault.goal("Bad Manager", status="completed", claude_session_id=NOT_AN_ID)
         self.vault.goal("Gone Manager", status="aborted", manager_session_id=GONE_ID)
+        plant_dead(self.registry, GONE_ID)
         with endpoint_fixture.FixtureEndpoint(rows=[endpoint_fixture.row(LIVE_ID)]) as fx:
             result = run(self.vault, fx.url, self.registry)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -163,6 +179,7 @@ class ReapTest(unittest.TestCase):
 
     def test_absent_is_silent_not_unknown(self):
         self.vault.goal("Gone Manager", status="completed", manager_session_id=GONE_ID)
+        plant_dead(self.registry, GONE_ID)
         with endpoint_fixture.FixtureEndpoint(rows=[endpoint_fixture.row(LIVE_ID)]) as fx:
             result = run(self.vault, fx.url, self.registry)
         self.assertIn("SILENT |", result.stdout)
