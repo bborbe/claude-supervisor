@@ -31,6 +31,12 @@ Same rule as `live-workers.py`.
 live** — a 200 carrying `live: false`, or a 404 from the store, or a readable list with no
 matching id. Nothing else may reach it.
 
+⚠️ **A session with NO identity-registry entry is ABSENT only on a stale heartbeat record.**
+Claude Code deletes the registry entry on exit, so an exited session has none; a session spawned
+moments ago has none YET. The endpoint's record tells them apart: a `live: false` row with a
+measured `age_seconds` (older than the endpoint's own window) is ABSENT, while no record at all
+(the per-id 404) keeps UNKNOWN. See `_absent_licensed`.
+
 ⚠️ **ABSENT is licensed only while the endpoint's coverage of live sessions is COMPLETE, and
 that is a precondition this file cannot establish for itself — it is established PER ID on the
 one path that needs it.** Every verdict rests on the
@@ -417,8 +423,24 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
         ), None
 
 
+def _stale_heartbeat_row(row):
+    """True when `row` is the endpoint's own positive statement that the session went quiet long ago.
+
+    ⚠️ **The freshness window is the ENDPOINT's, not a constant here.** `live` is the store's age
+    against its window (the module docstring: "never a recomputation here"), so `live is False`
+    already means "older than the window" and a second threshold would only drift from it.
+    `age_seconds` must also be a number: a row that carries a not-live flag but no measurable age
+    is not evidence of how long the session has been quiet, so it stays UNKNOWN. A `bool` is an
+    `int` in Python and is refused explicitly.
+    """
+    if not isinstance(row, dict) or row.get("live") is not False:
+        return False
+    age = row.get("age_seconds")
+    return isinstance(age, (int, float)) and not isinstance(age, bool) and age > 0
+
+
 def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it",
-                     cause=CAUSE_NOT_REGISTERED):
+                     cause=CAUSE_NOT_REGISTERED, row=None):
     """`(verdict, message, None)` for an id the endpoint holds NO row for — the ABSENT licence.
 
     ⚠️ **The three-tuple is `_check`'s contract, and the `None` row is part of it.** `_check`
@@ -452,9 +474,28 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
     evidence of death.
 
     ⚠️ **A prefix is resolved the way `_check` resolves one against the endpoint**, because the
-    argument is a full id or a prefix and `read_registry` is keyed by the full id only. A prefix
-    matching no registry entry, like a full id matching none, is not evidence about that session
-    and keeps its ABSENT — so the genuinely-dead case is not lost to this guard.
+    argument is a full id or a prefix and `read_registry` is keyed by the full id only.
+    ⚠️ **A match set that is EMPTY is UNKNOWN, never ABSENT — and this inverts the 2026-10-12
+    contract deliberately.** The earlier rule was that an id matching no registry entry "keeps
+    its ABSENT — so the genuinely-dead case is not lost to this guard". Measured 2026-11-17:
+    four live sessions read ABSENT during their startup window, because a freshly spawned
+    session has no registry entry until Claude Code writes one — seconds to minutes after the
+    process starts. "The registry has not heard of it" is a statement about the registry's
+    COVERAGE, exactly like the endpoint's, so it cannot license the one verdict that authorises
+    a resume. The trade-off is real and is accepted: a genuinely dead id whose entry has already
+    been deleted can no longer be called ABSENT, so a reaper relying on this verdict must
+    corroborate with the registry or a process check. An entry the registry DOES hold and
+    computes as `alive: False` is death, and still ABSENT — the `non_dead` guard below.
+    ⚠️ **Narrowed 2026-11-17, the same day: an empty match set is UNKNOWN unless `row` proves the
+    session is not "spawned moments ago".** Claude Code DELETES the registry entry when a session
+    exits, so the first rule read every EXITED worker as UNKNOWN forever — measured: 21 of 21
+    flagged rows with a recorded session read `degraded/UNKNOWN`, 0 read `resume`, and 16 rows
+    sat idle 20-66 min. The startup shape and the exited shape both have no registry entry; what
+    tells them apart is the heartbeat endpoint's record: a just-spawned session has NO record or
+    a FRESH one (`live: true`, which never reaches this function), while an exited one has a
+    record the endpoint itself calls not live (`_stale_heartbeat_row`). So with no registry entry
+    the answer is ABSENT only when `row` is such a record; no record (the per-id 404), or any
+    unreadable one, keeps UNKNOWN.
 
     Returns `(ABSENT, "no session id matches <sid>", None)` — the original wording, byte for
     byte, so no caller's message parsing moves — or `(UNKNOWN, <why>, None)`.
@@ -469,6 +510,22 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
     keys = list(identity)
     exact = next((k for k in keys if k.lower() == sid), None)
     matched = [exact] if exact is not None else [k for k in keys if k.lower().startswith(sid)]
+    if not matched:
+        if _stale_heartbeat_row(row):
+            # The exited shape: Claude Code deleted the registry entry on exit, and the endpoint
+            # still holds a record it calls not live. Nothing here is "spawned moments ago".
+            return ABSENT, "no session id matches %s" % sid, None
+        # ⚠️ **The startup shape, and the whole point of this branch.** A session spawned
+        # moments ago is absent from the registry until it is written; an id that no entry
+        # matches is therefore a measurement this probe cannot make, not a session it can call
+        # dead. This is the same rule as an unreadable registry two blocks up — "I could not
+        # measure the precondition" is never "the precondition holds".
+        return UNKNOWN, (
+            "the identity registry holds no entry for %s, so the endpoint's coverage of live "
+            "sessions could not be measured for it and ABSENT cannot be licensed (a session "
+            "spawned moments ago is absent from the registry until it is written)"
+            % sid
+        ), None
     non_dead = [k for k in matched if (identity.get(k) or {}).get("alive") is not False]
     if non_dead:
         # ⚠️ **The cause is part of the message, not a new exit code.** A distinct code would
@@ -695,7 +752,7 @@ def _verdict_for(row, sid, registry_dir=None):
                     "row's staleness proves nothing" % (full, why)
                 ), row
         verdict, why, _ = _absent_licensed(
-            full, registry_dir, "serves a stale `live: false` row for it", CAUSE_EXPIRED
+            full, registry_dir, "serves a stale `live: false` row for it", CAUSE_EXPIRED, row
         )
         return verdict, why, row
     return UNKNOWN, (

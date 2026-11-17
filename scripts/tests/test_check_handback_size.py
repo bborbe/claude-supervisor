@@ -1,0 +1,118 @@
+"""check-handback-size.py: the ≤ 1 KB cap is asserted, not just described.
+
+`docs/handback-contract.md` § The shape says a leg returns ≤ 1 KB. Until 2026-11-17 nothing
+measured it, so every leg could exceed the cap on every round and no check failed — the same
+"a rule that lives only in prose" defect `test_check_handback_keys` covers one layer down for
+keys.
+
+The load-bearing cases:
+  - a fence over the cap fails, naming the agent file;
+  - the contract's declared **variable** lines (the truncation exception) are excluded, so a
+    keepalive hand-back carrying many `crash-loop:` rows still passes;
+  - a leg with no `**Hand-back**` fence is a failure, never a silent pass;
+  - `supervisor:fleet-round` is registered — the round delegate's hand-back is the only
+    channel for the counts the manager renders, so it must be measured like every other leg.
+
+Fixtures are built from `check-handback-keys.LEGS` rather than hand-listed, so the two
+checkers cannot drift apart.
+"""
+import importlib.util
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+SCRIPTS = pathlib.Path(__file__).resolve().parent.parent
+KEYS_SCRIPT = SCRIPTS / "check-handback-keys.py"
+SIZE_SCRIPT = SCRIPTS / "check-handback-size.py"
+MAX = 1024
+
+
+def load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def fence(keys):
+    """A minimal `**Hand-back**` fence emitting every key — comfortably under the cap."""
+    return (
+        "**Hand-back**\n\n```text\n"
+        + " · ".join(f"{k}=<n>" for k in keys)
+        + "\n```\n</output_format>\n"
+    )
+
+
+class CheckHandbackSizeTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        (pathlib.Path(self.dir) / "scripts").mkdir()
+        shutil.copy(KEYS_SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-handback-keys.py")
+        shutil.copy(SIZE_SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-handback-size.py")
+        self.legs = load(KEYS_SCRIPT, "check_handback_keys").LEGS
+        for leg in self.legs.values():
+            self.write(leg["agent"], fence(leg["required"]))
+
+    def write(self, relpath, text):
+        path = pathlib.Path(self.dir) / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def run_check(self):
+        return subprocess.run([sys.executable, "scripts/check-handback-size.py"], cwd=self.dir,
+                              capture_output=True, text=True)
+
+    def test_wired_tree_passes(self):
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fleet_round_is_registered(self):
+        """The round delegate must be measured — an unregistered leg is an unmeasured one."""
+        self.assertIn("supervisor:fleet-round", self.legs)
+        self.assertIn("agents/fleet-round.md",
+                      [leg["agent"] for leg in self.legs.values()])
+
+    def test_oversize_fence_fails(self):
+        keys = self.legs["supervisor:fleet-round"]["required"]
+        fat = " · ".join(f"{k}=" + "x" * 60 for k in keys)
+        self.write("agents/fleet-round.md",
+                   f"**Hand-back**\n\n```text\n{fat}\n```\n</output_format>\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("agents/fleet-round.md", result.stderr)
+        self.assertIn("over its", result.stderr)
+
+    def test_variable_lines_are_excluded(self):
+        """A keepalive fence whose row lists run long still passes: the contract truncates them."""
+        keys = self.legs["supervisor:fleet-keepalive-actor"]["required"]
+        rows = "\n".join(f"crash-loop: subject-{i} · WORKER" for i in range(40))
+        self.write(
+            "agents/fleet-keepalive-actor.md",
+            "**Hand-back**\n\n```text\n"
+            + " · ".join(f"{k}=<n>" for k in keys)
+            + "\n" + rows + "\n```\n</output_format>\n",
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_fence_fails(self):
+        self.write("agents/fleet-round.md", "# no hand-back here\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("agents/fleet-round.md", result.stderr)
+        self.assertIn("no `**Hand-back**`", result.stderr)
+
+    def test_missing_agent_fails(self):
+        pathlib.Path(self.dir, "agents/fleet-round.md").unlink()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("agents/fleet-round.md", result.stderr)
+        self.assertIn("missing", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
