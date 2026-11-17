@@ -55,10 +55,17 @@
         <string>/usr/bin:/bin:/usr/sbin:/sbin:/Applications/WezTerm.app/Contents/MacOS</string>
     </dict>
 
-    <key>StartInterval</key>
-    <integer>60</integer>
-
     <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+      ⚠️ KeepAlive, NOT StartInterval. This job is one long-lived process that sweeps once and
+      then `stat`s each watched pane every few seconds. A per-minute launchd tick would re-run
+      the whole ~24 s sweep every time, which is ~40 % of a core and — worse — cannot hold a
+      sub-minute detection bound: the moment one sweep runs long, detection is one sweep plus a
+      tick. KeepAlive restarts it if it dies; the heartbeat it writes is what makes that safe.
+    -->
+    <key>KeepAlive</key>
     <true/>
 
     <key>StandardOutPath</key>
