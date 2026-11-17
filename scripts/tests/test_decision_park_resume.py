@@ -114,6 +114,44 @@ class TestTheWaits(Base):
         rc, out = self.decide()
         self.assertEqual("a", self.resumed(out)[0]["kind"])
 
+    def test_kind_a_fires_for_a_reapproved_row_whose_approved_at_is_preserved(self):
+        """The shape a re-park produces: `approved_at` predates the turn, `reapproved_at` does not.
+
+        `vault-cli task approve` preserves `approved_at` on a re-approval by contract, so before
+        `reapproved_at` existed this row was indistinguishable from one that was never re-approved
+        and the leg emitted nothing.
+        """
+        self.parked(approved_at=APPROVED_BEFORE, reapproved_at=APPROVED_AFTER)
+        rc, out = self.decide()
+        self.assertEqual("a", self.resumed(out)[0]["kind"])
+
+    def test_kind_a_ignores_a_preserved_approval_that_was_never_reapproved(self):
+        """CONTROL LIMB — without this, `return stamp > turn` can be replaced by `return True`.
+
+        The row is identical to the one above except that it carries no `reapproved_at`. A leg that
+        resumes both has deleted its ordering guard rather than fixed it.
+        """
+        self.parked(approved_at=APPROVED_BEFORE)
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out), "a preserved approval with no re-approval is not a wait")
+
+    def test_kind_a_does_not_refire_once_the_reapproved_worker_has_spoken(self):
+        """Consumption: the resumed worker writes a turn, and the re-approval stops being an event."""
+        self.parked(approved_at=APPROVED_BEFORE, reapproved_at=APPROVED_BEFORE)
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out), "a re-approval older than the last turn is consumed")
+
+    def test_an_unreadable_reapproved_at_is_unread_never_a_fallback(self):
+        """An unreadable re-approval must not silently fall back to the older `approved_at`.
+
+        Falling back would resume on a stale ordering — the exact defect the re-approval stamp
+        exists to remove — and it would do so silently, because both values are plausible stamps.
+        """
+        self.parked(approved_at=APPROVED_AFTER, reapproved_at="not-a-date")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out), "an unreadable re-approval must not resume the row")
+        self.assertEqual(1, len(out["unread"]))
+
     def test_an_empty_blocked_by_is_not_a_cleared_wait(self):
         self.parked()
         rc, out = self.decide()
