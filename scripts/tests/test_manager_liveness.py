@@ -1099,7 +1099,9 @@ class DeferDateOnThePage(unittest.TestCase):
         self.m = load(self.tmp.name)
         self.vault = tempfile.TemporaryDirectory()
         self.goals = os.path.join(self.vault.name, "24 Goals")
+        self.topics = os.path.join(self.vault.name, "23 Topics")
         os.makedirs(self.goals)
+        os.makedirs(self.topics)
         self.s = self.m.slug(self.SUBJECT, "goal")
 
     def tearDown(self):
@@ -1123,10 +1125,20 @@ class DeferDateOnThePage(unittest.TestCase):
                 fh.write(f"defer_date: {defer_value}\n")
             fh.write("---\n")
 
-    def run_state(self):
+    def topic_page(self, defer_value):
+        """The same subject name as a TOPIC page — a routine collision, not exotic."""
+        with open(
+            os.path.join(self.topics, self.SUBJECT + ".md"), "w", encoding="utf-8"
+        ) as fh:
+            fh.write("---\n")
+            if defer_value is not None:
+                fh.write(f"defer_date: {defer_value}\n")
+            fh.write("---\n")
+
+    def run_state(self, branch="goal"):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.state(self.SUBJECT, "goal", self.vault.name, time.time())
+            rc = self.m.state(self.SUBJECT, branch, self.vault.name, time.time())
         return rc, out.getvalue(), err.getvalue()
 
     def stop(self):
@@ -1173,6 +1185,27 @@ class DeferDateOnThePage(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("STOPPED\t"), out)
         self.assertIn("defer_date", err)
+
+    def test_a_name_shared_by_a_goal_and_a_topic_reads_the_probed_tier(self):
+        """A goal-first scan reads the GOAL's date for a TOPIC subject.
+
+        Goal and topic pages are named independently, so one name in both tiers is
+        routine — `page_kinds()` returns a set and `detect_branch()` calls a same-named
+        page on another tier a different subject for exactly this reason. Probing `topic`
+        must read `23 Topics/<name>.md`: a scan that starts at `24 Goals` reads the goal's
+        **past** date, falls through, finds no topic cadence, and reports `UNARMED` — so a
+        deferred topic manager stays stood down past its instant.
+        """
+        self.arm(age=5000)                      # goal cadence, aged
+        self.stop()                             # goal--<slug>.stopped
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "topic")  # topic--<slug>.stopped
+        self.page(self.past())                  # 24 Goals/<name>.md -> past
+        self.topic_page(self.future())          # 23 Topics/<name>.md -> future
+        _rc, goal_out, _err = self.run_state("goal")
+        self.assertTrue(goal_out.startswith("STALE\t"), goal_out)
+        _rc, topic_out, _err = self.run_state("topic")
+        self.assertTrue(topic_out.startswith("SLEEPING\t"), topic_out)
 
 
 class StoodDownVersusLapsed(unittest.TestCase):

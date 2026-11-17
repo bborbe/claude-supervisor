@@ -751,16 +751,25 @@ _defer_date = _load_sibling("defer-date.py")
 _close_worker = _load_sibling("close-worker.py")
 
 
-def page_path(subject: str, vault: str):
-    """The `<vault>/<page dir>/<subject>.md` that exists, in `PAGE_DIRS` order — or None.
+def page_path(subject: str, vault: str, kind: str):
+    """The `<vault>/<page dir>/<subject>.md` for the subject's OWN tier, or None.
 
-    `page_kinds()` answers "does this subject exist on a tier"; this answers "which FILE
-    is it", which a reader that must OPEN the page needs. Same exact-basename rule and the
-    same case-insensitivity, so the two never disagree about what a page is.
+    ⚠️ **`kind` is required, and it is the branch `state()` has already probed.** A
+    goal-first scan across every tier would let a topic or task whose name collides with
+    a goal page read *that goal's* `defer_date` — and a collision is routine, not exotic:
+    goal and topic pages are named independently, which is exactly why `page_kinds()`
+    returns a SET and `detect_branch()` treats a same-named page on another tier as a
+    different subject (`docs/subject-resolution.md` § The page test). The tier is not a
+    detail here; it decides which file is read, and so whether this subject is asleep.
+
+    `kind` values are `PAGE_DIRS`' own — `goal` / `topic` / `task`. A `fleet` probe
+    manages no page by design and resolves to None.
     """
     root = os.path.abspath(os.path.expanduser(vault))
     want = subject.lower() + ".md"
-    for _kind, folder in PAGE_DIRS:
+    for page_kind, folder in PAGE_DIRS:
+        if page_kind != kind:
+            continue
         directory = os.path.join(root, folder)
         try:
             entries = os.listdir(directory)
@@ -772,14 +781,14 @@ def page_path(subject: str, vault: str):
     return None
 
 
-def subject_defer_date(subject: str, vault: str):
+def subject_defer_date(subject: str, vault: str, kind: str):
     """`(instant, reason)` from the subject page's `defer_date`, or `(None, None)`.
 
     `reason` is set ONLY when a value exists and cannot be parsed. The caller reads that
     as "no gate", which leaves a stand-down standing — fail closed. Reading garbage as an
     expired gate would wake a deliberately stopped subject on a typo.
     """
-    page = page_path(subject, vault)
+    page = page_path(subject, vault, kind)
     if page is None:
         return None, None
     value = _close_worker.frontmatter(page).get("defer_date")
@@ -816,7 +825,7 @@ def state(subject: str, branch, vault: str, now: float) -> int:
     # marker files cannot carry it. Read here because this is the only caller holding both
     # the page name and the vault root; the marker-only callers (`inbox.py`,
     # `park-nudge.py`, the `--check` sweep) keep the `None` default and are unchanged.
-    defer_instant, defer_reason = subject_defer_date(subject, vault)
+    defer_instant, defer_reason = subject_defer_date(subject, vault, branch)
     if defer_reason:
         print(
             f"manager-liveness: --state: {defer_reason} — treating as no defer_date "
