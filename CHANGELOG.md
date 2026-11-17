@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `scripts/flagged-rows.py` emits a new `parked` branch for a row whose last closer declares an external wait (`⏰ Ends:`), read once per run through `declared-wait.py` so there is one definition of "waiting" — the branch sits after every LIVE branch and before `resume`/`create`, so an open session is never counted as waiting and a parked row is never counted absent
+
 ## v0.335.0
 
 - feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers a real turn over the wrapper's MCP `send_message`, releases a park over `…/answer`, or — with `--nudge` — uses the fire-and-forget REST route, which answers 202 without carrying a turn

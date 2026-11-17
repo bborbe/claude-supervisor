@@ -46,7 +46,9 @@ reporting `liveness: none` and `owner_live: null`. Rows then fall through to
 `create` / `direct` because nothing can be proven live — useful offline, and it is
 what the fixture tests use so they never touch the live fleet. It is NOT a
 substitute for a live run: `open-manager` can never fire under it, since that
-branch needs a subject proven to have no live manager.
+branch needs a subject proven to have no live manager. It also disables the
+`parked` read, because the declared-wait log is live fleet state — see
+`ctx["no_wait"]`. `--no-wait` disables that read on its own, with liveness left on.
 
 Exit codes: 0 ok, 2 usage or config error.
 """
@@ -75,6 +77,15 @@ _FLAG_SPEC.loader.exec_module(flag_provenance)
 #: names; the values live in exactly one place.
 FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
 OPENING_ACTORS = flag_provenance.OPENING_ACTORS
+
+#: The `⏰ Ends:` reader, loaded by path for the same reason `flag_provenance` is.
+#: `parked` reuses it rather than re-parsing a closer: one home for the marker, so a
+#: row the tick would re-drive and a row the census would count `absent` cannot
+#: disagree about what "waiting" means.
+_WAIT_SPEC = importlib.util.spec_from_file_location(
+    "declared_wait", os.path.join(HERE, "declared-wait.py"))
+declared_wait = importlib.util.module_from_spec(_WAIT_SPEC)
+_WAIT_SPEC.loader.exec_module(declared_wait)
 
 #: The tokens `refused` may carry. Two producers: `refusals()` adds
 #: `agent-set-flag` from the per-kind provenance rule, `resolve_branch()` adds
@@ -801,7 +812,7 @@ def owner_liveness(owner, kind, name, ctx, vault):
 
 
 def resolve_branch(kind, role, sid, live, pane, chain_live, block,
-                   owner=None, owner_live=None, registry_ok=False):
+                   owner=None, owner_live=None, registry_ok=False, parked=False):
     """The ordered predicate list — first match wins, so the set is a partition.
 
     `unknown` outranks everything: an unanswerable probe must never be folded into
@@ -834,6 +845,13 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
       selected that owner — the two probes are deliberately independent. An
       unanswerable probe (`None`) falls through to `create`: a probe that cannot
       answer must not suppress work, the same reason `unknown` outranks `create`.
+
+    `parked` is the one branch that is NOT a liveness verdict. It is the row's own
+    last closer declaring an external observable — the `⏰ Ends:` marker, which
+    `~/.claude/CLAUDE.md` § Async State Closer scopes to the 🟡 WAITING panel alone.
+    Its input is `declared-wait.py`'s `declared_wait_ids()`, the single reader, never
+    a second parser: a row parked on a card, a PR, a `defer_date` or a host probe
+    reads `parked` and never `absent`. See `row_for` for where the set is computed.
     """
     refused = []
     if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
@@ -848,10 +866,20 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
         return "open-manager", refused
     if live == "LIVE" and pane:
         return "jump", refused
-    if live == "ABSENT" and sid:
-        return "resume", refused
     if live == "LIVE":
         return "skip", refused
+    # ⚠️ `parked` sits AFTER every LIVE branch and BEFORE `resume`/`create`, and that
+    # position IS the rule. A LIVE row is open — it jumps or skips — and folding it
+    # into `parked` would drop a session that exists out of coverage's numerator. An
+    # ABSENT row whose last closer declared an external wait is exactly the row
+    # `resume` would otherwise reopen on every tick, so this is what stops a 100 %
+    # target from driving the fleet back into resuming idle workers.
+    # Moving the LIVE `skip` above `resume` is behaviour-preserving: `live` carries one
+    # value, so the two predicates are disjoint.
+    if parked:
+        return "parked", refused
+    if live == "ABSENT" and sid:
+        return "resume", refused
     if kind == "task" and owner is not FLEET and owner_live is True:
         return "held-owner-live", refused
     return "create", refused
@@ -935,6 +963,22 @@ def cached_skip(ctx, vault, kind, path):
     return None, key
 
 
+def parked_for(ctx, sid):
+    """Is `sid`'s newest `Stop` record declaring a live `⏰ Ends:`? Cached per run.
+
+    Reads ONE session's log, never the whole store — see `ctx["parked_ids"]` for the
+    measurement that rules out `declared_wait_ids()` here. A missing sid, an unreadable
+    log and `--no-wait`/`--no-liveness` all answer `False`, which is `declared-wait.py`'s
+    own failed-read rule: an unanswerable probe must not suppress work.
+    """
+    if ctx.get("no_wait") or not sid:
+        return False
+    cache = ctx.setdefault("parked_ids", {})
+    if sid not in cache:
+        cache[sid] = declared_wait.declared_wait(sid)
+    return cache[sid]
+
+
 def row_for(vault, cfg, kind, path, ctx):
     hit, key = cached_skip(ctx, vault, kind, path)
     if hit is not None:
@@ -991,7 +1035,8 @@ def row_for(vault, cfg, kind, path, ctx):
     owner_live, chain_live = owner_liveness(owner, page_kind, name, ctx, vault)
     branch, refused = resolve_branch(page_kind, role, sid, live, pane, chain_live, block,
                                      owner=owner, owner_live=owner_live,
-                                     registry_ok=ctx["managers"] is not None)
+                                     registry_ok=ctx["managers"] is not None,
+                                     parked=parked_for(ctx, sid))
     # Provenance first: `refusals()` is the per-kind rule SC4 names, and it is
     # independent of the branch partition, so a row can carry both tokens.
     refused = refusals(page_kind, block) + refused
@@ -1055,6 +1100,17 @@ def collect(args):
         #: through. Filled as the directories are walked, before any row is built.
         "subjects": {},
         "liveness_cache": {},
+        #: sid → is-parked, filled on demand by `parked_for`. A whole-store read
+        #: (`declared_wait_ids()`) is the WRONG shape here: it is O(total log bytes)
+        #: over every session on the machine — measured 2026-11-17 at 159 MB across
+        #: 6,978 files — and this script runs on the tick and in the census. The
+        #: per-session form reads one file, and a fleet's eligible rows number tens.
+        "parked_ids": {},
+        #: Read no live fleet state at all: `--no-wait` names it, and `--no-liveness`
+        #: already promises the fixture tests never touch the live fleet — the events
+        #: log is exactly that. Without this limb the fixture suite blocked 6+ minutes
+        #: on the operator's real log (measured 2026-11-17).
+        "no_wait": getattr(args, "no_wait", False) or args.no_liveness,
         #: The mtime page cache — `None` under `--no-cache`. `new` holds only pages
         #: visited THIS run, so a deleted or renamed page leaves no key behind.
         "cache": (None if args.no_cache else
@@ -1134,6 +1190,9 @@ def main(argv=None):
                         help="mtime page cache file (default: %(default)s)")
     parser.add_argument("--no-cache", action="store_true",
                         help="parse every page; neither read nor write the page cache")
+    parser.add_argument("--no-wait", action="store_true",
+                        help="treat no session as parked; skip the declared-wait read "
+                             "(fixtures, so a test never touches the live log)")
     args = parser.parse_args(argv)
 
     rows, skipped, fallbacks, normalised, cache_stats = collect(args)
