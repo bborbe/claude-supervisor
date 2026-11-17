@@ -298,6 +298,58 @@ class HeldOwnerLive(unittest.TestCase):
             self.branch(live="UNKNOWN", owner=self.GOAL, owner_live=True)[0], "unknown")
 
 
+class DegradedOwner(unittest.TestCase):
+    """A registry-alive, heartbeat-degraded row resolves to a NAMED branch, not `unknown`.
+
+    The registry proves the PROCESS exists; the heartbeat proves the SESSION is not
+    working. They measure different things, so folding the disagreement into `unknown`
+    throws away the owner the same run already resolved. `degraded` never spawns: a
+    manager that already exists must not be duplicated, and a live process must not be
+    resumed onto a second writer.
+    """
+
+    GOAL = {"kind": "goal", "name": "G"}
+
+    def branch(self, **kw):
+        return fr.resolve_branch(
+            kw.pop("kind", "goal"), kw.pop("role", "agent"), kw.pop("sid", "s1"),
+            kw.pop("live", "UNKNOWN"), kw.pop("pane", None),
+            kw.pop("chain_live", None), page("role: agent"),
+            owner=kw.pop("owner", self.GOAL),
+            owner_live=kw.pop("owner_live", None),
+            registry_ok=kw.pop("registry_ok", True))
+
+    def test_a_degraded_owned_row_is_named_not_unknown(self):
+        branch, refused = self.branch()
+        self.assertEqual(branch, "degraded")
+        self.assertEqual(refused, [])
+
+    def test_an_ambiguous_or_malformed_row_is_also_degraded(self):
+        for verdict in ("AMBIGUOUS", "MALFORMED"):
+            self.assertEqual(self.branch(live=verdict)[0], "degraded", verdict)
+
+    def test_a_degraded_row_is_never_resumed(self):
+        # The unsafe variant: UNKNOWN -> ABSENT would resume onto a live process.
+        self.assertNotEqual(self.branch()[0], "resume")
+
+    def test_a_degraded_row_never_opens_a_manager(self):
+        self.assertNotEqual(self.branch(chain_live=True)[0], "open-manager")
+
+    def test_a_degraded_row_never_creates(self):
+        self.assertNotEqual(self.branch()[0], "create")
+
+    def test_an_unreadable_registry_still_reads_unknown(self):
+        # `registry_ok=False` = the registry probe failed, so no owner is known.
+        self.assertEqual(self.branch(registry_ok=False)[0], "unknown")
+
+    def test_a_proven_absent_row_still_resumes(self):
+        # Positive control: the degraded branch must not swallow the ABSENT path.
+        self.assertEqual(self.branch(live="ABSENT")[0], "resume")
+
+    def test_a_human_row_with_no_verdict_is_direct(self):
+        self.assertEqual(self.branch(role="human", live="none")[0], "direct")
+
+
 class RowGate(unittest.TestCase):
     """SC1–SC2 at the ROW level: the emitted row, not just the branch function.
 

@@ -801,11 +801,21 @@ def owner_liveness(owner, kind, name, ctx, vault):
 
 
 def resolve_branch(kind, role, sid, live, pane, chain_live, block,
-                   owner=None, owner_live=None):
+                   owner=None, owner_live=None, registry_ok=False):
     """The ordered predicate list — first match wins, so the set is a partition.
 
     `unknown` outranks everything: an unanswerable probe must never be folded into
     "not live", which is the double-writer `session-liveness.py` forbids.
+
+    `degraded` is the one exception to that ranking, and it does not weaken it. When
+    the registry read SUCCEEDED (`registry_ok`), the owner is known even though the
+    row-level probe could not answer: the registry proved the process alive while the
+    heartbeat says the session is not working — two different questions, not two
+    answers to one. Folding that into `unknown` throws the owner away and is the dead
+    end this branch removes. `degraded` never spawns, so it cannot duplicate the
+    manager that already exists, and it never resumes, so it cannot put a second
+    writer on a live process. An unreadable registry keeps `unknown`: there the owner
+    is not known, and `unknown` is the honest answer.
 
     `open-manager` keys on `chain_live is False` — the row's subject has NO live
     manager, proven rather than assumed. `None` (an unanswerable probe) does not
@@ -827,6 +837,8 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
     """
     refused = []
     if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
+        if registry_ok and owner is not None:
+            return "degraded", refused
         return "unknown", refused
     if role == "human":
         return "direct", refused
@@ -978,7 +990,8 @@ def row_for(vault, cfg, kind, path, ctx):
     owner = resolve_owner(page_kind, name, block, ctx, vault)
     owner_live, chain_live = owner_liveness(owner, page_kind, name, ctx, vault)
     branch, refused = resolve_branch(page_kind, role, sid, live, pane, chain_live, block,
-                                     owner=owner, owner_live=owner_live)
+                                     owner=owner, owner_live=owner_live,
+                                     registry_ok=ctx["managers"] is not None)
     # Provenance first: `refusals()` is the per-kind rule SC4 names, and it is
     # independent of the branch partition, so a row can carry both tokens.
     refused = refusals(page_kind, block) + refused
