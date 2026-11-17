@@ -1476,6 +1476,12 @@ def main():
     unknown = erc.unknown_line(exit_record)
     if unknown:
         print(unknown, file=sys.stderr)
+    # The keeper that re-arms dead writers has no other reader: if it dies, the cards stop and
+    # the panes above stay unrecorded. This board is what renders it, so the instrument has a
+    # consumer — which is the whole reason the heartbeat is a file and not a probe.
+    keeper = erc.keeper_line(*erc.keeper_health())
+    if keeper:
+        print(keeper, file=sys.stderr)
 
     if errors:
         # Loud, never silent: a table that renders correctly and omits sessions is

@@ -441,44 +441,62 @@ def row_liveness(ctx, sid):
     return ctx["liveness_cache"][key]
 
 
+_WHO_NEEDS_ME = None
+
+
+def _who_needs_me():
+    """`who-needs-me.py` loaded ONCE per run, by path.
+
+    Loaded in-process rather than per row: the old path spawned a fresh interpreter
+    for every session id purely to import this module, at 2.4 s a row — 17 rows,
+    40.7 s of a 51 s run. Re-measured 2026-11-17: the import itself is ~0.09 s, so
+    that 2.4 s was the per-spawn I/O — each child re-read the session registry and
+    ran its own `wezterm cli list`. `sys.path` is not usable (this module is itself
+    loaded by path, by the tests and by `open-queue.py`), so the import is explicit,
+    exactly as `flag_provenance` above is.
+    """
+    global _WHO_NEEDS_ME
+    if _WHO_NEEDS_ME is None:
+        spec = importlib.util.spec_from_file_location(
+            "who_needs_me", os.path.join(HERE, "who-needs-me.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _WHO_NEEDS_ME = module
+    return _WHO_NEEDS_ME
+
+
+def _pane_maps(ctx):
+    """`(registry, pane map, records)` — read ONCE per run, then shared by every row.
+
+    One `wezterm cli list`, one registry read and one store read for the whole run.
+    `pane_for` re-reads all three per call because its callers are one-shot; doing
+    that here would be the same 17 spawns in a different costume.
+    """
+    if "pane_maps" not in ctx:
+        wnm = _who_needs_me()
+        ctx["pane_maps"] = (wnm.read_registry(), wnm.wezterm_panes(), wnm.load("needs"))
+    return ctx["pane_maps"]
+
+
 def pane_of(ctx, sid):
-    """`who-needs-me.py`'s `pane_for()`, cached per sid — neither the heartbeat store
-    nor the registry carries a pane field.
+    """`who-needs-me.py`'s `pane_for()` rules, resolved in-process and cached per sid.
 
-    ⚠️ Cached because each call spawns a fresh interpreter and importlib-loads a
-    2300-line module; rows share session ids exactly as they do for `row_liveness`.
+    ⚠️ Delegates to `pane_for_maps`, which `pane_for` itself is a thin wrapper over,
+    so every refusal — unknown id, ambiguous prefix, unreadable registry or pane
+    list, nameless session, two panes sharing a title — is the CLI's own. The batch
+    path cannot drift from it.
 
-    ⚠️ `pane_for` PRINTS the pane and returns an exit code, so the pane is its stdout,
-    never its return value. Reading the return value yields `0`, which is not a pane
-    id and folds every live session into `skip`.
+    ⚠️ Cached per sid: rows share session ids exactly as they do for `row_liveness`.
     """
     if not sid:
         return None
     key = ("pane", sid)
     if key in ctx["liveness_cache"]:
         return ctx["liveness_cache"][key]
-    script = ("import importlib.util, sys;"
-              "s = importlib.util.spec_from_file_location('wnm', sys.argv[1]);"
-              "m = importlib.util.module_from_spec(s); s.loader.exec_module(m);"
-              "sys.exit(m.pane_for(sys.argv[2]))")
-    # ⚠️ Bounded, for the reason PROBE_TIMEOUT records: this is the helper that
-    # actually hung, and an absent pane is a field on one row rather than a tick
-    # that did nothing.
-    try:
-        out = subprocess.run([sys.executable, "-c", script,
-                              os.path.join(HERE, "who-needs-me.py"), sid],
-                             capture_output=True, text=True, check=False,
-                             timeout=PROBE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        print("flagged-rows: pane probe for %s exceeded %ds — no pane"
-              % (sid, PROBE_TIMEOUT), file=sys.stderr)
-        ctx["liveness_cache"][key] = None
-        return None
-    pane = ""
-    if out.returncode == 0 and out.stdout.strip():
-        pane = out.stdout.strip().splitlines()[0].strip()
-    ctx["liveness_cache"][key] = pane or None
-    return ctx["liveness_cache"][key]
+    registry, pmap, records = _pane_maps(ctx)
+    pane, _reason = _who_needs_me().pane_for_maps(sid, registry, pmap, records)
+    ctx["liveness_cache"][key] = pane
+    return pane
 
 
 def fleet_mode():
@@ -783,11 +801,21 @@ def owner_liveness(owner, kind, name, ctx, vault):
 
 
 def resolve_branch(kind, role, sid, live, pane, chain_live, block,
-                   owner=None, owner_live=None):
+                   owner=None, owner_live=None, registry_ok=False):
     """The ordered predicate list — first match wins, so the set is a partition.
 
     `unknown` outranks everything: an unanswerable probe must never be folded into
     "not live", which is the double-writer `session-liveness.py` forbids.
+
+    `degraded` is the one exception to that ranking, and it does not weaken it. When
+    the registry read SUCCEEDED (`registry_ok`), the owner is known even though the
+    row-level probe could not answer: the registry proved the process alive while the
+    heartbeat says the session is not working — two different questions, not two
+    answers to one. Folding that into `unknown` throws the owner away and is the dead
+    end this branch removes. `degraded` never spawns, so it cannot duplicate the
+    manager that already exists, and it never resumes, so it cannot put a second
+    writer on a live process. An unreadable registry keeps `unknown`: there the owner
+    is not known, and `unknown` is the honest answer.
 
     `open-manager` keys on `chain_live is False` — the row's subject has NO live
     manager, proven rather than assumed. `None` (an unanswerable probe) does not
@@ -809,6 +837,8 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
     """
     refused = []
     if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
+        if registry_ok and owner is not None:
+            return "degraded", refused
         return "unknown", refused
     if role == "human":
         return "direct", refused
@@ -960,7 +990,8 @@ def row_for(vault, cfg, kind, path, ctx):
     owner = resolve_owner(page_kind, name, block, ctx, vault)
     owner_live, chain_live = owner_liveness(owner, page_kind, name, ctx, vault)
     branch, refused = resolve_branch(page_kind, role, sid, live, pane, chain_live, block,
-                                     owner=owner, owner_live=owner_live)
+                                     owner=owner, owner_live=owner_live,
+                                     registry_ok=ctx["managers"] is not None)
     # Provenance first: `refusals()` is the per-kind rule SC4 names, and it is
     # independent of the branch partition, so a row can carry both tokens.
     refused = refusals(page_kind, block) + refused
