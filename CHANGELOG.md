@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.334.1
 
 - fix: **the fleet round prints its two count lines even when the `Waiting on your keystroke` list fails.** `commands/steps/drive.md` led that list with the board and store lines, and the whole list is skipped when the round's pane re-read fails — so the round's only measure of operator load vanished with it. Measured 2026-11-17: rounds `00-50` and `02-07` each printed `Waiting on your keystroke — re-read failed: …` and neither `.drive` carried a single count line. Both lines read the store over HTTP and need no pane, so they now print as their own step before the list, with the prose stating they must print on every round whatever the pane read does. Change set: `commands/steps/drive.md`, `CHANGELOG.md`.
 
