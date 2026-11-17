@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""The hand-back contract's ≤ 1 KB cap, asserted rather than described.
+
+`docs/handback-contract.md` § The shape says a leg returns **≤ 1 KB** and the detail goes to
+the payload. Nothing measured it, so every leg could exceed the cap on every round and no
+check would fail — the same "a rule that lives only in prose" defect `check-handback-keys.py`
+catches one layer down for *keys*. This asserts the size.
+
+**What is measured, and why that is the honest proxy.** The agent's own `<output_format>`
+hand-back fence, minus the lines the contract declares **variable** (the truncation
+exception: `crash-loop:` / `cannot-tell:` / `park-nudge:` rows, `refused:` lines). Those are
+unbounded by design — the payload carries the remainder — so counting them would fail a leg
+that is behaving correctly. A template that fits proves every instance fits, because every
+`<n>` / `<path>` placeholder is longer than the value it stands for; the measurement is
+therefore conservative in the safe direction.
+
+⚠️ **This is not a live measurement of a run.** It pins the shape a leg is authored to
+return. A leg that writes more than its template on a real round is a leg that broke its own
+contract, which is a review question, not something a static check can see.
+"""
+
+import importlib.util
+import re
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+MAX_BYTES = 1024
+
+#: The lines the contract declares variable per leg — never counted against the cap. Keys are
+#: the leg names `check-handback-keys.LEGS` uses. A leg absent here has no variable lines and
+#: its whole hand-back must fit.
+VARIABLE = {
+    "supervisor:fleet-keepalive-actor": ("crash-loop:", "cannot-tell:", "park-nudge:"),
+    "supervisor:fleet-open-actor": ("refused:",),
+}
+
+
+def load_legs():
+    """`check-handback-keys.LEGS` — one registry, so a new leg is guarded by both checks."""
+    path = REPO / "scripts" / "check-handback-keys.py"
+    spec = importlib.util.spec_from_file_location("check_handback_keys", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.LEGS
+
+
+def handback_fence(text: str) -> str | None:
+    """The fenced block under `**Hand-back**`, or None when there is not one.
+
+    Scoped to the fence on purpose, exactly as `check-handback-keys.keys_emitted` is: the
+    surrounding prose is not the hand-back, and counting it would measure the documentation.
+    """
+    _, sep, rest = text.partition("**Hand-back**")
+    if not sep:
+        return None
+    body = rest.partition("</output_format>")[0]
+    m = re.search(r"```[a-z]*\n(.*?)```", body, re.DOTALL)
+    return m.group(1) if m else None
+
+
+def fixed_bytes(fence: str, variable: tuple[str, ...]) -> int:
+    """Byte length of the fence minus its declared variable lines."""
+    kept = [ln for ln in fence.splitlines()
+            if not any(ln.lstrip().startswith(p) for p in variable)]
+    return len("\n".join(kept).rstrip("\n").encode("utf-8"))
+
+
+def main(root: Path | None = None) -> int:
+    root = Path(root) if root is not None else REPO
+    legs = load_legs()
+    failures: list[str] = []
+    readings: list[str] = []
+    for name, leg in sorted(legs.items()):
+        agent = root / leg["agent"]
+        if not agent.exists():
+            failures.append(f"{leg['agent']}: missing — {name}'s hand-back cannot be measured")
+            continue
+        fence = handback_fence(agent.read_text(encoding="utf-8"))
+        if fence is None:
+            failures.append(f"{leg['agent']}: no `**Hand-back**` fenced block — nothing to measure")
+            continue
+        size = fixed_bytes(fence, VARIABLE.get(name, ()))
+        readings.append(f"{name}={size}B")
+        if size > MAX_BYTES:
+            failures.append(
+                f"{leg['agent']}: hand-back is {size} B over its {MAX_BYTES} B cap "
+                f"(fixed lines only) — move detail to the payload, or declare the variable "
+                f"lines in this script's VARIABLE map"
+            )
+    if failures:
+        print(f"handback-size FAILED: {len(failures)} problem(s)", file=sys.stderr)
+        for f in failures:
+            print(f"  - {f}", file=sys.stderr)
+        return 1
+    print(f"handback-size ok: {len(readings)} leg(s) under {MAX_BYTES} B — {', '.join(readings)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
