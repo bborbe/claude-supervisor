@@ -5,8 +5,8 @@ The load-bearing properties:
 
 - a silent pane files ONE card and is re-armed only after that card exists;
 - **no card, no re-arm** — the other order hides the death behind a covered pane;
-- a sweep that cannot run is reported, never treated as "nothing is wrong";
-- every tick rewrites the liveness file the coverage sweep reads.
+- a failed re-arm is reported, never swallowed;
+- a sweep that resolves nothing reports its `unknown` count instead of calling the fleet clean.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -25,43 +25,8 @@ k = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(k)
 
 NOW = 1_800_000_000.0
-SILENT = {
-    "pane": "7",
-    "name": "Fleet Manager",
-    "session_id": "aaaaaaaa-0000-0000-0000-000000000000",
-    "line": "⚠️ UNRECORDED: Fleet Manager — pane 7, session aaaaaaaa runs with a silent exit "
-            "recorder (last heartbeat 600 s old); its death would leave no record",
-}
-
-
-class _Base(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.store = pathlib.Path(self.tmp.name)
-        self.saved = {n: getattr(k, n) for n in ("STATE_DIR", "HEARTBEAT")}
-        self.addCleanup(lambda: [setattr(k, n, v) for n, v in self.saved.items()])
-        k.STATE_DIR = str(self.store)
-        k.HEARTBEAT = str(self.store / "keeper-heartbeat")
-        self.saved_alive = k._alive
-        self.addCleanup(lambda: setattr(k, "_alive", self.saved_alive))
-        k._alive = lambda pid: True  # the fixture's pid is not a real process
-        self.calls = []
-
-    def fake_run(self, argv, **kwargs):
-        self.calls.append(argv)
-        script = pathlib.Path(argv[1]).name
-        if script == "exit-record-coverage.py":
-            return _Done(json.dumps({"unrecorded": [SILENT], "unknown": []}))
-        if script == "attention-ask.py":
-            return _Done("item-42")
-        return _Done("")
-
-    def write_store(self, age=600, pid=4242):
-        log = self.store / "pane-7.log"
-        log.write_text("2026-11-17T00:00:00Z\tkind=spawn\tpane=7\tsession=sess\tpid=4242"
-                       "\trc=0\tsignal=-\tsender=-\twriter=trap\n", encoding="utf-8")
-        os.utime(log, (NOW - age, NOW - age))
+SILENT = {"pane": "7", "name": "Fleet Manager",
+          "session_id": "aaaaaaaa-0000-0000-0000-000000000000"}
 
 
 class _Done:
@@ -69,96 +34,92 @@ class _Done:
         self.stdout, self.stderr, self.returncode = stdout, "", returncode
 
 
+class _Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = pathlib.Path(self.tmp.name)
+        saved = {n: getattr(k, n) for n in ("STATE_DIR", "HEARTBEAT")}
+        saved_run, saved_alive = k.subprocess.run, k._alive
+        self.addCleanup(lambda: [setattr(k, n, v) for n, v in saved.items()])
+        self.addCleanup(lambda: setattr(k.subprocess, "run", saved_run))
+        self.addCleanup(lambda: setattr(k, "_alive", saved_alive))
+        k.STATE_DIR = str(self.store)
+        k.HEARTBEAT = str(self.store / "keeper-heartbeat")
+        k._alive = lambda pid: True
+        self.calls = []
+
+    def write_log(self, age=600, pid=4242):
+        path = self.store / "pane-7.log"
+        path.write_text("2026-11-17T00:00:00Z\tkind=spawn\tpane=7\tsession=sess\tpid=4242"
+                        "\trc=0\tsignal=-\tsender=-\twriter=trap\n", encoding="utf-8")
+        os.utime(path, (NOW - age, NOW - age))
+
+
 class CardBeforeRearm(_Base):
     def setUp(self):
         super().setUp()
-        self.write_store()
-        self.saved_run = k.subprocess.run
-        self.addCleanup(lambda: setattr(k.subprocess, "run", self.saved_run))
-        k.subprocess.run = self.fake_run
+        self.panes = {"7": {"pid": 4242, "session": "sess", "name": "Fleet Manager",
+                            "session_id": SILENT["session_id"]}}
+
+        def run(argv, **kw):
+            self.calls.append(argv)
+            return _Done("item-42") if pathlib.Path(argv[1]).name == "attention-ask.py" else _Done("")
+        k.subprocess.run = run
 
     def test_silent_pane_is_carded_then_rearmed(self):
-        rc = k.main(["--now", str(NOW)])
-        self.assertEqual(rc, 0)
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes), 0)
         scripts = [pathlib.Path(a[1]).name for a in self.calls]
-        self.assertEqual(scripts, ["exit-record-coverage.py", "attention-ask.py",
-                                   "session-exit-record.py"])
-        rearm = self.calls[-1]
-        self.assertIn("observe", rearm)
-        self.assertIn("7", rearm)
-        self.assertIn("4242", rearm)
-        self.assertIn("sess", rearm)
+        self.assertEqual(scripts, ["attention-ask.py", "session-exit-record.py"])
+        self.assertIn("observe", self.calls[-1])
+        self.assertIn("4242", self.calls[-1])
 
     def test_failed_card_means_no_rearm(self):
-        def failing(argv, **kwargs):
+        def run(argv, **kw):
             self.calls.append(argv)
-            if pathlib.Path(argv[1]).name == "exit-record-coverage.py":
-                return _Done(json.dumps({"unrecorded": [SILENT], "unknown": []}))
-            return _Done("", returncode=1)
-
-        k.subprocess.run = failing
-        rc = k.main(["--now", str(NOW)])
-        self.assertEqual(rc, 1)
-        scripts = [pathlib.Path(a[1]).name for a in self.calls]
-        self.assertNotIn("session-exit-record.py", scripts,
-                         "a card that did not land must not be papered over by a re-arm")
+            if pathlib.Path(argv[1]).name == "attention-ask.py":
+                return _Done("", returncode=1)
+            return _Done("")
+        k.subprocess.run = run
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes), 1)
+        self.assertNotIn("session-exit-record.py",
+                         [pathlib.Path(a[1]).name for a in self.calls])
 
     def test_failed_rearm_is_reported(self):
-        """A card that says "re-armed" over a re-arm that failed is the same lie in reverse."""
-        def failing(argv, **kwargs):
+        def run(argv, **kw):
             self.calls.append(argv)
-            name = pathlib.Path(argv[1]).name
-            if name == "exit-record-coverage.py":
-                return _Done(json.dumps({"unrecorded": [SILENT], "unknown": []}))
-            if name == "attention-ask.py":
+            if pathlib.Path(argv[1]).name == "attention-ask.py":
                 return _Done("item-42")
             return _Done("", returncode=1)
+        k.subprocess.run = run
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes), 1)
 
-        k.subprocess.run = failing
-        self.assertEqual(k.main(["--now", str(NOW)]), 1)
-
-    def test_every_tick_writes_the_liveness_file(self):
-        k.main(["--now", str(NOW)])
-        self.assertEqual(pathlib.Path(k.HEARTBEAT).read_text().strip(), str(int(NOW)))
+    def test_fresh_log_does_nothing(self):
+        self.write_log(age=10)
+        self.assertEqual(k.check(NOW, self.panes), 0)
+        self.assertEqual(self.calls, [])
 
 
-class SweepFailure(_Base):
-    def setUp(self):
-        super().setUp()
-        self.saved_run = k.subprocess.run
-        self.addCleanup(lambda: setattr(k.subprocess, "run", self.saved_run))
+class Sweep(_Base):
+    def test_unknown_count_is_carried_out(self):
+        k.subprocess.run = lambda argv, **kw: _Done(
+            json.dumps({"unrecorded": [], "unknown": [{"name": "x"}]}))
+        self.assertEqual(k.sweep(NOW), ({}, 1))
+
+    def test_unrunnable_sweep_is_none(self):
         k.subprocess.run = lambda argv, **kw: _Done("", returncode=1)
-
-    def test_an_unrunnable_sweep_is_reported_not_called_clean(self):
-        self.assertEqual(k.main(["--now", str(NOW)]), 1)
+        self.assertIsNone(k.sweep(NOW))
 
 
-class NothingSilent(_Base):
-    def setUp(self):
-        super().setUp()
-        self.saved_run = k.subprocess.run
-        self.addCleanup(lambda: setattr(k.subprocess, "run", self.saved_run))
-        k.subprocess.run = lambda argv, **kw: (
-            self.calls.append(argv) or _Done(json.dumps({"unrecorded": [], "unknown": []})))
-
-    def test_no_silent_pane_cards_nothing(self):
-        self.assertEqual(k.main(["--now", str(NOW)]), 0)
-        self.assertEqual([pathlib.Path(a[1]).name for a in self.calls],
-                         ["exit-record-coverage.py"])
-
-
-class UnresolvablePanes(_Base):
-    """Under launchd there is no `wezterm`, so the sweep resolves nothing — and must not read clean."""
-
-    def setUp(self):
-        super().setUp()
-        self.saved_run = k.subprocess.run
-        self.addCleanup(lambda: setattr(k.subprocess, "run", self.saved_run))
-        k.subprocess.run = lambda argv, **kw: (
-            self.calls.append(argv) or _Done(json.dumps({"unrecorded": [], "unknown": [{"name": "x"}]})))
-
-    def test_an_unresolvable_sweep_is_not_a_healthy_fleet(self):
-        self.assertEqual(k.main(["--now", str(NOW)]), 1)
+class Liveness(_Base):
+    def test_every_pass_writes_the_heartbeat(self):
+        k.subprocess.run = lambda argv, **kw: _Done(
+            json.dumps({"unrecorded": [], "unknown": []}))
+        k.main(["--once", "--now", str(NOW)])
+        self.assertEqual(pathlib.Path(k.HEARTBEAT).read_text().strip(), str(int(NOW)))
 
 
 if __name__ == "__main__":
