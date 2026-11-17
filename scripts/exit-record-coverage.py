@@ -148,10 +148,12 @@ def last_seen(lines, alive):
     pid, so a heartbeat's presence is the only liveness signal the store carries — its
     timestamp is the reading, and the spawn line is the fallback for a writer that died
     before its first beat.
+
+    Only heartbeats **at or after** the newest live spawn line count. A reused pane id
+    (trap 2) leaves the previous occupant's heartbeats in the same file, and reading those
+    would mark a pane that was just re-spawned stale in the moment before its new observer's
+    first beat — the first beat lands immediately, so that window is small but real.
     """
-    beats = [t for t in (_stamp(ln) for ln in lines if field(ln, "kind") == "heartbeat") if t]
-    if beats:
-        return max(beats)
     spawns = []
     for line in lines:
         if field(line, "kind") != "spawn" or field(line, "writer") != "trap":
@@ -159,7 +161,12 @@ def last_seen(lines, alive):
         pid, stamp = field(line, "pid"), _stamp(line)
         if stamp and pid.isdigit() and alive(int(pid)):
             spawns.append(stamp)
-    return max(spawns) if spawns else None
+    spawn = max(spawns) if spawns else None
+    beats = [t for t in (_stamp(ln) for ln in lines if field(ln, "kind") == "heartbeat")
+             if t and (spawn is None or t >= spawn)]
+    if beats:
+        return max(beats)
+    return spawn
 
 
 def stale_panes(records, alive, now, threshold=HEARTBEAT_STALE_SECONDS):

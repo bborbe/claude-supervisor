@@ -33,8 +33,8 @@ def alive(pid):
     return pid == LIVE
 
 
-def spawn(pid, session="-", writer="trap"):
-    return (f"2026-11-02T10:00:00Z\tkind=spawn\tpane=7\tsession={session}\tpid={pid}"
+def spawn(pid, session="-", writer="trap", stamp="2026-11-02T10:00:00Z"):
+    return (f"{stamp}\tkind=spawn\tpane=7\tsession={session}\tpid={pid}"
             f"\trc=0\tsignal=-\tsender=-\twriter={writer}")
 
 
@@ -176,9 +176,17 @@ class TestLiveCoverage(unittest.TestCase):
 
         Fails before the staleness rule — `has_live_spawn` alone calls this pane covered.
         """
-        out = self._run({"7": [spawn(LIVE), heartbeat("2026-11-02T09:00:00Z")]})
+        out = self._run({"7": [spawn(LIVE, stamp="2026-11-02T09:00:00Z"),
+                               heartbeat("2026-11-02T09:30:00Z")]})
         self.assertEqual([r["pane"] for r in out["unrecorded"]], ["7"])
         self.assertIn("silent exit recorder", out["unrecorded"][0]["line"])
+
+    def test_reused_pane_old_heartbeat_before_a_new_spawn_is_recorded(self):
+        """Trap 2: the previous occupant's beats must not age the new spawn out."""
+        out = self._run({"7": [spawn(DEAD, stamp="2026-11-02T08:00:00Z"),
+                               heartbeat("2026-11-02T08:30:00Z"),
+                               spawn(LIVE, stamp="2026-11-02T10:00:00Z")]})
+        self.assertEqual((out["unrecorded"], out["unknown"]), ([], []))
 
     def test_fresh_heartbeat_reads_as_recorded(self):
         out = self._run({"7": [spawn(LIVE), heartbeat("2026-11-02T10:00:20Z")]})
