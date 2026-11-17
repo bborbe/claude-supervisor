@@ -51,8 +51,52 @@ PRODUCER_ID = "exit-observer-keeper"
 
 POLL_SECONDS = 5        # between sweeps: one `stat` per watched pane, nothing else
 REFRESH_SECONDS = 600   # how often the pane list is re-swept (one ~24 s sweep each)
+RETRY_SECONDS = 60      # a failed sweep is retried sooner than a full refresh interval
 OBSERVER_STALE = 45     # log silence that means the writer is gone (1.5 x its 30 s interval)
 SWEEP_TIMEOUT = 300     # a slow sweep must not wedge the loop forever
+
+
+class Loop:
+    """The watch, as a state machine one pass at a time — so a test can drive the clock.
+
+    ⚠️ **The refresh is driven by elapsed time alone.** An earlier version also re-swept when
+    the pane set came back empty, and an empty pane set is the HEALTHY fleet — the state this
+    process spends nearly all its time in — so it swept continuously instead of every
+    `REFRESH_SECONDS`. Nothing about the pane set's size may appear in the refresh decision.
+    """
+
+    def __init__(self, dry_run=False):
+        self.dry_run = dry_run
+        self.panes = {}
+        self.unknown = 0
+        self.refreshed = None  # None = never swept; any float is "swept at"
+        self.rc = 0
+
+    def due(self, now):
+        """Is a sweep due? Time since the last sweep, and nothing else."""
+        return self.refreshed is None or now - self.refreshed >= REFRESH_SECONDS
+
+    def step(self, now):
+        """One pass: beat, sweep if due, then `stat` each watched pane."""
+        if not self.dry_run:
+            beat(now)
+        if self.due(now):
+            result = sweep(now)
+            if result is None:
+                print("exit-observer-keeper: coverage sweep failed — cannot tell whether any "
+                      "observer is dead; not reporting that as fine", file=sys.stderr)
+                self.rc = 1
+                self.refreshed = now - REFRESH_SECONDS + RETRY_SECONDS
+            else:
+                self.panes, self.unknown = result
+                self.refreshed = now
+                if self.unknown:
+                    print(f"exit-observer-keeper: the sweep could not resolve {self.unknown} "
+                          f"manager pane(s) — they are NOT counted as healthy", file=sys.stderr)
+                    self.rc = 1
+                elif not self.panes:
+                    print("exit-observer-keeper: every manager pane has a live writer")
+        return check(now, self.panes, dry_run=self.dry_run) or self.rc
 
 
 def beat(now):
@@ -193,27 +237,10 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="report what would happen, act on nothing")
     args = ap.parse_args(argv)
 
-    panes, refreshed, rc = {}, 0.0, 0
+    loop = Loop(dry_run=args.dry_run)
     while True:
         now = args.now if args.now is not None else time.time()
-        if not args.dry_run:
-            beat(now)
-        if not panes or now - refreshed >= REFRESH_SECONDS:
-            result = sweep(now)
-            if result is None:
-                print("exit-observer-keeper: coverage sweep failed — cannot tell whether any "
-                      "observer is dead; not reporting that as fine", file=sys.stderr)
-                rc = 1
-            else:
-                panes, unknown = result
-                refreshed = now
-                if unknown:
-                    print(f"exit-observer-keeper: the sweep could not resolve {unknown} manager "
-                          f"pane(s) — they are NOT counted as healthy", file=sys.stderr)
-                    rc = 1
-                elif not panes:
-                    print("exit-observer-keeper: every manager pane has a live writer")
-        rc = check(now, panes, dry_run=args.dry_run) or rc
+        rc = loop.step(now)
         if args.once:
             return rc
         time.sleep(POLL_SECONDS)

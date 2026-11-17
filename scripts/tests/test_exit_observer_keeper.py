@@ -122,5 +122,34 @@ class Liveness(_Base):
         self.assertEqual(pathlib.Path(k.HEARTBEAT).read_text().strip(), str(int(NOW)))
 
 
+class HealthyFleetRefresh(unittest.TestCase):
+    """An empty pane set IS the healthy fleet — the state this process lives in nearly always.
+
+    A refresh predicate that also fires when the pane set is empty therefore re-runs the ~24 s
+    sweep on every poll, which is worse than the 60 s tick this shape replaces.
+    """
+
+    def setUp(self):
+        self.sweeps = []
+        saved = {n: getattr(k, n) for n in ("sweep", "check", "beat")}
+        self.addCleanup(lambda: [setattr(k, n, v) for n, v in saved.items()])
+        k.sweep = lambda now: (self.sweeps.append(now) or ({}, 0))
+        k.check = lambda now, panes, dry_run=False: 0
+        k.beat = lambda now: None
+
+    def test_empty_panes_do_not_force_a_resweep(self):
+        loop = k.Loop(dry_run=True)
+        loop.step(NOW)
+        loop.step(NOW + k.POLL_SECONDS)
+        self.assertEqual(len(self.sweeps), 1,
+                         "the refresh is time-driven; an empty pane set must not re-sweep")
+
+    def test_the_refresh_does_fire_when_it_is_due(self):
+        loop = k.Loop(dry_run=True)
+        loop.step(NOW)
+        loop.step(NOW + k.REFRESH_SECONDS)
+        self.assertEqual(len(self.sweeps), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
