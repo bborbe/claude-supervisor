@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers over the wrapper's `POST …/sessions/<id>/message` or releases a park over `…/answer`
+- feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers a real turn over the wrapper's MCP `send_message`, releases a park over `…/answer`, or — with `--nudge` — uses the fire-and-forget REST route, which answers 202 without carrying a turn
 
 ## v0.331.2
 
