@@ -807,65 +807,94 @@ class FeedRead(Tmp):
 
     def setUp(self):
         super().setUp()
-        self._run = rr.subprocess.run
+        self._payload = rr._feed_payload
 
     def tearDown(self):
-        rr.subprocess.run = self._run
+        rr._feed_payload = self._payload
         super().tearDown()
 
     @staticmethod
-    def _result(returncode, stdout=""):
-        return rr.subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="boom")
+    def _store(items=None):
+        """A healthy service answer carrying `items`."""
+        return {"source": "store",
+                "sources": {"store": "ok", "registry": "ok", "panes": "ok"},
+                "items": list(items or [])}
+
+    @staticmethod
+    def _fallback():
+        """The service answering from the event log — the render's fallback branch."""
+        return {"source": "event-log",
+                "sources": {"store": "unreadable", "registry": "ok", "panes": "ok"},
+                "items": []}
+
+    ITEMS = [
+        {"item_id": "aaaaaaaa", "pane": "417", "kind": "permission", "state": "open",
+         "session_id": "sid-pane"},
+        {"item_id": "item-abc", "pane": "", "kind": "permission", "state": "open",
+         "session_id": "sid-hst"},
+        {"item_id": "bbbbbbbb", "pane": "1234", "kind": "question", "state": "open",
+         "session_id": "sid-other"},
+    ]
 
     def test_a_transient_failure_recovers_on_the_retry(self):
         calls = []
 
-        def fake(cmd, **kwargs):
-            calls.append(cmd)
-            return self._result(0, FEED) if len(calls) == 2 else self._result(1)
+        def fake(endpoint=None, timeout=60):
+            calls.append(1)
+            if len(calls) == 2:
+                return self._store(self.ITEMS), None
+            return None, "URLError: connection refused"
 
-        rr.subprocess.run = fake
+        rr._feed_payload = fake
         feed = rr.feed_panes()
         self.assertEqual(feed["state"], "read")
         self.assertIsNone(feed["error"])
         self.assertEqual(len(calls), 2)
+        self.assertEqual(feed["panes"], {"417", "hst:item-abc", "1234"})
+        self.assertEqual(feed["owners"], {"hst:item-abc": "sid-hst"})
 
     def test_two_failures_are_named_not_rendered(self):
-        rr.subprocess.run = lambda cmd, **kw: self._result(1)
+        rr._feed_payload = lambda endpoint=None, timeout=60: (None, "URLError: refused")
         feed = rr.feed_panes()
         self.assertEqual(feed["state"], "unread")
-        self.assertIn("who-needs-me.py", feed["error"])
+        self.assertIn("who-needs-me endpoint", feed["error"])
         self.assertIn("failed twice", feed["error"])
 
     def test_a_timeout_is_retried_then_named(self):
-        def fake(cmd, **kwargs):
-            raise rr.subprocess.TimeoutExpired(cmd, 60)
-
-        rr.subprocess.run = fake
+        rr._feed_payload = lambda endpoint=None, timeout=60: (None, "TimeoutError: 60")
         feed = rr.feed_panes()
         self.assertEqual(feed["state"], "unread")
-        self.assertIn("TimeoutExpired", feed["error"])
+        self.assertIn("TimeoutError", feed["error"])
 
-    def test_a_fallback_render_is_retried(self):
+    def test_a_fallback_answer_is_retried(self):
         """A store that recovers inside the round must not leave a partial read."""
-        fallback = "store unreachable — reading event log\nNeeds you (0)\n"
         calls = []
 
-        def fake(cmd, **kwargs):
-            calls.append(cmd)
-            return self._result(0, FEED if len(calls) == 2 else fallback)
+        def fake(endpoint=None, timeout=60):
+            calls.append(1)
+            if len(calls) == 2:
+                return self._store(self.ITEMS), None
+            return self._fallback(), None
 
-        rr.subprocess.run = fake
+        rr._feed_payload = fake
         feed = rr.feed_panes()
         self.assertEqual(feed["state"], "read")
         self.assertEqual(len(calls), 2)
 
     def test_two_fallbacks_are_partial_and_named(self):
-        fallback = "store unreachable — reading event log\nNeeds you (0)\n"
-        rr.subprocess.run = lambda cmd, **kw: self._result(0, fallback)
+        rr._feed_payload = lambda endpoint=None, timeout=60: (self._fallback(), None)
         feed = rr.feed_panes()
         self.assertEqual(feed["state"], "partial")
         self.assertIn("attention store was unreachable", feed["error"])
+
+    def test_a_closed_or_other_kind_item_is_not_a_gate(self):
+        items = list(self.ITEMS) + [
+            {"item_id": "cccccccc", "pane": "999", "kind": "ack", "state": "open"},
+            {"item_id": "dddddddd", "pane": "888", "kind": "question", "state": "closed"},
+        ]
+        feed = rr.feed_from_payload(self._store(items))
+        self.assertNotIn("999", feed["panes"])
+        self.assertNotIn("888", feed["panes"])
 
 
 class FeedFamilyInvariant(Tmp):
@@ -971,19 +1000,17 @@ class FeedFamilyInvariant(Tmp):
         self.assertEqual(doc["rows"]["Gated task"]["feed"], "gated")
         self.assertEqual(doc["rows"]["Maybe task"]["feed"], "unread")
         self.assertLess(doc["feed_counts"]["unread"], len(doc["rows"]))
-        self.assertEqual(doc["probes"][0]["probe"],
-                         "who-needs-me.py --section needs-you --all")
+        self.assertEqual(doc["probes"][0]["probe"], rr.FEED_PROBE)
         self.assert_invariant(doc)
 
     def test_a_failed_feed_read_is_all_unread_and_names_the_probe(self):
         doc = self.document(
             {"A": ["s1"], "B": ["s2"]},
             {"panes": set(), "owners": {}, "orphan_owners": [], "state": "unread",
-             "error": "who-needs-me.py --section needs-you --all failed twice: "
-                      "TimeoutExpired: 60"})
+             "error": "who-needs-me endpoint read failed twice: "
+                      "TimeoutError: 60"})
         self.assertEqual(doc["feed_counts"], {"gated": 0, "clear": 0, "unread": 2})
-        self.assertEqual(doc["probes"][0]["probe"],
-                         "who-needs-me.py --section needs-you --all")
+        self.assertEqual(doc["probes"][0]["probe"], rr.FEED_PROBE)
         self.assertIn("failed twice", doc["probes"][0]["error"])
         self.assert_invariant(doc)
 
