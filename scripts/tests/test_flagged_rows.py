@@ -350,6 +350,44 @@ class DegradedOwner(unittest.TestCase):
         self.assertEqual(self.branch(role="human", live="none")[0], "direct")
 
 
+class ExitedSessionResumes(unittest.TestCase):
+    """An EXITED worker resolves to `resume`, end to end through the real liveness probe.
+
+    Claude Code deletes the registry entry when a session exits, so the probe sees no entry
+    and only the heartbeat endpoint's record. After #952 that read UNKNOWN and every such row
+    was `degraded`; measured 2026-11-17, 21 of 21 flagged rows with a session, none `resume`.
+    The probe runs as a subprocess exactly as the daemon's tick runs it.
+    """
+
+    SID = "4b8275b0-1111-2222-3333-444455556666"
+
+    def probe(self, rows):
+        import endpoint_fixture
+        with tempfile.TemporaryDirectory() as registry, \
+                endpoint_fixture.FixtureEndpoint(rows) as fx, \
+                unittest.mock.patch.dict(os.environ, {
+                    "ATTENTION_STORE_URL": fx.url,
+                    "SUPERVISOR_SESSIONS_DIR": registry,
+                }):
+            return fr.liveness_of(self.SID)
+
+    def branch(self, live):
+        return fr.resolve_branch("task", "agent", self.SID, live, None, None,
+                                 page("role: agent"), owner=None, owner_live=None,
+                                 registry_ok=True)
+
+    def test_an_exited_session_with_a_stale_record_resolves_to_resume(self):
+        import endpoint_fixture
+        live = self.probe([endpoint_fixture.row(self.SID, live=False, age_seconds=24646)])
+        self.assertEqual(live, "ABSENT")
+        self.assertEqual(self.branch(live)[0], "resume")
+
+    def test_a_session_with_no_record_still_never_resumes(self):
+        live = self.probe([])
+        self.assertEqual(live, "UNKNOWN")
+        self.assertNotEqual(self.branch(live)[0], "resume")
+
+
 class RowGate(unittest.TestCase):
     """SC1–SC2 at the ROW level: the emitted row, not just the branch function.
 
