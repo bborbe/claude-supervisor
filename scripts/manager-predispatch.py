@@ -99,6 +99,23 @@ Exit codes (same three the loop gate uses)
       clause's reason on a tree whose digest had not moved — the clause permanently true,
       not intermittently. `ACTIONABLE_BUCKETS` therefore holds `ready-to-start` alone.
 
+      ⚠️ A FUTURE-DEFERRED row is subtracted from that clause, and it is the second trap of
+      the same shape. A `defer_date` still in the future is a deliberate park: the sweep
+      reader's deferred overlay repaints the cell and subtracts the row from the OFFER,
+      **never from the classification** (`agents/goal-sweep-reader.md` § bucket list), so a
+      `next` row carrying one keeps the `ready-to-start` key. Counting it made the
+      no-change verdict unreachable for any subject holding a single parked row — and the
+      frozen-tree predicate reads only mtime plus open `asked-of-you`, so it answered
+      FROZEN on the same tick. The round then started, both legs gated, `--save` never
+      ran, and the two answers stayed opposed for the whole life of the defer. Measured
+      2026-11-17 on subject `5b29b81a-e7c2-4cca-bd66-2b1b216151aa` (interval 900s):
+      `--print` -> `CHANGE digest differs` (exit 10) against `--predicate` -> `FROZEN`
+      (exit 0), the subject's only non-terminal content being the row deferred to
+      2026-11-23. The subtraction is by `deferred_names`, which uses the shared
+      `defer-date.py` so both stored shapes parse; an unparseable value is NOT deferred
+      (the safe direction: a replay, never a suppressed dispatch) and a value that has come
+      due is actionable again on the first tick after it expires.
+
       ⚠️ The parked-set clause is a THIRD reason of the same shape, and it is the one that
       keeps the replay honest. `digest_of` hashes a DEATH-only liveness term, so a worker
       opening or closing a gate moves no digest input — while its row's Status cell really
@@ -665,6 +682,10 @@ def read_task(path: str) -> dict | None:
         "name": os.path.basename(path)[:-3],
         "status": fm_scalar(fm, "status"),
         "phase": fm_scalar(fm, "phase"),
+        # ⚠️ Raw scalar, parsed by the shared `defer-date.py` at the verdict — never here.
+        # `read_task` is a pure read and must not decide what an unparseable value means;
+        # `defer_state` answers `invalid`, which `deferred_names` treats as not-deferred.
+        "defer_date": fm_scalar(fm, "defer_date"),
         "session": fm_scalar(fm, "claude_session_id").strip("'\""),
         "sessions": session_id_set(fm),
         # ⚠️ The shared normaliser, never `fm_wikilinks`: that one returns only `[[...]]`
@@ -990,6 +1011,28 @@ def _declared_wait():
         spec.loader.exec_module(mod)
         _DECLARED_WAIT = mod
     return _DECLARED_WAIT
+
+
+_DEFER_DATE = None
+
+
+def _defer_date():
+    """Import defer-date.py — the shared `defer_date` reader.
+
+    ⚠️ **Shared, not re-derived.** Both stored shapes must parse (the quoted
+    `"YYYY-MM-DD"` and the unquoted RFC3339 datetime vault-cli writes), and the
+    local-midnight rule belongs to that module. `scripts/close-worker.py` and
+    `scripts/flagged-rows.py` read the same one; a private copy here is the drift the
+    repo's one-definition rule forbids.
+    """
+    global _DEFER_DATE
+    if _DEFER_DATE is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defer-date.py")
+        spec = importlib.util.spec_from_file_location("defer_date", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _DEFER_DATE = mod
+    return _DEFER_DATE
 
 
 _GOALS_DECLARATION = None
@@ -2248,6 +2291,33 @@ def actionable_names(bucket_sets) -> list[str]:
     return sorted(set(names))
 
 
+def deferred_names(tracked: list[dict]) -> set:
+    """The rows whose `defer_date` names an instant still in the FUTURE.
+
+    A future defer is a deliberate park, not work the act leg can do. The sweep reader
+    keeps the row in its ordinary bucket — the overlay repaints the cell and subtracts it
+    from the OFFER, never from the classification — so without this subtraction one parked
+    row makes the `ready-to-start` clause permanently non-empty: the gate answers CHANGE on
+    every tick while the frozen-tree predicate answers FROZEN on the same tick, the round
+    starts, both legs gate, and nothing is read or acted on for the whole life of the defer.
+
+    ⚠️ An unparseable `defer_date` is NOT deferred. `defer_state` answers `invalid`, and
+    the safe direction is the pre-existing behaviour: the row stays actionable, costing a
+    replay rather than risking a suppressed dispatch. A value that has come due is `due`,
+    so the row is actionable again on the first tick after it expires.
+    """
+    mod = _defer_date()
+    now = mod.as_now()
+    names = set()
+    for row in tracked:
+        state, _detail = mod.defer_state(row.get("defer_date"), now)
+        if state == "deferred":
+            name = row.get("name")
+            if name:
+                names.add(name)
+    return names
+
+
 def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     """-> (changed, reason, payload, stored_table).
 
@@ -2283,6 +2353,13 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     # docstring's exit-code note.
     digest_moved = stored != digest
     actionable = actionable_names(stored_bucket_sets)
+    # A future-deferred row keeps the `ready-to-start` KEY by design (the sweep reader's
+    # deferred overlay subtracts it from the OFFER, not the classification), so it has to
+    # be subtracted here or one parked row makes this clause permanently true — the
+    # CHANGE/FROZEN deadlock documented in the module docstring.
+    if actionable:
+        deferred = deferred_names(tracked)
+        actionable = [n for n in actionable if n not in deferred]
     parked_reason = parked_replay_reason(prev.get("parked"), parked_names(tracked))
     changed = (
         fail_reason is not None

@@ -228,13 +228,20 @@ class Base(unittest.TestCase):
         with open(os.path.join(self.vault, rel), "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def task(self, name, sid="", progress="", goals=None):
-        self.write(
-            "25 Tasks/%s.md" % name,
-            TASK.format(sid=sid, progress=progress).replace(
-                "[[AGoal]]", "[[%s]]" % (goals or "AGoal")
-            ),
+    def task(self, name, sid="", progress="", goals=None, defer=""):
+        text = TASK.format(sid=sid, progress=progress).replace(
+            "[[AGoal]]", "[[%s]]" % (goals or "AGoal")
         )
+        if defer:
+            # A future `defer_date` in the frontmatter, in the quoted shape the vault
+            # writes. Injected into the formatted body rather than the template so every
+            # existing caller keeps its exact bytes.
+            text = text.replace(
+                "claude_session_id: %s\n" % sid,
+                'claude_session_id: %s\ndefer_date: "%s"\n' % (sid, defer),
+                1,
+            )
+        self.write("25 Tasks/%s.md" % name, text)
 
     def registry(self, sid, status="idle"):
         with open(os.path.join(self.m.REGISTRY_DIR, "1.json"), "w") as fh:
@@ -474,6 +481,75 @@ class TestActionablePassThrough(Base):
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertIn("actionable", out)
         self.assertIn("AGoalTask", out)
+
+    def test_a_future_deferred_row_alone_reports_nochange(self):
+        """A future `defer_date` keeps the `ready-to-start` KEY by design.
+
+        The deferred overlay (`agents/goal-sweep-reader.md` § bucket list) repaints the
+        cell and subtracts the row from the OFFER — never from the classification. So the
+        stored bucket set still places the row in `ready-to-start`, `actionable_names`
+        still finds it, and the gate reports CHANGE on every tick for the whole life of
+        the defer while the frozen-tree predicate answers FROZEN on the same tick. The
+        round then starts, both legs gate, and nothing is read or acted on.
+
+        Measured 2026-11-17 on subject `5b29b81a-e7c2-4cca-bd66-2b1b216151aa` (interval
+        900s): `--print` -> `CHANGE digest differs` (exit 10) while `--predicate` ->
+        `FROZEN — newest tracked mtime 3838s ago (window 1800s), 0 open asked-of-you,
+        26 tracked` (exit 0). The subject's only non-terminal content was the row
+        deferred to 2026-11-23.
+
+        The control is `test_a_ready_to_start_row_passes_through_on_an_unchanged_tree`:
+        a ready row with NO defer must still report CHANGE, so a fix that silences the
+        gate wholesale fails there.
+        """
+        self.task("AGoalTask", defer="2099-01-01")
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        # The save's own verdict moves with the fix (CHANGE pre-fix, NOCHANGE after), so
+        # only "the save succeeded" is asserted here; the verdict is the check below.
+        self.assertIn(rc, (self.m.EXIT_NOCHANGE, self.m.EXIT_CHANGE), out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertNotIn("actionable", out)
+
+    def test_a_defer_date_that_has_come_due_is_actionable_again(self):
+        """The subtraction is clock-bound, not a latch.
+
+        A defer whose date has passed is `due`, so the row must report CHANGE on the first
+        tick after it expires — otherwise a stale `defer_date` would silence a row forever,
+        which is the opposite failure from the one this fix closes.
+        """
+        self.task("AGoalTask", defer="2020-01-01")
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("actionable", out)
+
+    def test_an_unparseable_defer_date_keeps_the_row_actionable(self):
+        """The safe direction: an unreadable value must not suppress a dispatch.
+
+        `defer_state` answers `invalid`, and `deferred_names` treats anything that is not
+        `deferred` as actionable — so a malformed date costs a replay, never a suppressed
+        sweep. This is the negative control for the subtraction itself.
+        """
+        self.task("AGoalTask", defer="not-a-date")
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
 
     def test_a_waiting_approval_row_keeps_the_saving_on_an_unchanged_tree(self):
         """The row waits on the OPERATOR, not on the loop: it leaves `waiting-approval` only

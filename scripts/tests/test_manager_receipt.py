@@ -276,6 +276,32 @@ class Receipt(unittest.TestCase):
         self.assertEqual(self.m.slug(self.topic, ""), self.m.slug(self.topic))
         self.assertNotIn("topic", self.m.BRANCHES)
 
+    def test_a_topic_tier_gate_is_honoured_by_a_goal_tier_check(self):
+        """A goal round cannot lose the readings gate to a tier mismatch.
+
+        `commands/steps/round-readings.md:33` records the readings gate with
+        `--tier topic`, and `commands/goal-drive.md:54` routes that same step on a GOAL
+        round. `--tier` selects the step tuple only and never reaches the state slug
+        (`manager-receipt.py` `--tier` help text), so the goal-tier tail's `--check` — no
+        `--tier`, default `goal` — must honour a gate recorded with `--tier topic`.
+
+        The artifact is removed so the GATE, not the recorded path, is what excuses the
+        step. If `--tier` ever reached `slug()`, the gate would land in
+        `topic--<base>.gated`, the goal-tier check would not see it, and this would print
+        `skipped: readings` and exit 11 — the deadlock this pins against.
+        """
+        self.full_round()
+        rc, out = self.cli(
+            "--gate", "--topic", self.topic, "--tier", "topic", "--step", "readings"
+        )
+        self.assertEqual(rc, 0, out)
+        d = self.m.read_receipt(self.m.slug(self.topic))
+        d["fields"].pop("readings")
+        self.m.write_atomic(self.m.path(self.m.slug(self.topic)), json.dumps(d) + "\n")
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("skipped: readings", out)
+
     def test_record_drive_is_accepted_on_the_goal_tier_and_refused_on_topic(self):
         self.start()
         p = self.artifact("drive.txt", DRIVE_OK)
