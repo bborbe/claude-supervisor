@@ -1549,13 +1549,25 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
             f"defer_date until {iso(defer_epoch)} "
             f"({int(defer_epoch - now)}s remaining)"
         )
-    # ⚠️ **A stand-down masks liveness only while the date gate it was set alongside is
-    # still PENDING.** The pair is one decision with an expiry: once the defer instant
-    # passes, the stand-down has served its purpose and must stop suppressing the reading,
-    # or the subject stays `STOPPED` for ever and `topic-keepalive.py` keeps mapping that
-    # to `leave` ("deliberately stopped — do nothing") while the operator's calendar says
-    # it is due. Measured 2026-11-16: `goal--review-and-merge-stop-binding` carried
-    # `.stopped` + a future `defer_date` and no `.sleeping` marker.
+    # ⚠️ **Only the `defer_date` releases a stand-down — never a `.sleeping` marker.**
+    # The two date gates are not interchangeable. `defer_date` is page frontmatter the
+    # operator writes in the SAME act as `/supervisor:stop` (`vault-cli goal set …
+    # defer_date` then `--stop`), so it is the one gate provably *set alongside* the
+    # stand-down, and it is the only one whose expiry may release it.
+    #
+    # ⚠️ **A `.sleeping` marker is deliberately excluded, and folding it in is a
+    # regression, not a widening.** `--arm` is what clears `.sleeping`, so an expired
+    # marker routinely LINGERS on subjects that were slept for some unrelated reason —
+    # it is leftover state, not a statement that this stand-down had an expiry. Letting
+    # it release the stand-down meant any stale marker from a past sleep cycle could
+    # resurrect a session the operator deliberately stopped, which is the exact harm this
+    # state exists to prevent, arriving from the opposite direction. It also made
+    # `--check` emit a false lapse for those subjects, because `--check` calls this with
+    # no page data (`defer_date=None`) and would have read the leftover marker as a
+    # passed gate. Measured 2026-11-17: the bot filed it as a blocking regression.
+    #
+    # The pre-instant half is unaffected: a FUTURE `.sleeping` still outranks the
+    # stand-down and reads `SLEEPING` (the arm above), which resumes nothing.
     #
     # ⚠️ **The marker is NOT removed here.** A reading that deleted it would erase a
     # deliberate stand-down — the 2026-11-07 defect (`docs/subject-resolution.md`): a
@@ -1565,11 +1577,9 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
     # through `stopped_marker()` and `--stood-down-past`.
     #
     # Keyed on a PARSED instant, never on the marker file's existence: an unparseable
-    # `.sleeping` or `defer_date` is not evidence that a gate passed, so it leaves the
-    # stand-down standing — fail closed, never wake a stood-down subject on a read error.
-    gate_passed = (until is not None and now >= until) or (
-        defer_epoch is not None and now >= defer_epoch
-    )
+    # `defer_date` is not evidence that a gate passed, so it leaves the stand-down
+    # standing — fail closed, never wake a stood-down subject on a read error.
+    gate_passed = defer_epoch is not None and now >= defer_epoch
     if stopped and not gate_passed:
         return "STOPPED", (
             "marker present (legacy record)" if stopped_legacy else "marker present"

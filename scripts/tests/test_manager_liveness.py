@@ -1007,13 +1007,35 @@ class SleepState(unittest.TestCase):
             self.m.stop(self.SUBJECT, "goal")
         self.assertEqual(self.m.classify(self.s, time.time())[0], "SLEEPING")
 
-    def test_an_expired_sleep_does_not_keep_a_stand_down_standing(self):
-        """Once the gate has passed the stand-down stops masking: STALE, never STOPPED."""
+    def test_an_expired_sleep_never_releases_a_stand_down(self):
+        """A leftover `.sleeping` is NOT a gate that passed — only `defer_date` is.
+
+        `--arm` clears `.sleeping`, so an expired marker routinely lingers on subjects
+        that were slept for some unrelated reason. Folding it into `gate_passed` let any
+        stale marker resurrect a session the operator deliberately stopped — the harm
+        this state exists to prevent, from the opposite direction. Filed as a blocking
+        regression by the bot on `593227bd`.
+        """
         self.arm(age=5000)
         self.sleep(-60)
         with redirect_stdout(io.StringIO()):
             self.m.stop(self.SUBJECT, "goal")
-        self.assertEqual(self.m.classify(self.s, time.time())[0], "STALE")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STOPPED")
+
+    def test_check_emits_no_lapse_for_a_stand_down_with_an_expired_sleep(self):
+        """`--check` passes no page data, so a leftover marker must not fake a gate.
+
+        `--check` calls `classify` with `defer_date=None`; if the expired `.sleeping`
+        counted, every stood-down subject carrying one would surface as a false lapse.
+        """
+        self.arm(age=5000)
+        self.sleep(-60)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check()
+        self.assertEqual((rc, out.getvalue()), (0, ""))
 
     def test_a_stand_down_with_no_date_gate_still_reads_stopped(self):
         """The regression guard: an unflagged stand-down is unchanged by all of this."""
