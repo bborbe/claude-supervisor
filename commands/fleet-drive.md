@@ -34,7 +34,7 @@ argument-hint: "[--interval <N>m] (default 15m; repeats by default)"
 ---
 Fleet-drive — **the round**: once over the fleet, runnable by hand. The show is `/supervisor:fleet-status`.
 
-⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once** and never re-invoked.
+⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once**.
 
 ⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep in a worker collapses both roles silently: it keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
@@ -49,7 +49,7 @@ goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
 ⚠️ **Carve-out: 5b, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
-them — it prints a count it was told, not one it measured.
+them.
 
 ## Router
 
@@ -83,6 +83,8 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
 ⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends.
+
+⚠️ **The manager's round:** dispatch `supervisor:fleet-round` once; rows 7, 8, 10, 11, 13, 14, 17, 20 stay here — `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`.
 
 ## INLINE — the hard rules
 

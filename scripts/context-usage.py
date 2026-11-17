@@ -208,6 +208,10 @@ def main():
     ap.add_argument("--over", type=float, metavar="PCT", help="only at/over PCT")
     ap.add_argument("--compactable", action="store_true",
                     help="over the bound AND not blocked AND not in a tool call")
+    ap.add_argument("--self-pct", action="store_true",
+                    help="print only THIS session's own used_percentage and exit — the one "
+                         "reading a manager needs in order to stop guessing, and the one every "
+                         "other filter hides, because a self row is never a compaction candidate")
     a = ap.parse_args()
 
     ctx = load(CONTEXT, "")
@@ -248,6 +252,17 @@ def main():
                      "blocked": blocked, "busy": busy, "self": bool(me) and sid == me,
                      "detail": n.get("detail", "")})
     rows.sort(key=lambda r: -r["pct"])
+
+    if a.self_pct:
+        # The manager's own fill level, and the one number it cannot get any other way:
+        # `is_candidate` excludes a self row, so the `--compactable` view — the view the
+        # sweep's `context70` hand-back is built on — drops it from `shown` entirely. A
+        # manager reading only that view sees no row for itself and infers exhaustion from
+        # nothing. Measured 2026-11-17: a Fleet Manager self-declared "out of context" at
+        # 42% of a 967k window. UNKNOWN is its own answer, never `0`.
+        mine = next((r for r in rows if r["self"]), None)
+        print(f"{mine['pct']:.0f}" if mine else "UNKNOWN")
+        return 0
 
     verdicts = {r["sid"]: bound_verdict(r, a.threshold, a.threshold_tokens) for r in rows}
     if a.over is not None:
