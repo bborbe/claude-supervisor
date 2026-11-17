@@ -52,6 +52,7 @@ Exit codes: 0 ok, 2 usage or config error.
 """
 
 import argparse
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -433,11 +434,56 @@ def liveness_of(sid):
     return LIVENESS_EXIT.get(out.returncode, "UNKNOWN")
 
 
+#: Probes of one run execute at most this many at a time. Each probe is a Python
+#: interpreter start, so the sequential run was bound by spawn latency, not by work.
+PROBE_WORKERS = 8
+
+#: Total wall-clock budget for every probe of one run. A sid not answered inside it
+#: reads `UNKNOWN` — the verdict a probe that timed out already gets — never `ABSENT`,
+#: because `ABSENT` licenses spawning a second session.
+PROBE_DEADLINE = 60
+
+
+def probe_all(sids, workers=PROBE_WORKERS, deadline=PROBE_DEADLINE):
+    """{sid: verdict} for every distinct sid, probed concurrently, each exactly once.
+
+    Same verdict `liveness_of` returns sequentially; only the schedule changes.
+    """
+    wanted = sorted({sid for sid in sids if sid})
+    if not wanted:
+        return {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    futures = {pool.submit(liveness_of, sid): sid for sid in wanted}
+    done, pending = concurrent.futures.wait(futures, timeout=deadline)
+    results = {}
+    for future in done:
+        try:
+            results[futures[future]] = future.result()
+        except Exception:  # a probe that cannot answer is UNKNOWN, never absent
+            results[futures[future]] = "UNKNOWN"
+    for future in pending:
+        future.cancel()
+        results[futures[future]] = "UNKNOWN"
+    if pending:
+        print("flagged-rows: %d liveness probe(s) not answered within %ds — UNKNOWN"
+              % (len(pending), deadline), file=sys.stderr)
+    pool.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
+def probed(ctx, sid):
+    """The verdict for one sid: the run's shared result when prefetched, else a live probe."""
+    results = ctx.get("sid_verdicts")
+    if results is not None and sid in results:
+        return results[sid]
+    return liveness_of(sid)
+
+
 def row_liveness(ctx, sid):
     """`liveness_of` with a per-run cache — several rows share a session id."""
     key = ("row", sid)
     if key not in ctx["liveness_cache"]:
-        ctx["liveness_cache"][key] = liveness_of(sid)
+        ctx["liveness_cache"][key] = probed(ctx, sid)
     return ctx["liveness_cache"][key]
 
 
@@ -688,6 +734,17 @@ def subject_live(ctx, vault, kind, name):
     return name in ctx["managers"]
 
 
+def subject_sid(ctx, vault, kind, name):
+    """The `claude_session_id` a subject page records its manager in, or None."""
+    path = subject_page(ctx, vault, kind, name)
+    block = read_block(path) if path else None
+    if block is None:
+        return None
+    # `claude_session_id` is the only field a subject page records its manager in;
+    # the retired-key fallback was removed once both vaults were migrated.
+    return (open_queue.field(block, "claude_session_id") or "").strip() or None
+
+
 def subject_liveness(ctx, vault, kind, name):
     """`true` / `false` / `null` for one subject's recorded manager session.
 
@@ -703,18 +760,11 @@ def subject_liveness(ctx, vault, kind, name):
         return ctx["liveness_cache"][key]
     if ctx["no_liveness"]:
         return None
-    path = subject_page(ctx, vault, kind, name)
-    block = read_block(path) if path else None
-    sid = None
-    if block is not None:
-        # `claude_session_id` is the only field a subject page records its manager in;
-        # the retired-key fallback was removed once both vaults were migrated.
-        sid = ((open_queue.field(block, "claude_session_id") or "").strip()
-               or None)
+    sid = subject_sid(ctx, vault, kind, name)
     if not sid:
         verdict = False
     else:
-        live = liveness_of(sid)
+        live = probed(ctx, sid)
         verdict = True if live == "LIVE" else (False if live == "ABSENT" else None)
     ctx["liveness_cache"][key] = verdict
     return verdict
@@ -731,7 +781,7 @@ def fleet_liveness(ctx):
         return ctx["liveness_cache"][FLEET_KEY]
     if ctx["no_liveness"]:
         return None
-    verdict = liveness_of(ctx["fleet_sid"])
+    verdict = probed(ctx, ctx["fleet_sid"])
     live = True if verdict == "LIVE" else (False if verdict == "ABSENT" else None)
     ctx["liveness_cache"][FLEET_KEY] = live
     return live
@@ -936,6 +986,22 @@ def cached_skip(ctx, vault, kind, path):
 
 
 def row_for(vault, cfg, kind, path, ctx):
+    pending, reason = row_prepare(vault, cfg, kind, path, ctx)
+    if pending is None:
+        return None, reason
+    return pending.finish(), None
+
+
+class Pending:
+    """A row built up to its liveness reads: `sids()` names the probes it will make,
+    `finish()` makes them (from the shared result when prefetched) and returns the row."""
+
+    def __init__(self, sids, finish):
+        self.sids = sids
+        self.finish = finish
+
+
+def row_prepare(vault, cfg, kind, path, ctx):
     hit, key = cached_skip(ctx, vault, kind, path)
     if hit is not None:
         return None, hit
@@ -974,6 +1040,22 @@ def row_for(vault, cfg, kind, path, ctx):
         return None, "no launcher resolved"
     sid = ((open_queue.field(block, "claude_session_id") or "").strip()
            or None)
+
+    def sids():
+        if ctx["no_liveness"]:
+            return []
+        owner = resolve_owner(page_kind, name, block, ctx, vault)
+        owner_sid = (ctx["fleet_sid"] if owner is FLEET
+                     else subject_sid(ctx, vault, owner["kind"], owner["name"]))
+        return [sid, owner_sid]
+
+    return Pending(sids, lambda: _finish_row(vault, kind, path, ctx, block, name,
+                                             page_kind, role, role_source, mode,
+                                             launcher, launcher_source, sid)), None
+
+
+def _finish_row(vault, kind, path, ctx, block, name, page_kind, role, role_source,
+                mode, launcher, launcher_source, sid):
     live = "none" if ctx["no_liveness"] else row_liveness(ctx, sid)
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
     # 2000-line module per call — probing ABSENT rows too tripled the run time for
@@ -1015,7 +1097,7 @@ def row_for(vault, cfg, kind, path, ctx):
         "pane": pane,
         "blocked_by": blocked_by_of(block, os.path.dirname(path) if kind == "task" else None),
         "refused": refused,
-    }, None
+    }
 
 
 def role_map(path):
@@ -1091,17 +1173,22 @@ def collect(args):
                 if filename.endswith(".md"):
                     ctx["subjects"][(vault, kind, filename[:-3])] = os.path.join(
                         directory, filename)
-        # Pass 2 — build the rows.
+        # Pass 2 — prepare the rows, probe every distinct session id they need
+        # concurrently, then finish them in walk order.
+        pendings = []
         for kind, directory in scanned:
             for filename in sorted(os.listdir(directory)):
                 if not filename.endswith(".md"):
                     continue
-                row, reason = row_for(vault, cfg, kind,
-                                      os.path.join(directory, filename), ctx)
-                if row is None:
+                pending, reason = row_prepare(vault, cfg, kind,
+                                              os.path.join(directory, filename), ctx)
+                if pending is None:
                     skipped[reason] = skipped.get(reason, 0) + 1
                     continue
-                rows.append(row)
+                pendings.append(pending)
+        ctx["sid_verdicts"] = probe_all(
+            [sid for pending in pendings for sid in pending.sids()])
+        rows.extend(pending.finish() for pending in pendings)
     rows.sort(key=lambda r: (KIND_ORDER.get(r["kind"], 9), r["vault"], r["name"]))
     cache = ctx["cache"]
     if cache is not None:
