@@ -55,10 +55,17 @@ DEFAULT_ROOTS = [
     os.path.expanduser("~/Documents/Obsidian/seibert-personal/25 Tasks"),
 ]
 
-_STATUS = re.compile(r"^status:\s*['\"]?([A-Za-z_]+)", re.M)
-_DEFER = re.compile(r"^defer_date:\s*['\"]?(\d{4}-\d{2}-\d{2})", re.M)
-_CREATED_BY = re.compile(r"^created_by:\s*(.+)$", re.M)
-_RECURRING = re.compile(r"^recurring:\s*(.*)$", re.M)
+_STATUS = re.compile(r"^status:[ \t]*['\"]?([A-Za-z_]+)", re.M)
+_DEFER = re.compile(r"^defer_date:[ \t]*['\"]?(\d{4}-\d{2}-\d{2})", re.M)
+#: `[ \t]*`, never `\s*`: `\s` matches a newline, so `\s*(.+)$` on a bare
+#: `recurring:` would capture the next line's text and exempt the task on the wrong
+#: value. The lint decides these two fields by YAML parse, so the script must not drift.
+_CREATED_BY = re.compile(r"^created_by:[ \t]*(.+)$", re.M)
+_RECURRING = re.compile(r"^recurring:[ \t]*(.*)$", re.M)
+#: A `recurring:` with nothing after it opens a nested YAML block. The lint unmarshals
+#: the field into a `string` and fails on a map, so it reports nothing for such a file;
+#: this must skip it too, or the two instruments diverge on that shape.
+_RECURRING_BARE = re.compile(r"^recurring:[ \t]*$", re.M)
 
 #: The exemption set, kept identical to `deferDateExempt` in vault-cli's `pkg/ops/lint.go`.
 RECURRING_CREATOR = "recurring-task-creator"
@@ -94,6 +101,8 @@ def expired(block, today):
     created_by = _CREATED_BY.search(block)
     if created_by and created_by.group(1).strip().strip("'\"") == RECURRING_CREATOR:
         return None
+    if _RECURRING_BARE.search(block):
+        return None
     recurring = _RECURRING.search(block)
     if recurring and recurring.group(1).strip().strip("'\""):
         return None
@@ -105,13 +114,22 @@ def expired(block, today):
 
 
 def scan(roots, today):
-    """`(rows, missing)` — rows are `{"path", "defer_date"}` for every expired park."""
-    rows, missing = [], []
+    """`(rows, problems)` — a problem is anything that makes the count unverifiable.
+
+    A missing root, an unwalkable directory and an unreadable file all land in
+    `problems`, never in a silent skip: the caller prints `UNKNOWN (read failed)` rather
+    than a number it cannot stand behind, which is the whole point of the digest line.
+    """
+    rows, problems = [], []
     for root in roots:
         if not os.path.isdir(root):
-            missing.append(root)
+            problems.append("root does not exist: %s" % root)
             continue
-        for dirpath, _dirnames, filenames in os.walk(root):
+
+        def onerror(exc, _root=root):
+            problems.append("cannot walk %s: %s" % (getattr(exc, "filename", _root), exc))
+
+        for dirpath, _dirnames, filenames in os.walk(root, onerror=onerror):
             for name in filenames:
                 if not name.endswith(".md"):
                     continue
@@ -120,14 +138,14 @@ def scan(roots, today):
                     with open(path, encoding="utf-8", errors="replace") as handle:
                         block = frontmatter(handle)
                 except OSError as exc:
-                    print("expired-defer: cannot read %s: %s" % (path, exc), file=sys.stderr)
+                    problems.append("cannot read %s: %s" % (path, exc))
                     continue
                 if block is None:
                     continue
                 defer_date = expired(block, today)
                 if defer_date is not None:
                     rows.append({"path": path, "defer_date": defer_date})
-    return rows, missing
+    return rows, problems
 
 
 def main(argv=None):
@@ -163,9 +181,23 @@ def main(argv=None):
         return 2
 
     roots = args.root or DEFAULT_ROOTS
-    rows, missing = scan(roots, today)
-    for root in missing:
-        print("expired-defer: root does not exist, skipped: %s" % root, file=sys.stderr)
+    rows, problems = scan(roots, today)
+    for problem in problems:
+        print("expired-defer: %s" % problem, file=sys.stderr)
+
+    if problems:
+        # An unreadable root or file is not an empty one. Print the token the render
+        # names — never `0` — and exit non-zero, so nothing downstream can paste a
+        # false zero into a digest and read it as a clean fleet.
+        if args.json:
+            print(json.dumps(
+                {"count": None, "error": "read failed", "problems": problems,
+                 "roots": roots, "rows": rows},
+                indent=2,
+            ))
+        else:
+            print("expired-defer=UNKNOWN (read failed)")
+        return 3
 
     if args.json:
         print(json.dumps({"count": len(rows), "roots": roots, "rows": rows}, indent=2))
