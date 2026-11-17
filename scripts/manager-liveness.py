@@ -716,9 +716,17 @@ def page_kind(subject: str, vault: str):
 
 
 def _load_sibling(filename: str):
-    """Import a sibling script by path — the repo's own convention for sharing code."""
+    """Import a sibling script by path — the repo's own convention for sharing code.
+
+    ⚠️ **`realpath`, not `abspath`.** This script is routinely invoked through a symlink
+    into a partial directory — `commands/steps/round-liveness.md` is exercised that way by
+    `scripts/tests/test_round_liveness_step.py`, which symlinks ONLY this file into a bare
+    `<plugin>/scripts/`. Resolving the link to the real repo is what makes the siblings
+    reachable; without it the load fails at IMPORT time and every `--state` call in that
+    harness dies, which reads as "subject unresolvable" rather than as a missing module.
+    """
     name = os.path.basename(filename).replace(".py", "").replace("-", "_")
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = os.path.dirname(os.path.realpath(__file__))
     spec = importlib.util.spec_from_file_location(name, os.path.join(here, filename))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
