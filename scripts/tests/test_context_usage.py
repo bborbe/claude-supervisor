@@ -345,6 +345,13 @@ class SelfPctTest(_RenderHarness, unittest.TestCase):
             {}, {"1039"}, argv=["--self-pct"], me="")
         self.assertEqual(out.strip(), "UNKNOWN")
 
+    def test_self_pct_is_unknown_when_the_store_is_empty(self):
+        # An empty/unreadable context dir must answer UNKNOWN, not the "no data yet" prose —
+        # the caller parses this output as a percentage, and a sentence where a number
+        # belongs reads as a malformed reading.
+        out = self.run_main({}, {}, {"1039"}, argv=["--self-pct"], me="me")
+        self.assertEqual(out.strip(), "UNKNOWN")
+
 
 if __name__ == "__main__":
     unittest.main()

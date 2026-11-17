@@ -2,8 +2,8 @@
 name: fleet-round
 description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg, the keep-alive leg, the own-parks leg, the open leg and the manager reap, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows and the render.
 model: sonnet
-tools: Read, Bash, Write, Task, SendMessage, mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions
-allowed-tools: Bash(python3:*), Bash(date:*), Bash(vault-cli:*), Bash(ls:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(grep:*), Bash(pgrep:*), Bash(gh:*), Bash(git log:*), Bash(wezterm cli list:*), mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions
+tools: Read, Bash, Write, Task, SendMessage, mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
+allowed-tools: Bash(python3:*), Bash(date:*), Bash(vault-cli:*), Bash(ls:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(grep:*), Bash(pgrep:*), Bash(gh:*), Bash(git log:*), Bash(wezterm cli list:*), mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
 color: yellow
 ---
 
@@ -32,6 +32,7 @@ them alone.
 </role>
 
 <constraints>
+- **Two supervisor tools are the legs, not a convenience.** `mcp__supervisor__spawn_agent` is the drive leg's `resume-headless` rung — held for `resume=` alone, never to open a worker (`docs/fleet-surface.md` § Spawn a worker item 6) — and `mcp__supervisor__answer_permission` is the own-parks leg, which releases the parks of the manager's **own** workers. Without them those rows are inert while the manager, which held both, no longer runs them: a round that reports `revived=0` and no park answered has measured nothing. Neither is a decision — the drive leg's guards and the own-parks routing are the step files'.
 - **One sweep per invocation.** Row 2 runs once. A second sweep is a different tick's fleet and
   would make the digest and the acts name different populations.
 - **Every count is measured, never inferred.** A script that exits `2` is `not-run` with its

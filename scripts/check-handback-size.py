@@ -6,17 +6,18 @@ the payload. Nothing measured it, so every leg could exceed the cap on every rou
 check would fail — the same "a rule that lives only in prose" defect `check-handback-keys.py`
 catches one layer down for *keys*. This asserts the size.
 
-**What is measured, and why that is the honest proxy.** The agent's own `<output_format>`
-hand-back fence, minus the lines the contract declares **variable** (the truncation
-exception: `crash-loop:` / `cannot-tell:` / `park-nudge:` rows, `refused:` lines). Those are
-unbounded by design — the payload carries the remainder — so counting them would fail a leg
-that is behaving correctly. A template that fits proves every instance fits, because every
-`<n>` / `<path>` placeholder is longer than the value it stands for; the measurement is
-therefore conservative in the safe direction.
+**What is measured, and what it does not prove.** The agent's own `<output_format>` hand-back
+fence, minus the lines the contract declares **variable** (the truncation exception:
+`crash-loop:` / `cannot-tell:` / `park-nudge:` rows, `refused:` lines). Those are unbounded by
+design — the payload carries the remainder — so counting them would fail a leg that is behaving
+correctly.
 
-⚠️ **This is not a live measurement of a run.** It pins the shape a leg is authored to
-return. A leg that writes more than its template on a real round is a leg that broke its own
-contract, which is a review question, not something a static check can see.
+⚠️ **This pins the authored shape, not a live round.** A placeholder is not always longer than
+its value: `<n>` and `<pct>` are, but `<path>` and `<id>` stand in for strings that can exceed
+them, so a template under the cap does not prove every instance is. What it does prove is that
+the *fixed* text — the keys, the separators, the labels a leg controls — leaves room for the
+values, and a leg that overruns the cap on a real round has broken its own contract, which is a
+review question rather than something a static check can see.
 """
 
 import importlib.util
