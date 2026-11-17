@@ -219,6 +219,51 @@ def _accepted(status, body, is_answer):
     return isinstance(body, dict) and body.get("status") == "sent"
 
 
+def _mcp_text(result):
+    """The text of an MCP result's first content block, or None."""
+    if not isinstance(result, dict):
+        return None
+    blocks = result.get("content")
+    if not isinstance(blocks, list) or not blocks:
+        return None
+    first = blocks[0]
+    return first.get("text") if isinstance(first, dict) else None
+
+
+def resolve_agent_handle(session_id):
+    """The roster's `agent_id` for this session — the handle `send_agent_message` takes.
+
+    ⚠️ **`agent_id` is not always the session uuid, so it is read from the roster, never
+    assumed.** Measured 2026-11-18 over the live roster's 74 rows: 58 carried
+    `agent_id == session_id`, and 16 carried `<uuid>~<sid8>` — the foreign/rehydrated form.
+    Passing the bare uuid therefore works for a worker this daemon spawned and answers
+    `agent "<uuid>" is not one this daemon created` for the rest, which is a delivery that
+    silently reaches nobody.
+
+    Returns `(handle, None)` on success and `(None, why)` otherwise.
+    """
+    result, error, unknown = mcp_call("list_agents", {})
+    if unknown:
+        return None, "no response from the wrapper while resolving the agent handle"
+    if error is not None:
+        return None, "list_agents failed: %s" % (error,)
+    raw = _mcp_text(result)
+    try:
+        rows = json.loads(raw) if raw else None
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        return None, "list_agents returned an unreadable roster"
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if session_id in (row.get("session_id"), row.get("agent_id")):
+            handle = row.get("agent_id")
+            if handle:
+                return handle, None
+    return None, "the roster holds no row for %s" % session_id
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--session-id", required=True, help="the session uuid to deliver to")
@@ -308,9 +353,13 @@ def main():
     # ⚠️ **The exposed tool is `send_agent_message`, not `send_message`.** `tools/list` on the
     # live daemon returns `spawn_agent, send_agent_message, list_agents, agent_status,
     # stop_agent, answer_permission, …` — a call to `send_message` fails `unknown tool`, and
-    # it did so on every invocation of the 0.332.0–0.337.3 builds (measured 2026-11-17). Its
-    # argument is `agent_id`, not `session_id`; the two hold the same value for a worker this
-    # daemon spawned, which is the only case this script serves.
+    # it did so on every invocation of the 0.332.0–0.337.3 builds (measured 2026-11-17).
+    #
+    # ⚠️ **The arguments are `agent_id` and `text`, read from the live `tools/list`
+    # inputSchema rather than from prose.** That schema marks exactly those two required and
+    # describes `text` as "the user turn to send"; `text` is therefore the MCP tool's key, not
+    # only the REST route's. The handle itself is resolved by `resolve_agent_handle` — see its
+    # docstring for why the session uuid cannot be passed through unchecked.
     #
     # ⚠️ **A successful call is still not proof of a delivered turn.** Measured the same day
     # on a headless worker: `send_agent_message` returned no result and the worker's
@@ -326,8 +375,14 @@ def main():
         return 0
 
     if use_mcp:
+        handle, why = resolve_agent_handle(args.session_id)
+        if handle is None:
+            print(json.dumps({"session_id": args.session_id, "channel": channel,
+                              "delivered": False, "error": why}))
+            print(f"REFUSED: {why}", file=sys.stderr)
+            return 1
         result, error, unknown = mcp_call("send_agent_message",
-                                          {"agent_id": args.session_id, "text": args.text})
+                                          {"agent_id": handle, "text": args.text})
         if unknown:
             # The request may have been executed. Saying "nothing sent" here would invite a
             # retry and a second delivery, so the outcome is reported as unknown (exit 2).

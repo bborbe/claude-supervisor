@@ -1034,7 +1034,8 @@ addressability → the registry. Provenance → the ledger. A manager asking "is
 No instrument is read for another's question, and a disagreement between two of them is
 usually a question asked of the wrong one.
 
-⚠️ **`UNKNOWN` is not `ABSENT`, and neither licenses a resume.** `--check` answers `UNKNOWN`
+⚠️ **`UNKNOWN` is not `ABSENT`, and only `ABSENT` licenses a resume** (see the verdict table
+below). `--check` answers `UNKNOWN`
 while the registry holds no entry for an id (a fresh spawn) and while the endpoint holds no
 heartbeat row for an id the registry does carry (the `starting` window). Both windows are
 real and both were measured on 2026-11-17: a spawned worker took **90 s** to gain a registry
