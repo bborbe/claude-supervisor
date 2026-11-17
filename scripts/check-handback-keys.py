@@ -168,7 +168,7 @@ LEGS = {
     # (measured 2026-11-17: a manager declared "out of context" at 42% of its window).
     "supervisor:fleet-round": {
         "agent": "agents/fleet-round.md",
-        "sites": ("commands/fleet-drive.md",),
+        "sites": ("commands/steps/round-dispatch.md",),
         "required": (
             "round", "digest", "payload",
             "progressing", "stalled", "parked", "done", "held",
