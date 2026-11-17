@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.331.1
 
 - fix: **`exit-record-coverage.py` no longer reads a pane covered when its exit recorder has died.** The test was a `kind=spawn` line whose pid still answers `kill(pid, 0)`, which proves the writer *started*, not that it is still running: measured 2026-11-16, pane 59's observer died at `2026-11-15T19:14:17Z` while its wrapper stayed alive another 14 h 32 m, and the sweep reported that pane clean for the whole gap. A live spawn is now corroborated by a **fresh heartbeat** — the store carries no observer pid (every line's `pid=` is the *wrapped* pid), so heartbeat recency is the only liveness signal it has. `HEARTBEAT_STALE_SECONDS` (45 s, 1.5 x the observer's 30 s interval, which leaves the response inside a 60 s bound) marks a pane UNRECORDED once its newest heartbeat is older than that, or — with no heartbeat at all — once its newest live spawn line is; heartbeats older than the newest live spawn are ignored, so a reused pane id cannot age out its new occupant; the rendered line says which of the two failures it is. `live_coverage()` takes an injectable `now`, so the threshold is testable without a live store. Four tests: a stale heartbeat reads unrecorded (it reads **covered** against the old rule), a fresh one reads recorded, a live spawn with no heartbeat ages out, and a reused pane's older beats do not age out a new spawn. Change set: `scripts/exit-record-coverage.py`, `scripts/tests/test_exit_record_coverage.py`, `CHANGELOG.md`.
 
