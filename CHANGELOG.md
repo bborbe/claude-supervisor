@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.336.1
 
 - fix: **`session-liveness.py --check` answers ABSENT again for an exited session whose registry entry is gone, while still answering UNKNOWN for one spawned moments ago (a regression from #952, v0.336.0).** #952 made an empty registry match set UNKNOWN, but Claude Code DELETES the registry entry when a session exits, so every exited worker read UNKNOWN forever. Measured 2026-11-17 ~19:00: 21 of 21 flagged task rows with a recorded session read `degraded/UNKNOWN` and 0 read `resume`; ticks that opened 7-26 rows before the release opened 1-2 after it; 16 rows sat idle 20-66 min. The rule now: no registry entry AND the endpoint serves a record that is `live: false` with a numeric `age_seconds` (the endpoint's own freshness window, no new constant) -> ABSENT; no heartbeat record at all (404), a fresh record (LIVE), a not-live record with no measurable age, or an unreachable endpoint -> unchanged. Tests: stale-record -> ABSENT, no record -> UNKNOWN, fresh -> LIVE, unmeasurable age -> UNKNOWN, and a flagged-rows-level case that an exited session resolves to `resume` through the real probe. Residual risk: a resumed session id inherits its old stale record until its registry entry is rewritten, so that window still reads ABSENT. Change set: `scripts/session-liveness.py`, `scripts/tests/test_session_liveness.py`, `scripts/tests/test_flagged_rows.py`, `docs/fleet-surface.md`, `CHANGELOG.md`.
 
