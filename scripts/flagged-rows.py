@@ -449,9 +449,11 @@ def _who_needs_me():
 
     Loaded in-process rather than per row: the old path spawned a fresh interpreter
     for every session id purely to import this module, at 2.4 s a row — 17 rows,
-    40.7 s of a 51 s run. `sys.path` is not usable (this module is itself loaded by
-    path, by the tests and by `open-queue.py`), so the import is explicit, exactly as
-    `flag_provenance` above is.
+    40.7 s of a 51 s run. Re-measured 2026-11-17: the import itself is ~0.09 s, so
+    that 2.4 s was the per-spawn I/O — each child re-read the session registry and
+    ran its own `wezterm cli list`. `sys.path` is not usable (this module is itself
+    loaded by path, by the tests and by `open-queue.py`), so the import is explicit,
+    exactly as `flag_provenance` above is.
     """
     global _WHO_NEEDS_ME
     if _WHO_NEEDS_ME is None:

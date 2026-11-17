@@ -2286,7 +2286,9 @@ def pane_for_maps(session_id, registry, pmap, records):
 
     A batch caller reads those three ONCE per run. `pane_for` re-reads them per call
     because its callers are one-shot; `flagged-rows.py` resolves ~17 rows a run, and
-    re-reading them cost 17 `wezterm cli list` spawns and 40.7 s of a 51 s run.
+    re-reading them cost 17 `wezterm cli list` spawns and 40.7 s of a 51 s run. The
+    import is not what cost that: measured 2026-11-17 at ~0.09 s per spawn, the time
+    was the per-spawn I/O — one registry read and one pane list per child.
     """
     sid = (session_id or "").strip().lower()
     if not sid:
