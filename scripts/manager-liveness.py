@@ -210,7 +210,7 @@ turns exit 10 into a push.
 """
 from __future__ import annotations
 
-import argparse, glob, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import argparse, glob, importlib.util, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
@@ -725,6 +725,78 @@ def page_kind(subject: str, vault: str):
     return None
 
 
+def _load_sibling(filename: str):
+    """Import a sibling script by path — the repo's own convention for sharing code.
+
+    ⚠️ **`realpath`, not `abspath`.** This script is routinely invoked through a symlink
+    into a partial directory — `commands/steps/round-liveness.md` is exercised that way by
+    `scripts/tests/test_round_liveness_step.py`, which symlinks ONLY this file into a bare
+    `<plugin>/scripts/`. Resolving the link to the real repo is what makes the siblings
+    reachable; without it the load fails at IMPORT time and every `--state` call in that
+    harness dies, which reads as "subject unresolvable" rather than as a missing module.
+    """
+    name = os.path.basename(filename).replace(".py", "").replace("-", "_")
+    here = os.path.dirname(os.path.realpath(__file__))
+    spec = importlib.util.spec_from_file_location(name, os.path.join(here, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+#: The one `defer_date` parser (`defer-date.py`) and the one flat frontmatter reader
+#: (`close-worker.py`'s). Loaded rather than re-implemented: a second slice of the scalar
+#: is exactly the class `defer-date.py` exists to prevent, and `close-worker.py` is
+#: import-safe (module constants only, `main` behind a `__name__` guard).
+_defer_date = _load_sibling("defer-date.py")
+_close_worker = _load_sibling("close-worker.py")
+
+
+def page_path(subject: str, vault: str, kind: str):
+    """The `<vault>/<page dir>/<subject>.md` for the subject's OWN tier, or None.
+
+    ⚠️ **`kind` is required, and it is the branch `state()` has already probed.** A
+    goal-first scan across every tier would let a topic or task whose name collides with
+    a goal page read *that goal's* `defer_date` — and a collision is routine, not exotic:
+    goal and topic pages are named independently, which is exactly why `page_kinds()`
+    returns a SET and `detect_branch()` treats a same-named page on another tier as a
+    different subject (`docs/subject-resolution.md` § The page test). The tier is not a
+    detail here; it decides which file is read, and so whether this subject is asleep.
+
+    `kind` values are `PAGE_DIRS`' own — `goal` / `topic` / `task`. A `fleet` probe
+    manages no page by design and resolves to None.
+    """
+    root = os.path.abspath(os.path.expanduser(vault))
+    want = subject.lower() + ".md"
+    for page_kind, folder in PAGE_DIRS:
+        if page_kind != kind:
+            continue
+        directory = os.path.join(root, folder)
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.lower() == want:
+                return os.path.join(directory, entry)
+    return None
+
+
+def subject_defer_date(subject: str, vault: str, kind: str):
+    """`(instant, reason)` from the subject page's `defer_date`, or `(None, None)`.
+
+    `reason` is set ONLY when a value exists and cannot be parsed. The caller reads that
+    as "no gate", which leaves a stand-down standing — fail closed. Reading garbage as an
+    expired gate would wake a deliberately stopped subject on a typo.
+    """
+    page = page_path(subject, vault, kind)
+    if page is None:
+        return None, None
+    value = _close_worker.frontmatter(page).get("defer_date")
+    if not value:
+        return None, None
+    return _defer_date.parse_defer_date(value)
+
+
 def state(subject: str, branch, vault: str, now: float) -> int:
     """`--state`: print `<STATE>\\t<slug>\\t<detail>` and exit 0, or refuse with EXIT_UNRESOLVED.
 
@@ -749,7 +821,18 @@ def state(subject: str, branch, vault: str, now: float) -> int:
     """
     branch = branch or detect_branch(subject, vault)
     s = slug(subject, branch)
-    st, detail = classify(s, now)
+    # The page's `defer_date` is the gate a `/supervisor:stop` is set alongside, and the
+    # marker files cannot carry it. Read here because this is the only caller holding both
+    # the page name and the vault root; the marker-only callers (`inbox.py`,
+    # `park-nudge.py`, the `--check` sweep) keep the `None` default and are unchanged.
+    defer_instant, defer_reason = subject_defer_date(subject, vault, branch)
+    if defer_reason:
+        print(
+            f"manager-liveness: --state: {defer_reason} — treating as no defer_date "
+            f"(a stand-down stays standing on a read error)",
+            file=sys.stderr,
+        )
+    st, detail = classify(s, now, defer_date=defer_instant)
     if st == "UNARMED" and branch != "fleet":
         kinds = page_kinds(subject, vault)
         elsewhere = [b for b in record_branches(subject) if b != branch]
@@ -1424,7 +1507,7 @@ def work_age(s: str, now: float):
         return None
 
 
-def classify(s: str, now: float) -> tuple:
+def classify(s: str, now: float, defer_date=None) -> tuple:
     """(state, detail) for one subject: OK, WORKING, LAPSED, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
 
     `OK` means a round ran inside the limit, and only that. Past the limit a moving
@@ -1443,10 +1526,10 @@ def classify(s: str, now: float) -> tuple:
     "needs a manager started" from "cannot tell".
     """
     stopped_path, stopped_legacy = resolve(s, "stopped")
-    if os.path.exists(stopped_path):
-        return "STOPPED", (
-            "marker present (legacy record)" if stopped_legacy else "marker present"
-        )
+    stopped = os.path.exists(stopped_path)
+    # One epoch for the page gate, so every comparison below is float-vs-float and the
+    # caller may hand in either shape.
+    defer_epoch = None if defer_date is None else defer_date.timestamp()
     # SLEEPING, checked BEFORE the cadence age. A date-gated subject does not re-arm
     # until its instant, so its cadence file ages far past the stale limit by design —
     # measuring it as a lapse is the false STALE this state exists to remove. Once the
@@ -1455,6 +1538,52 @@ def classify(s: str, now: float) -> tuple:
     until, until_text = read_sleep(s)
     if until is not None and now < until:
         return "SLEEPING", f"until {until_text} ({int(until - now)}s remaining)"
+    # The page's `defer_date` is the SECOND date gate, and it is the one a stand-down is
+    # actually set alongside: `/supervisor:stop` after `vault-cli goal set … defer_date`
+    # is the documented "defer to the <date> and close this session" pair (see
+    # `65 Runbooks/Manager - Defer a Goal and Stand Down Its Loop.md`), and it writes no
+    # `.sleeping` marker at all. Passed in by `state()`, which is the only caller holding
+    # both the page name and the vault root; the marker-only callers default it to None.
+    if defer_epoch is not None and now < defer_epoch:
+        return "SLEEPING", (
+            f"defer_date until {iso(defer_epoch)} "
+            f"({int(defer_epoch - now)}s remaining)"
+        )
+    # ⚠️ **Only the `defer_date` releases a stand-down — never a `.sleeping` marker.**
+    # The two date gates are not interchangeable. `defer_date` is page frontmatter the
+    # operator writes in the SAME act as `/supervisor:stop` (`vault-cli goal set …
+    # defer_date` then `--stop`), so it is the one gate provably *set alongside* the
+    # stand-down, and it is the only one whose expiry may release it.
+    #
+    # ⚠️ **A `.sleeping` marker is deliberately excluded, and folding it in is a
+    # regression, not a widening.** `--arm` is what clears `.sleeping`, so an expired
+    # marker routinely LINGERS on subjects that were slept for some unrelated reason —
+    # it is leftover state, not a statement that this stand-down had an expiry. Letting
+    # it release the stand-down meant any stale marker from a past sleep cycle could
+    # resurrect a session the operator deliberately stopped, which is the exact harm this
+    # state exists to prevent, arriving from the opposite direction. It also made
+    # `--check` emit a false lapse for those subjects, because `--check` calls this with
+    # no page data (`defer_date=None`) and would have read the leftover marker as a
+    # passed gate. Measured 2026-11-17: the bot filed it as a blocking regression.
+    #
+    # The pre-instant half is unaffected: a FUTURE `.sleeping` still outranks the
+    # stand-down and reads `SLEEPING` (the arm above), which resumes nothing.
+    #
+    # ⚠️ **The marker is NOT removed here.** A reading that deleted it would erase a
+    # deliberate stand-down — the 2026-11-07 defect (`docs/subject-resolution.md`): a
+    # round's liveness reading cleared the marker and the fleet restarted a session that
+    # had deliberately stopped. An expired gate only stops the marker MASKING the reading;
+    # `--arm --resume` remains the verb that clears it, and the marker stays observable
+    # through `stopped_marker()` and `--stood-down-past`.
+    #
+    # Keyed on a PARSED instant, never on the marker file's existence: an unparseable
+    # `defer_date` is not evidence that a gate passed, so it leaves the stand-down
+    # standing — fail closed, never wake a stood-down subject on a read error.
+    gate_passed = defer_epoch is not None and now >= defer_epoch
+    if stopped and not gate_passed:
+        return "STOPPED", (
+            "marker present (legacy record)" if stopped_legacy else "marker present"
+        )
     # A sleep marker that has EXPIRED (only `--arm` removes it) must stay STALE: the gate
     # cannot see a `defer_date` arrive (`manager-predispatch.digest_of` carries no
     # defer_date), so `topic-keepalive.py` recovers the manager off the STALE reading. The
