@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add `scripts/deliver-message.py`, a session-id-addressed delivery path for a live session that the Claude Code registry omits; it resolves liveness and the message control without reading `~/.claude/sessions/*.json`, then delivers over the wrapper's `POST …/sessions/<id>/message` or releases a park over `…/answer`
+
 ## v0.331.2
 
 - fix: **`scripts/round-readings.py`'s `frozen` verdict is read from the newer of the task file and the session's transcript.** It was derived from the task-file mtime alone, so a live session that spent a whole tick interval reasoning, reading or writing to its transcript without touching its task file read `frozen` — a claim about the session's working state taken from the wrong file, and one `scripts/stuck-heal.py` rejects, leaving every such row to be re-verified by hand. Measured 2026-11-16, twice in one day: `A Park Wake That Finds No Session…` read `frozen 68m` with its transcript written 0.0 min before the read, and `Night and Weekend Window…` read `frozen 134.9m` beside its own `in_flight` limb `transcript 18s` — same document, same row. `stuck_verdict()` now takes the same `transcript_age` callable `in_flight()` reads (no second definition of transcript age) and compares the threshold against `min(task_file_age, transcript_age)`; a genuinely quiet session — task file *and* transcript both stale — still fires, an absent transcript (`inf`) leaves the task-file reading untouched, and the `unread` / no-transcript population is unchanged. Covered by `scripts/tests/test_round_readings.py::TheFrozenTranscriptLeg`, whose `compute()` case reproduces the false `frozen` on the pre-change code.
