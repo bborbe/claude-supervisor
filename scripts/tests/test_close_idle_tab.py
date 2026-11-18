@@ -135,6 +135,44 @@ class TestTaskGate(unittest.TestCase):
         token, _ = self.gate({"status": "in_progress", "defer_date": "2099-01-01"})
         self.assertEqual(token, "task-terminal")
 
+    # The no-page case splits in two exactly as `reap-idle-headless.py` splits it
+    # (`:783-805`): a proven absence of anchor is a close, an absent SEARCH is a refusal.
+
+    def _gate_unanchored(self, detail, dirs):
+        with mock.patch.object(
+            close_idle_tab.close_worker,
+            "resolution_refusal",
+            return_value=("task-unresolved", detail),
+        ), mock.patch.object(
+            close_idle_tab.close_worker, "task_dirs_for", return_value=dirs
+        ):
+            return close_idle_tab.task_gate(None, self.today, SID, "/tmp/worktree")
+
+    def test_unanchored_closes_when_every_vault_was_searched(self):
+        token, detail = self._gate_unanchored(
+            f"no page carries {SID}", ["/v/25 Tasks"]
+        )
+        self.assertEqual(token, "unanchored-closed")
+        self.assertIn(SID, detail)
+
+    def test_vault_not_searched_still_refuses(self):
+        token, _ = self._gate_unanchored(
+            "searched /a; /b not among them", ["/a"]
+        )
+        self.assertEqual(token, "task-unresolved")
+
+    def test_empty_task_dirs_still_refuses(self):
+        # An empty dir list is an absent search, not an absent anchor: without this
+        # guard an empty `vault-cli` config would close the whole fleet in one tick.
+        token, _ = self._gate_unanchored(f"no page carries {SID}", [])
+        self.assertEqual(token, "task-unresolved")
+
+    def test_no_page_without_a_session_id_still_refuses(self):
+        # Without a session id or cwd the absence cannot be PROVEN, so the old refusal
+        # stands — this is what keeps `task_gate(None, today)` honest.
+        token, _ = close_idle_tab.task_gate(None, self.today)
+        self.assertEqual(token, "task-unresolved")
+
 
 if __name__ == "__main__":
     unittest.main()

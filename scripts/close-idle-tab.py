@@ -36,8 +36,14 @@ Refusals, each exit 1 with a stable token as the first line of output:
                         `👤 You:` gate. Closing discards a question nobody answered.
   watcher-alive         a surviving child of the worker is not one of its MCP/stdio/LSP
                         helpers — a backgrounded command would die with the pane.
-  task-unresolved       no task page carries this session id as `claude_session_id`.
-                        Absent evidence is not evidence of a parked task.
+  task-unresolved       no task page carries this session id as `claude_session_id`, and
+                        the absence is not a proven one — the session's own vault
+                        contributed no `tasks_dir`, so nothing was searched. Absent
+                        evidence is not evidence of a parked task.
+  unanchored-closed     no page among EVERY configured vault carries this session id, so
+                        nothing owns it and nothing can resume it for. The token is the
+                        one `reap-idle-headless.py` already emits for this shape, reached
+                        here through the same predicate.
   task-terminal         the task is terminal, handed off, or deferred to the future: that
                         is `close-worker.py`'s population, not this one.
 
@@ -133,7 +139,7 @@ def tab_gate(rec, idle, cards, cards_readable, children, held=None):
     return None
 
 
-def task_gate(task, today):
+def task_gate(task, today, session_id=None, cwd=None):
     """`(token, detail)` when the task is not this verb's population, else None.
 
     ⚠️ **The gate is inverted on purpose.** `close-worker.py` refuses a non-terminal task
@@ -141,12 +147,36 @@ def task_gate(task, today):
     `task_verdict` returns None for three different states — terminal, handed off, and
     deferred to the future — and every one of them is `close-worker.py`'s population, so
     the refusal names all three rather than picking one.
+
+    A session with NO page at all is a fourth case, and it splits in two exactly as
+    `reap-idle-headless.py` splits it (`:783-805`). When every configured vault's
+    `tasks_dir` was searched and none carries the id, nothing owns the session and nothing
+    can resume it for — the reaper's `unanchored-closed`. When a vault contributed no
+    `tasks_dir`, or the session's own vault is not among the searched dirs, the absence is
+    an ABSENT SEARCH and the refusal stands.
+
+    ⚠️ **The absent-search guard is load-bearing, not defensive.** Without it an empty
+    `vault-cli` config would read every tab as unanchored and close the whole fleet in one
+    tick — the same failure the reaper's empty-dir guard exists to prevent.
     """
     if task is None:
+        if session_id is None or cwd is None:
+            return (
+                "task-unresolved",
+                "no task page carries this session id as claude_session_id; absent "
+                "evidence is not evidence of a parked task",
+            )
+        _refusal, detail = close_worker.resolution_refusal(session_id, cwd)
+        if "not among them" in detail or not close_worker.task_dirs_for(cwd):
+            return (
+                "task-unresolved",
+                "no task page carries this session id as claude_session_id, and the "
+                f"absence is not a proven one — {detail}",
+            )
         return (
-            "task-unresolved",
-            "no task page carries this session id as claude_session_id; absent evidence "
-            "is not evidence of a parked task",
+            "unanchored-closed",
+            f"no page among every configured vault carries {session_id}; nothing owns "
+            "it, so nothing can resume it for",
         )
     if close_worker.task_verdict(task, today) is None:
         path, fm, handed_off = task
@@ -241,8 +271,9 @@ def main(argv=None):
             )
             continue
 
-        bad = task_gate(close_worker.find_task(session_id, cwd), today)
-        if bad is not None:
+        bad = task_gate(close_worker.find_task(session_id, cwd), today, session_id, cwd)
+        unanchored = bad is not None and bad[0] == "unanchored-closed"
+        if bad is not None and not unanchored:
             exit_code = refuse(*bad)
             continue
 
@@ -258,7 +289,8 @@ def main(argv=None):
             continue
 
         if args.dry_run:
-            print(f"✅ would close pane {pane} (session {session_id})")
+            suffix = " — unanchored-closed" if unanchored else ""
+            print(f"✅ would close pane {pane} (session {session_id}){suffix}")
             continue
 
         code = close_worker.tab_kill(jump, session_id, pane)
@@ -274,10 +306,18 @@ def main(argv=None):
             )
             exit_code = 1
             continue
-        print(
-            f"✅ closed pane {pane} (session {session_id}); task stays in_progress, "
-            f"claude_session_id kept, transcript {os.path.basename(transcript)} intact"
-        )
+        if unanchored:
+            print("unanchored-closed")
+            print(
+                f"✅ closed pane {pane} (session {session_id}); no page owned it, so "
+                f"there is no task state to preserve; transcript "
+                f"{os.path.basename(transcript)} intact"
+            )
+        else:
+            print(
+                f"✅ closed pane {pane} (session {session_id}); task stays in_progress, "
+                f"claude_session_id kept, transcript {os.path.basename(transcript)} intact"
+            )
 
     return exit_code
 
