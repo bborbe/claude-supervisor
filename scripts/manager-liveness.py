@@ -92,6 +92,14 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     ticks at ~900; a bare floor would hide its lapse).
                                     A re-arm after a stand-down resets the history,
                                     so an outage gap never counts as cadence.
+                                    A STOPPED subject (a `.stopped` marker) is reported
+                                    once its marker is older than 2 x its own observed
+                                    period, as `STOPPED <slug> ... age=<s>`, and
+                                    re-emitted with `retry=1` until delivered — so a
+                                    deliberate stand-down is visible to the notification
+                                    path, not only to `--state`. A stand-down is not a
+                                    lapse: it keeps its own token and is never counted
+                                    as one.
                                     Prints one line per subject that TURNED stale (or
                                     recovered) since the last check; exits 10 if any
                                     turned stale, else 0.
@@ -168,12 +176,13 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     `SLEEPING` is a fifth state: a future `.sleeping`
                                     instant, which suppresses the STALE report a frozen
                                     cadence file would otherwise produce.
-                                    `--check` structurally cannot answer this: it prints
-                                    only the subjects that TURNED stale, so STOPPED -- the
-                                    state a deliberate stand-down produces -- is invisible
-                                    to it by construction. A reader that must tell a
-                                    stood-down manager from a lapsed one asks about the
-                                    subject directly, which is what this verb is for.
+                                    `--check` now reports a stood-down subject too (past
+                                    two of its own observed periods), but `--state`
+                                    remains the verb that answers a stand-down ON DEMAND:
+                                    it returns STOPPED immediately, without waiting for
+                                    the bound. A reader that must tell a stood-down
+                                    manager from a lapsed one asks about the subject
+                                    directly, which is what this verb is for.
                                     Exits 0 for every state: the state IS the answer,
                                     and a non-zero exit would make a stood-down manager
                                     read as a failure to every `if` that wraps it.
@@ -1062,6 +1071,13 @@ def read_pending() -> dict:
             "attempts": attempts,
             "last_error": v.get("last_error"),
             "emits": emits,
+            # ⚠️ `kind` separates a LAPSE episode from a STAND-DOWN episode. Both live in
+            # this one store keyed by slug, and a resume that ends a stand-down must be
+            # dropped rather than re-emitted as `RECOVERED-PENDING` — a deliberate stop
+            # that ends is not a lapse anyone recovered from. Carried through every
+            # rewrite like the producer identity fields, or the distinction is lost on
+            # the first normalising read.
+            "kind": v.get("kind"),
             # Producer identity, carried through every rewrite: a normalising reader
             # that dropped these would make the record indistinguishable from one
             # written by hand, which is the property they exist to give it.
@@ -1741,18 +1757,49 @@ def emit_lapse(state: str, subject: str, detail: str, entry: dict) -> None:
     episode instead of one per poll, which is the whole difference between a failure
     rate and a poll count.
 
-    ⚠️ `retry=1` is a TRAILING token, never a prefix. The sender matches
-    `^(STALE|INVALID|RECOVERED-PENDING) ` on line start and reads the subject from
-    field 2 (`manager-liveness-notify-tick.sh:61-62`); a `RETRY STALE …` spelling
-    would satisfy every test here and silently drop every retry from delivery.
+    ⚠️ `retry=1` is a TRAILING token, never a prefix. The sender matches the kind in
+    field 1 (`isLapseKind` in `bborbe/claude-wrapper/pkg/manager_liveness.go`, which
+    admits STALE / INVALID / RECOVERED-PENDING / STOPPED) and reads the subject from
+    field 2; a `RETRY STALE …` spelling would satisfy every test here and silently drop
+    every retry from delivery.
 
-    One home for both call sites: the STALE branch and the RECOVERED-PENDING branch
-    print the same line shape, and a marker added to only one of them would leave the
-    other inflating the count it exists to fix.
+    One home for all three call sites: the STALE branch, the RECOVERED-PENDING branch
+    and the STOPPED branch print the same line shape, and a marker added to only one of
+    them would leave the others inflating the count it exists to fix.
     """
     entry["emits"] = int(entry.get("emits", 0)) + 1
     retry = " retry=1" if entry["emits"] > 1 else ""
     print(f"{state} {subject} {detail} crossing={iso(entry['detected_at'])}{retry}")
+
+
+def stood_down_age(s: str, now: float):
+    """Seconds since this subject's `.stopped` marker was written, or None.
+
+    The marker's mtime is the stand-down instant: `--stop` writes the file, and only
+    `--arm --resume` / `--clear-standdown` remove it, so its age is how long the
+    operator's deliberate stop has stood. `None` means the marker vanished between
+    `classify()` and here (a resume raced the poll), which is not evidence of an age.
+    """
+    marker, _legacy = resolve(s, "stopped")
+    try:
+        return int(now - os.path.getmtime(marker))
+    except OSError:
+        return None
+
+
+def declared_interval(s: str):
+    """The interval recorded in this subject's cadence file, or None.
+
+    The fallback for `observed_period()` when the arm history is too short to measure:
+    a subject armed once and then stopped has no observed cadence, but its declared
+    interval is still its own period.
+    """
+    p, _legacy = resolve(s, "cadence")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
 
 
 def check(now: float = None) -> int:
@@ -1801,12 +1848,65 @@ def check(now: float = None) -> int:
                 # single failed send used to mark the lapse reported for ever.
                 emit_lapse(state, s, detail, pending[s])
                 turned_stale = True
+        elif state == "STOPPED":
+            # ⚠️ **A deliberate stand-down IS reported, but only past two of its own
+            # periods.** `classify()` returns STOPPED for a subject carrying a `.stopped`
+            # marker, and until this branch existed `check()` acted only on STALE /
+            # INVALID — so a stood-down manager was observable through `--state` and
+            # invisible to the notification path, which is why every forced-lapse probe
+            # was voided: nothing pushed the condition, so nothing acted on it.
+            #
+            # ⚠️ **The threshold is what keeps a stand-down from reading as a failure.**
+            # `--stop` is a deliberate act, so the subject is stood down the instant the
+            # marker is written; reporting it at once would fire on every ordinary
+            # stand-down. Two observed periods is the grace that lets the operator's own
+            # decision stand before the fleet is told it is still standing.
+            #
+            # ⚠️ **A stand-down is NOT a lapse, and must never be counted as one.** The
+            # line carries the `STOPPED` token, never `STALE`; the pending entry carries
+            # `kind="stopped"` so a resume that ends the episode is dropped rather than
+            # re-emitted as `RECOVERED-PENDING`. The `retry=1` discipline is shared with
+            # `emit_lapse()`: the first poll of a crossing is the firing, every later one
+            # is a retry.
+            age = stood_down_age(s, now)
+            period = observed_period(s) or declared_interval(s)
+            threshold = 2 * period if period else None
+            if age is not None and threshold is not None and age > threshold:
+                still.add(s)
+                if s in pending and pending[s]["detected_at"] < last_arm(s):
+                    del pending[s]
+                if s not in pending and (s not in notified or notified[s] < last_arm(s)):
+                    pending[s] = {
+                        "detected_at": now,
+                        "detail": detail,
+                        "attempts": 0,
+                        "last_error": None,
+                        "emits": 0,
+                        "kind": "stopped",
+                    }
+                if s in pending:
+                    emit_lapse(
+                        "STOPPED",
+                        s,
+                        f"{detail} age={age}s threshold={int(threshold)}s",
+                        pending[s],
+                    )
+                    turned_stale = True
+            elif s in pending and pending[s].get("kind") == "stopped":
+                # The subject has not yet passed its bound, or the marker moved: drop a
+                # stopped episode that is no longer reportable rather than leave it owed.
+                del pending[s]
         elif s in pending:
-            # The manager came back before anyone was told. The lapse still happened and
-            # the operator is still owed the report, so it stays owed — but saying STALE
-            # would be a lie, so it is named for what it is.
-            emit_lapse("RECOVERED-PENDING", s, detail, pending[s])
-            turned_stale = True
+            if pending[s].get("kind") == "stopped":
+                # A stand-down that ended is not a recovered lapse: the operator withdrew
+                # a deliberate stop, so there is nothing to recover and nothing owed.
+                del pending[s]
+            else:
+                # The manager came back before anyone was told. The lapse still happened and
+                # the operator is still owed the report, so it stays owed — but saying STALE
+                # would be a lie, so it is named for what it is.
+                emit_lapse("RECOVERED-PENDING", s, detail, pending[s])
+                turned_stale = True
         elif s in notified:
             print(f"RECOVERED {s} {state} {detail}")
             del notified[s]
