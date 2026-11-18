@@ -85,6 +85,15 @@ class CheckOpenLegOpenedTest(unittest.TestCase):
         result = self.run_check("open leg: unknown\n")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
+    def test_missing_payload_is_not_an_all_refused_verdict(self):
+        # Exit 1 means "every selected row was refused"; an unreadable payload must never borrow
+        # that verdict, so a missing file answers 2.
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run([sys.executable, str(SCRIPT), str(pathlib.Path(tmp) / "nope.open")],
+                                    capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertNotIn("EVERY selected row was refused", result.stderr)
+
     def test_older_payload_with_full_sibling_refusals_fails(self):
         # Payloads written before the tally existed: the refusals live in the truncation-overflow
         # sibling. A complete set there is the same all-refused condition.

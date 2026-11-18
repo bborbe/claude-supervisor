@@ -27,8 +27,11 @@ REFUSED = re.compile(r"^refused:", re.MULTILINE)
 
 
 def fail(message: str) -> None:
+    # ⚠️ Exit **2**, never 1: 1 is this check's "every selected row was refused" verdict, and a
+    # missing payload or a usage error must not be reported as that — a round that could not read
+    # its payload has not established that anything was refused.
     print("❌ " + message, file=sys.stderr)
-    sys.exit(1)
+    sys.exit(2)
 
 
 def read_payload(path: pathlib.Path) -> str:
