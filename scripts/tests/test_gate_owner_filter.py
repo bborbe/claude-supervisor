@@ -2759,7 +2759,11 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
         self.assertEqual(again, set())
 
     def test_the_wake_line_names_the_session_or_one_of_two_fixed_tokens(self):
-        args = mock.Mock(json=False, explain=False, feed=True)
+        # ⚠️ `digest=False` is not decoration: a bare `mock.Mock` returns a truthy
+        # Mock for any unset attribute, so without it this fake would silently take
+        # the `--digest` branch and stop exercising the per-pane shape it is here to
+        # pin. The real parser's default is False.
+        args = mock.Mock(json=False, explain=False, feed=True, digest=False)
         rows = [
             {"pane": "hst:a", "replayed": False, "verdict": gf.EMIT, "session_id": GATED,
              "store": gf.STORE_OPEN},
