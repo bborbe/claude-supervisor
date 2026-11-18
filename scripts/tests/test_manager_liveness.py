@@ -2147,6 +2147,24 @@ class WorkSignal(unittest.TestCase):
         self.assertNotIn("EXITED", out)
         self.assertNotIn("\tOK", out)
 
+    def test_a_stale_cadence_stays_stale_even_when_the_session_is_gone(self):
+        """EXITED must not steal the STALE population — that would drop dead managers.
+
+        Every consumer acts on STALE / INVALID only (the `--check` sweep, `topic-keepalive.py`
+        and `crashed-managers.py`). If a dead manager with a stale cadence read EXITED instead,
+        it would leave both the alert set and the restart set — the opposite of what this
+        change is for. EXITED is the narrow answer for a record that still looks HEALTHY.
+        """
+        s = self.arm_old(age=5000, session=self.SID)  # a STALE cadence
+        self.transcript(self.SID, 6000)
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: False
+        try:
+            state, _ = self.m.classify(s, time.time())
+        finally:
+            self.m.registry_holds = prior
+        self.assertEqual("STALE", state)
+
     def test_a_topic_subject_with_no_work_is_stale_not_idle(self):
         """IDLE is goal-tier only — the other tiers arm their own cadence."""
         s = self.arm_old(branch="topic", age=5000, session=self.SID)

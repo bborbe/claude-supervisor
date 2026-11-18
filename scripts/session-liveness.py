@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Is this session id live? One instrument, one answer, for the whole plugin.
 
-Liveness is answered by the attention store's **session-heartbeat endpoint** and by nothing
-else. Every session that can be asked about stamps that store — an interactive tab, a headless
-in-process worker, a cluster pod — so one channel answers for all of them, and the verdict is
-the store's own `live` boolean (its age against its window), never a recomputation here.
+Liveness is answered primarily by the attention store's **session-heartbeat endpoint**, which
+holds every population in one store — an interactive tab, a headless in-process worker, a
+cluster pod — so one channel answers for all of them, and the verdict is the store's own `live`
+boolean (its age against its window), never a recomputation here. When that endpoint cannot be
+read, the two on-disk channels answer instead; see the union paragraph below.
 
   --check <session-id>   LIVE (exit 0) / ABSENT (exit 1) / UNKNOWN (exit 2) / AMBIGUOUS (exit 3)
   --check <not-an-id>    MALFORMED (exit 4) — the argument is not a single session id at all
@@ -29,7 +30,10 @@ Same rule as `live-workers.py`.
 
 ⚠️ **ABSENT is licensed only by a READABLE endpoint that positively reports the id as not
 live** — a 200 carrying `live: false`, or a 404 from the store, or a readable list with no
-matching id. Nothing else may reach it.
+matching id. ⚠️ **When the endpoint is UNREADABLE the licence narrows rather than widens:** the
+only source that may then reach ABSENT is a registry entry the registry HOLDS and computes
+`alive: False`, with no live headless stamp contradicting it. A missing entry never does — see
+the union paragraph below. Nothing else may reach ABSENT either way.
 
 ⚠️ **A session with NO identity-registry entry is ABSENT only on a stale heartbeat record.**
 Claude Code deletes the registry entry on exit, so an exited session has none; a session spawned
@@ -656,15 +660,23 @@ def _headless_live_ids():
     try:
         lw = _live_workers()
         stamps = lw.read_live(lw.heartbeat_dir())
+        if stamps is None:
+            return None
+        # ⚠️ **The comprehension is INSIDE the guard, and the `isinstance` check is on the id.**
+        # A stamp whose `session_id` is a list or a dict is unhashable, so the set build would
+        # raise `TypeError` — and on the `--list` path that escape is a traceback with exit 1,
+        # this file's ABSENT code. `--check` is saved by `check()`'s blanket guard; `--list` is
+        # not. The same rule `coverage()` applies to a malformed endpoint row.
+        return {
+            s["session_id"]
+            for s in stamps
+            if isinstance(s, dict)
+            and s.get("state") == "live"
+            and isinstance(s.get("session_id"), str)
+            and s["session_id"]
+        }
     except Exception:  # noqa: BLE001 — an unreadable store is UNKNOWN, never a confident empty
         return None
-    if stamps is None:
-        return None
-    return {
-        s["session_id"]
-        for s in stamps
-        if isinstance(s, dict) and s.get("state") == "live" and s.get("session_id")
-    }
 
 
 def _local_verdict(sid, registry_dir=None, why=""):
@@ -692,11 +704,27 @@ def _local_verdict(sid, registry_dir=None, why=""):
     keys = list(identity)
     exact = next((k for k in keys if k.lower() == sid), None)
     matched = [exact] if exact is not None else [k for k in keys if k.lower().startswith(sid)]
-    if len(matched) > 1:
-        # A prefix that names two registry entries is the same refusal the endpoint path makes.
+    # ⚠️ **Both channels are matched BEFORE any verdict is returned.** The headless store is the
+    # endpoint-down substitute for a heartbeat row, so consulting it only after a registry miss
+    # would let a dead registry row answer ABSENT while a live headless stamp for the same id
+    # sat unread — the resume-authorising direction this fallback exists to keep shut. The
+    # union also means a prefix that names one dead registry entry and one live headless id is
+    # AMBIGUOUS rather than a guess.
+    headless = _headless_live_ids()
+    hits = sorted(
+        h for h in (headless or ())
+        if isinstance(h, str) and (h.lower() == sid or h.lower().startswith(sid))
+    )
+    all_matches = sorted(set(matched) | set(hits))
+    if len(all_matches) > 1:
         return AMBIGUOUS, "%d session ids match %s — pass a longer id: %s" % (
-            len(matched), sid, ", ".join(sorted(m[:12] for m in matched))
+            len(all_matches), sid, ", ".join(m[:12] for m in all_matches)
         ), None
+    if hits:
+        # A live headless stamp is a POSITIVE answer, and it outranks a dead registry row for
+        # the same id: the store's stamp is refreshed while the turn runs, the registry row can
+        # lag or be stale. A positive from any channel is an answer.
+        return LIVE, "%s (live headless stamp)" % why, None
     if matched:
         rec = identity.get(matched[0]) or {}
         alive = rec.get("alive")
@@ -709,21 +737,12 @@ def _local_verdict(sid, registry_dir=None, why=""):
                 "%s — %s holds a pid the identity registry cannot prove, so liveness cannot be "
                 "decided from disk" % (why, matched[0])
             ), None
-        # `alive is False`: the registry HOLDS the entry and computes death. Same predicate
-        # that licenses ABSENT at the end of `_absent_licensed`.
+        # `alive is False`: the registry HOLDS the entry and computes death, and no live
+        # headless stamp contradicts it. Same predicate that licenses ABSENT at the end of
+        # `_absent_licensed`.
         return ABSENT, "%s (identity registry reports the pid gone for %s)" % (
             why, matched[0]
         ), None
-    # No registry entry — try the headless store before answering UNKNOWN.
-    headless = _headless_live_ids()
-    if headless:
-        hits = sorted(h for h in headless if h.lower() == sid or h.lower().startswith(sid))
-        if len(hits) == 1:
-            return LIVE, "%s (live headless stamp for %s)" % (why, hits[0]), None
-        if len(hits) > 1:
-            return AMBIGUOUS, "%d session ids match %s — pass a longer id: %s" % (
-                len(hits), sid, ", ".join(h[:12] for h in hits)
-            ), None
     return UNKNOWN, (
         "%s — and no identity registry entry and no live headless stamp exist for %s; a session "
         "spawned moments ago and a cluster session look identical here, so ABSENT cannot be "
@@ -768,7 +787,7 @@ def is_session_id(value):
 
 
 def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, projects_dir=None):
-    """`(verdict, message, row)` for one id argument, from the endpoint alone.
+    """`(verdict, message, row)` for one id argument, from the endpoint with a disk fallback.
 
     ⚠️ **The list route is fetched FIRST, and that is a cost fix, not a taste.** The per-id
     route is an EXACT lookup and 404s on a prefix (measured 2026-10-08:
@@ -1264,8 +1283,10 @@ def main(argv=None):
     parser.add_argument(
         "--heartbeat-dir",
         default=None,
-        help="accepted for backward compatibility; the heartbeat store is no longer read here "
-        "(the session-heartbeat endpoint replaces it)",
+        help="accepted for backward compatibility and NOT honoured. The session-heartbeat "
+        "endpoint computes freshness itself, and when that endpoint is unreadable the "
+        "fallback reads the headless store at ITS default location — never the directory "
+        "passed here. A caller relying on this flag is reading a store it did not choose.",
     )
     parser.add_argument(
         "--ttl",
@@ -1298,8 +1319,9 @@ def main(argv=None):
     # is the failure shape this repo treats as worse than a refusal. So: accept, warn, continue.
     if args.heartbeat_dir is not None or args.ttl is not None:
         print(
-            "WARNING — --heartbeat-dir and --ttl are ignored: the session-heartbeat endpoint "
-            "computes freshness itself",
+            "WARNING — --heartbeat-dir and --ttl are NOT honoured: the session-heartbeat "
+            "endpoint computes freshness itself, and the unreadable-endpoint fallback reads "
+            "the headless store at its own default location, not the one passed here",
             file=sys.stderr,
         )
 
@@ -1432,6 +1454,21 @@ def main(argv=None):
                 }
             )
         degraded = len(payload)
+        # ⚠️ **An EMPTY degraded list must not read as an empty fleet.** `[]` with exit 0 is the
+        # one shape that carries no `degraded` row for `commands/open.md` Step 2B/2C to key on,
+        # so it would be read as "none is running now" and fall through to a spawn — the
+        # duplicate-spawn hazard this whole guard exists to close, on a restarted machine where
+        # the registry has not been written yet. "I could not measure" is UNKNOWN, never a
+        # confident zero.
+        if not payload:
+            print(
+                "UNKNOWN — the session-heartbeat endpoint at %s is unreadable and the on-disk "
+                "channels hold no live session, so an empty list here is a measurement this "
+                "probe could not take, not an empty fleet"
+                % endpoint_base(args.endpoint),
+                file=sys.stderr,
+            )
+            return UNKNOWN
     else:
         # Only a live row is listed — the store keeps a row for a session long after it dies, and
         # a `--list` that echoed them would count a dead fleet as a live one.

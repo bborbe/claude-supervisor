@@ -841,6 +841,47 @@ class SessionLiveness(unittest.TestCase):
         self.assertIn(sid, by_id)
         self.assertTrue(by_id[sid]["degraded"])
 
+    def test_list_on_an_unreachable_endpoint_with_no_sessions_is_unknown(self):
+        """An EMPTY degraded list must not read as an empty fleet.
+
+        `[]` with exit 0 is the one shape carrying no `degraded` row for `commands/open.md`
+        Step 2B/2C to key on, so it would be read as "none is running now" and fall through to
+        a spawn — the duplicate-spawn hazard, on exactly the restarted machine where the
+        registry has not been written yet. "I could not measure" is UNKNOWN, never a zero.
+        """
+        prior = self.m._headless_live_ids
+        self.m._headless_live_ids = lambda: set()
+        try:
+            rc, out = self.listing(dead_url())
+        finally:
+            self.m._headless_live_ids = prior
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_a_dead_registry_row_is_not_absent_when_a_headless_stamp_is_live(self):
+        """The two fallback channels are unioned BEFORE a verdict, not consulted in order.
+
+        A live headless stamp is the endpoint-down substitute for a heartbeat row, so a dead
+        registry row must not answer ABSENT while that stamp sits unread — ABSENT is the one
+        verdict that authorises a resume.
+        """
+        sid = "9c0ffee4-1111-2222-3333-444455556666"
+
+        class _RegistryHoldsItDead:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": False, "pid": 1234}}
+
+        prior_id, prior_headless = self.m._IDENTITY, self.m._headless_live_ids
+        self.m._IDENTITY = _RegistryHoldsItDead()
+        self.m._headless_live_ids = lambda: {sid}
+        try:
+            rc, out = self.check(sid, dead_url())
+        finally:
+            self.m._IDENTITY, self.m._headless_live_ids = prior_id, prior_headless
+        self.assertEqual(rc, LIVE)
+        self.assertIn("headless", out)
+
     def test_check_on_an_unreachable_endpoint_reads_live_from_the_registry(self):
         # ⚠️ **SC1(b).** With the endpoint stopped, a session whose registry pid is running must
         # still answer LIVE — that is the whole population the fleet lost during the outage.
