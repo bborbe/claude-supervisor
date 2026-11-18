@@ -104,5 +104,36 @@ class Lexer(unittest.TestCase):
         self.assertEqual(nested, ["git rev-parse HEAD", "date"])
 
 
+class QuotedBraces(unittest.TestCase):
+    """Only an UNQUOTED, unescaped `{a,b}` is brace expansion; quoted or escaped braces are literal."""
+
+    def _got(self, cmd):
+        return tier.tier_for("Bash", {"command": cmd}, ENTRIES, {"runnerConfigClean": True})
+
+    def test_real_brace_expansion_stays_unverifiable(self):
+        for cmd in ("cat ~/{.netrc,x}", "echo {a,b}", "echo {a,'b'}", "echo x{a,b}y", "echo 'unterminated {a,b}"):
+            got = self._got(cmd)
+            self.assertEqual(got.get("form"), "unverifiable", cmd)
+
+    def test_quoted_braces_are_not_unverifiable(self):
+        for cmd in (
+            "gh -R bborbe/x pr view 1 --json a,b --jq '{a: .a, b: .b}'",
+            "jq '{\"a\":1,\"b\":2}' f.json",
+            'echo "{a,b}"',
+            "echo \\{a,b\\}",
+            "echo {'a,b'}",
+        ):
+            got = self._got(cmd)
+            self.assertNotEqual(got.get("form"), "unverifiable", cmd)
+
+    def test_quoted_gh_jq_is_manager_tier(self):
+        got = self._got("gh -R bborbe/x pr view 1 --json a,b --jq '{a: .a, b: .b}'")
+        self.assertEqual(got["tier"], "manager", got["reason"])
+
+    def test_ansi_c_quote_stays_fail_closed(self):
+        # `$'…'` is rejected as unverifiable elsewhere (shlex does not model it); not loosened here.
+        self.assertEqual(self._got("echo $'{a,b}'").get("form"), "unverifiable")
+
+
 if __name__ == "__main__":
     unittest.main()
