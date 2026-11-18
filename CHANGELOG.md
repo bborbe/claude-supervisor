@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.341.1
 
 - fix: **`round-context-delta.py` measures only CLOSED rounds, so a transcript with one marker no longer reports an 8.5 MB "round".** A round is measured from its fire to the next fire; the trailing segment has no closing fire, so everything after it — a later unrelated turn, a whole session's tail — was charged to it. Measured 2026-11-18 on `cfaf1455`: one marker in the whole transcript produced a single round of **8 508 KB**, and the same defect inflated `8605c0bb`'s last round to 377 KB. The trailing segment is now flagged `open` and dropped by default; a transcript whose only markers are unclosed exits **2** naming the reason, because an unclosed segment is not a measurement and a number there is worse than no number. `--include-open` reports it for a live session mid-round. Corrected reading on `8605c0bb`: **20 closed rounds, median 72.0 KB, max 1087.1 KB** (was 21 rounds / 75.4 KB). Change set: `scripts/round-context-delta.py`, `scripts/tests/test_round_context_delta.py`, `CHANGELOG.md`.
 
