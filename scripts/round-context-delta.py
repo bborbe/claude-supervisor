@@ -30,6 +30,7 @@ round for the arm.
 
 import argparse
 import datetime
+import importlib.util
 import json
 import statistics
 import sys
@@ -128,15 +129,31 @@ def segment(records: list[dict], prefix: str) -> list[dict]:
     return rounds
 
 
-def record_epoch(record: dict) -> float | None:
-    """The record's timestamp as an epoch, or None when it carries no usable clock.
+_MANAGER_RECEIPT = None
 
-    ⚠️ **Deliberately mirrors `manager-receipt.py::_record_epoch`** rather than importing
-    it: both scripts are invoked standalone by the plugin (no shared package, no
-    `sys.path` setup), and the two agree on every input that matters — a non-ISO or
-    absent stamp yields None in both, since the sibling's `str()` coercion of a numeric
-    epoch then fails `fromisoformat` and lands on the same None.
+
+def _manager_receipt():
+    """`manager-receipt` loaded as a module — one clock parser for both round tools.
+
+    Both scripts report on the same rounds, so a second copy of the parser is a drift
+    risk: a fix to one would leave the other reading a different window. A sibling
+    importlib load is this repo's convention for a shared reader across standalone
+    scripts (`check-handback-size.py::load_legs` loads `check-handback-keys.py` the
+    same way). Loaded once and cached — the parse runs per record.
     """
+    global _MANAGER_RECEIPT
+    if _MANAGER_RECEIPT is None:
+        path = Path(__file__).resolve().parent / "manager-receipt.py"
+        spec = importlib.util.spec_from_file_location("manager_receipt", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _MANAGER_RECEIPT = module
+    return _MANAGER_RECEIPT
+
+
+def record_epoch(record: dict) -> float | None:
+    """The record's timestamp as an epoch, or None when it carries no usable clock."""
+    return _manager_receipt()._record_epoch(record)
     stamp = record.get("timestamp")
     if not isinstance(stamp, str):
         return None
