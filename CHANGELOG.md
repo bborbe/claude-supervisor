@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.343.1
 
 - feat: `scripts/flagged-rows.py` emits a new `parked` branch for a row whose last closer declares an external wait (`⏰ Ends:`), read once per run through `declared-wait.py` so there is one definition of "waiting" — the branch sits after every LIVE branch and before `resume`/`create`, so an open session is never counted as waiting and a parked row is never counted absent
 - fix: **`--state` measures the liveness period from a gap-free tail, so an overnight stop no longer stretches the OK window to most of a day.** `observed_period()` took the p90 and the median over the last 12 arms, and a manager that stopped overnight wrote its ~17 h gap into both — measured 2026-11-18: `period=23997s`, `limit=24177s` (~6.7 h), so a genuinely stopped loop read `OK` for hours. The ring is now cut at its last span past `IDLE_GAP_SECONDS = 7200` and the period is measured from the tail; a tail under three spans keeps the old capped reading rather than dropping to `None`, since `None` moves every caller onto the declared interval. The break test is absolute rather than a multiple of the observed cadence — a relative threshold has to estimate the cadence first, and that estimate is exactly what the gap corrupts. Four fixtures carrying real idle gaps move accordingly (1740→1615, 1740→1552, 3937→3930 twice, and the historic-outage test now asserts the real 900 s period instead of the 2250 s the 2.5× cap used to bound it to).
