@@ -897,11 +897,11 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
       answer must not suppress work, the same reason `unknown` outranks `create`.
 
     `parked` is the one branch that is NOT a liveness verdict. It is the row's own
-    last closer declaring an external observable — the `⏰ Ends:` marker, which
-    `~/.claude/CLAUDE.md` § Async State Closer scopes to the 🟡 WAITING panel alone.
-    Its input is `declared-wait.py`'s `declared_wait_ids()`, the single reader, never
-    a second parser: a row parked on a card, a PR, a `defer_date` or a host probe
-    reads `parked` and never `absent`. See `row_for` for where the set is computed.
+    last closer declaring an external observable — the `⏰ Ends:` marker, which the
+    global CLAUDE.md § Async State Closer scopes to the 🟡 WAITING panel alone. Its
+    input is `declared-wait.py`'s `declared_wait()`, the single reader, never a second
+    parser: a row parked on a card, a PR, a `defer_date` or a host probe reads
+    `parked` and never `absent`. See `parked_for` for the per-run cache.
     """
     refused = []
     if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
