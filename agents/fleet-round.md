@@ -58,10 +58,19 @@ a provenance act this leg must not take.
 </constraints>
 
 <inputs>
-The caller passes: **the round id** (the receipt's `round_started_at`, or the digest's round
-stamp) · **this session's id** (`$CLAUDE_CODE_SESSION_ID`) · **the vault name** · **the
-absolute tasks directory**. The manager read the receipt and armed before dispatching you, so
-the window is already open.
+The caller passes: **the round id** — the receipt's numeric `round_started_at`
+(`1795010135.451426`), which is also the `<round>` stem your hand-back must carry ·
+**this session's id** (`$CLAUDE_CODE_SESSION_ID`) · **the vault name** · **the absolute
+tasks directory**. The manager read the receipt and armed before dispatching you, so the
+window is already open.
+
+⚠️ **Copy the id VERBATIM from the receipt — the full float, not a `date +%s` epoch.** The
+hand-back's filename is built with `f"{float(x):.6f}"`, so an integer epoch writes
+`1795010135.000000.round` while the receipt's `1795010135.451426` yields
+`1795010135.451426.round` — `--finish` then never finds the hand-back and the loop absorbs
+forever. A digest stamp (`2026-10-11T18:09:40Z`) is rejected outright. If the id you were
+given is not the receipt's exact float, say so in the hand-back and stop that row rather than
+guessing one.
 
 ⚠️ **You derive this round's digest path; the caller does not pass it.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, under
@@ -147,6 +156,34 @@ every peer's percentage and never its own.
 The full material — the digest, the leg blocks, the drive audit, the open block — is written
 to the payload paths the step files name. You hand back **only** the verdict summary in
 `<output_format>`; never inline a table, a row list or a rule.
+
+## 5. Leave the hand-back file — the round's end signal
+
+**Before your turn ends, and after the payloads are written**, write the round's hand-back:
+
+```bash
+python3 "$P/manager-receipt.py" --handback --subject "Fleet Manager" --branch fleet \
+  --round "<the round id from <inputs>>" \
+  --text "fleet round <round id> — machine half summary"
+```
+
+⚠️ **`--round` is the NUMERIC id you were DISPATCHED with — the receipt's
+`round_started_at`, e.g. `1795010135.451426` — never the current receipt's, and never a
+digest stamp.** The command refuses anything else, and that is deliberate: a delegate that
+outlives a forced close would otherwise write its *successor's* hand-back, and the
+successor's tail would find one and close early — recording a window far shorter than the
+round it names. Your round is the one in `<inputs>`; a receipt that has moved on is
+somebody else's round.
+
+⚠️ **This file is not decoration — it is what lets the round close.** `manager-receipt.py
+--finish` refuses with exit 13 while it is absent, and the next firing's `--start` treats the
+round as IN FLIGHT and absorbs itself. A delegate that ends without writing it leaves the
+loop wedged until someone closes it by hand, with a recorded reason.
+
+⚠️ **Write it on EVERY ending, including the bad ones** — a full round, a round whose legs
+all came back `not-run`, and the `not-run`-because-a-leg-is-still-running case in
+`<error_handling>`. The presence of the file says *this delegate returned*; what it returned
+is the verdict's business. Its body is a one-line summary; nothing reads it.
 
 </process>
 
