@@ -151,6 +151,18 @@ to the payload paths the step files name. You hand back **only** the verdict sum
 </process>
 
 <error_handling>
+- **A leg still in flight is `not-run` — and you STILL hand back.** ⚠️ **Never end a turn
+  without the hand-back fence.** Measured 2026-11-18: a delegate that dispatched
+  `supervisor:fleet-sweep-reader` and found it still running ended with *"The sweep is still
+  running. Waiting for its hand-back before the drive leg can be gated."* and emitted **no
+  hand-back at all**. The manager then had no verdict, could not render, never reached its
+  tail, and the round never closed — **two rounds hung exactly this way**, one at 09:57 and
+  one at 13:33. Waiting is not a verdict. Its counts are `not-run`, every row that depended
+  on it is `not-run` too, the rest of the round proceeds on what you have, and **the reason
+  goes to the payload — never to the hand-back**, which carries the value alone.
+  ⚠️ **`not-run` is for a leg still in flight, never for one that returned nothing usable.**
+  A delegation that completed empty takes its step file's own fallback — `commands/steps/sweep.md`
+  requires you to run the reads yourself and carry real counts, not a `not-run`.
 - **A leg's script exits 2** → its count is `not-run` with the reason on stderr, and every
   later row that depended on it is also `not-run`. Never a `0`.
 - **A leg's hand-back is over 1 KB** → that is the leg's defect, not yours to trim: report it
@@ -196,6 +208,11 @@ that stops the loop guessing, so it appears on every hand-back even when `contex
 
 ⚠️ **`context70` is a count of sessions over the bound, not a percentage** — it is what the
 manager's row 14 branches on.
+
+⚠️ **Any count may be `not-run`.** The fence writes `<n>` for brevity, but a count whose leg was
+still in flight is emitted as `not-run` — the value alone, with the reason in the payload
+(`<error_handling>`). This is the one token the counts admit besides a number, and it exists so
+a round with a missing leg still has a schema-conformant hand-back to emit.
 
 ⚠️ **The hand-back carries no rules**: no bucket definitions, no step text, no render. Those
 live in the step files and `docs/closer-classes.md`.

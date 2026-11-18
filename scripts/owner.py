@@ -126,8 +126,14 @@ _ABSENT_WORD = re.compile(r"ABSENT\b")
 #: ⚠️ `IDLE` and `WORKING` must be here: a word missing from this list reads as
 #: `UNREADABLE`, so a live `IDLE` manager read as "cannot tell" instead of an owner — the
 #: opening for a second writer that step 9 below exists to close.
+#: `EXITED` is the answer `--state` gained 2026-11-18: the arm record is FRESH but the session
+#: it names is gone. It belongs here for the same reason `IDLE` and `WORKING` do — a word
+#: missing from this list reads as `UNREADABLE`, so a manager the instrument positively
+#: identified as exited would be reported as "the probe could not answer", which is a
+#: different fact and the wrong one to hand a reader deciding whether to open a session.
+#: It is not a restart: an exited session cannot be restarted, only resumed.
 LOOP_STATES = ("OK", "WORKING", "LAPSED", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED",
-               "INVALID", "WRONG-BRANCH")
+               "INVALID", "WRONG-BRANCH", "EXITED")
 PROBE_FAILED = "UNREADABLE"
 
 #: `manager-liveness.py`'s tiers. A loop record carries its branch in the slug
