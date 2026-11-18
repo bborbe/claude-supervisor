@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.346.0
 
 - fix: **the covered-subject invariant runs the daemon's Go gate instead of the retired vault script.** `sweep-gate.py` was ported into `bborbe/claude-wrapper` and deleted from the vault on 2026-11-18, so `commands/steps/covered-subject-invariant.md` now invokes `claude-wrapper -sweep-gate-mode invariant -sweep-gate-topic '<subject>' -sweep-gate-vault '<vault>'`. ⚠️ **The exit contract is the port's, and it differs from the script's:** `Invariant` returns `0` on every path and prints a payload only when it fires, so a non-zero exit now means the binary is missing or unrunnable. **The port never emits `3`** — `pkg/sweepgate/mode_invariant.go` says so in its own doc comment, because `3` is reserved for the caller — so the old "another layer holds the ask" arm no longer describes anything this command can receive and is retired rather than folded into "unavailable". The `python3` exit-`2` and `sweep-gate.py --tick` references below the edited block are corrected in the same pass. Change set: `commands/steps/covered-subject-invariant.md`, `CHANGELOG.md`.
 
