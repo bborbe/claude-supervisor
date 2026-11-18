@@ -443,12 +443,17 @@ class Liveness(unittest.TestCase):
 
     def test_an_historic_outage_does_not_inflate_the_limit_forever(self):
         # One long stop stays in the retained history. Uncapped, its p90 lets that
-        # subject fire at 13.4x its own median for ever; the cap keeps it bounded.
+        # subject fire at 13.4x its own median for ever. The idle-break cut now
+        # removes the stop from the population outright — the ring below keeps a
+        # 3-span gap-free tail — so the period is the real 900 s rather than the
+        # 2250 s the 2.5x cap used to bound it to. The cap still governs a ring whose
+        # tail is too short to measure; see
+        # `test_observed_period_keeps_the_capped_reading_when_the_tail_is_too_short`.
         self.plant_arms("Manager Layer", [90000, 2700, 1800, 900])
         self.arm("Manager Layer", 900, age=1000)
         state, detail = self.m.classify("goal--manager-layer", time.time())
         self.assertEqual(state, "OK")
-        self.assertRegex(detail, r"period=225\d+s")
+        self.assertIn("period=900s", detail)
 
     def test_rearm_after_a_stand_down_resets_the_history(self):
         # The outage gap must never count as cadence. It cannot be filtered at read
@@ -509,6 +514,25 @@ class Liveness(unittest.TestCase):
         # every machine today is head-only, and their periods must be untouched.
         self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
         self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
+    def test_observed_period_ignores_an_idle_gap_in_the_ring(self):
+        # A manager that stops overnight and resumes writes its stop into the 12-arm
+        # window. Both the p90 and the median follow it, so the limit stretches until a
+        # genuinely stopped loop reads OK for most of a day — measured 2026-11-18:
+        # period=23997 s from a 17 h gap, limit=24177 s (~6.7 h). The ring below is two
+        # overnight gaps followed by a 900 s burst: before the fix the p90 is 61200 and
+        # the 2.5x cap on a 900 s median gives 2250 s; after it, the gap-free tail
+        # gives the cadence the manager is actually running.
+        self.plant_arms("Manager Layer", [125100, 63900, 2700, 1800, 900, 0])
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
+    def test_observed_period_keeps_the_capped_reading_when_the_tail_is_too_short(self):
+        # A ring that has just woken up carries one idle break and only two post-gap
+        # spans. Two spans are noise, so the old capped reading stands rather than the
+        # period dropping to None — None moves every caller onto the declared interval,
+        # a bigger change than the gap it would be correcting for.
+        self.plant_arms("Manager Layer", [63000, 62100, 61200, 0])
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 2250)
 
     def plant_tail_store(self, topic, epochs):
         """Mark epochs as tail beats in `<slug>.tail`, leaving the ring untouched."""
@@ -718,7 +742,10 @@ class Liveness(unittest.TestCase):
         self.arms(self.WEEKLY, [None] * 12)
         state, detail = self.limit_at(3757, 3600)
         self.assertEqual(state, "OK", detail)
-        self.assertIn("limit=3937s", detail)  # uncapped code says 2877
+        # The ring carries a 30 541 s idle gap, so the period is measured from the
+        # gap-free tail: 3750 s, not the 3937 s the whole-ring p90 gave before the
+        # idle-break cut. The floor still applies — that is what this test asserts.
+        self.assertIn("limit=3930s", detail)
 
     def test_a_legacy_window_is_floored_by_its_gap_quantile(self):
         # The same history, one arm later: the ring is now 11 legacy lines plus one
@@ -727,7 +754,8 @@ class Liveness(unittest.TestCase):
         self.arms(self.WEEKLY, [None] * 11 + [3600])
         state, detail = self.limit_at(3757, 3600)
         self.assertEqual(state, "OK", detail)
-        self.assertIn("limit=3937s", detail)
+        # Gap-free tail, as in the sibling above: 3750 s, not 3937 s.
+        self.assertIn("limit=3930s", detail)
 
     def test_arm_keeps_each_lines_own_interval(self):
         # SC1(c). The rise can only fire if `arm` PRESERVES earlier lines' intervals.
@@ -774,13 +802,15 @@ class Liveness(unittest.TestCase):
     def test_a_declared_interval_that_never_ticks_at_it_is_not_floored(self):
         # SC2(b). deploy-and-merge declares 3600 and ticks at ~900. Neither rise limb
         # fires — no recorded interval below 3600, and its p75 is 994 s against the
-        # 1800 s threshold — so the limit stays where it is today.
+        # 1800 s threshold — so the floor does not apply. Its ring also carries a
+        # 19 100 s idle gap, so the period comes from the gap-free tail: 1435 s, not
+        # the 1560 s the whole-ring p90 gave before the idle-break cut.
         for label, intervals in (("recorded", [3600] * 12), ("legacy", [None] * 12)):
             with self.subTest(window=label):
                 self.arms(self.DEPLOY, intervals)
                 state, detail = self.limit_at(1800, 3600)
                 self.assertEqual(state, "STALE", detail)
-                self.assertIn("limit=1740s", detail)
+                self.assertIn("limit=1615s", detail)
 
     def test_the_first_arm_after_deploy_does_not_loosen_a_mixed_file(self):
         # SC2(d). Every live file becomes a mixed legacy+new file at its first post-
@@ -790,7 +820,8 @@ class Liveness(unittest.TestCase):
         self.arms(self.DEPLOY + [self.DEPLOY[-1] + 900], [None] * 12 + [3600])
         state, detail = self.limit_at(1800, 3600)
         self.assertEqual(state, "STALE", detail)
-        self.assertIn("limit=1740s", detail)
+        # Gap-free tail, as in SC2(b): 1372 s, so 1552 s rather than 1740 s.
+        self.assertIn("limit=1552s", detail)
 
     def test_a_rise_then_a_shorter_actual_cadence_is_not_floored(self):
         # SC2(e). A real rise, but the manager keeps ticking at 900. The first completed

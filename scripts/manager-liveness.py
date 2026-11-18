@@ -240,6 +240,7 @@ BRANCHES = ("goal", "topic", "fleet", "task")
 SLACK = 180  # seconds: the tick's own runtime plus ordinary jitter before a re-arm lands
 PERIOD_CAP = 2.5  # the p90 period estimate never exceeds this multiple of the median
 ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable percentile
+IDLE_GAP_SECONDS = 7200  # a span longer than this is an idle gap, never a round cadence
 # The observed period never stretches the limit past this multiple of the DECLARED
 # cadence. Without the bound a manager that stops rounding teaches the record its own
 # silence: The Attention Board goal declared 900 s, its gaps grew to a 51 030 s median,
@@ -652,6 +653,31 @@ def observed_period(s: str):
     gaps = sorted(gap for gap, _ in spans)
     p90 = percentile(gaps, 0.90)
     med = median(gaps)
+    # ⚠️ A ring that straddles an idle gap measures the IDLE, not the cadence. A
+    # manager that stops overnight and resumes writes one span of ~17 h into its
+    # 12-arm window; the p90 and the median both follow it, and the limit stretches
+    # until a genuinely stopped loop reads OK for most of a day (measured 2026-11-18:
+    # period=23997 s from a 17 h gap, limit=24177 s ≈ 6.7 h). Cut the ring at its
+    # last idle break and measure only the gap-free tail.
+    #
+    # The break test is ABSOLUTE, not a multiple of the observed cadence. A relative
+    # threshold has to estimate the cadence first, and on this population that
+    # estimate is exactly what the gap corrupts: a p25-based threshold collapsed on
+    # rings carrying tail beats and trimmed ordinary rings, moving four tests that
+    # have nothing to do with idle gaps. Two hours is unambiguous — no round cadence
+    # in this fleet is near it, and every genuine idle gap is far past it.
+    #
+    # A tail too short to measure keeps the old capped reading rather than returning
+    # None: None moves every caller onto the declared interval, a bigger change than
+    # the gap it would be correcting for.
+    breaks = [i for i, (gap, _) in enumerate(spans) if gap > IDLE_GAP_SECONDS]
+    if breaks:
+        tail = spans[breaks[-1] + 1:]
+        if len(tail) >= 3:
+            spans = tail
+            gaps = sorted(gap for gap, _ in spans)
+            p90 = percentile(gaps, 0.90)
+            med = median(gaps)
     declared = declared_interval(s)
     if declared and period_floor_applies(spans, declared):
         return max(declared, min(p90, PERIOD_CAP * max(med, declared)))
