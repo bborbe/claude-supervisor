@@ -343,6 +343,29 @@ def task_dirs_for(cwd, vault_root=None, names=None):
     return dirs
 
 
+#: Task-folder names probed for a vault that `vault-cli` config does not list — the same
+#: tuple `fleet-sessions.py:108` uses. An absence proof must cover every vault the fleet
+#: sweep searches, not only the configured ones.
+FLEET_PROBE_DIRS = ("25 Tasks", "24 Tasks", "24 Goals", "23 Goals", "tasks")
+
+
+def fleet_task_dirs(cwd, vault_root=None):
+    """Every task directory the FLEET resolves anchors in — the union, never a subset.
+
+    `task_dirs_for(cwd)` alone answers from `vault-cli` config, so a vault missing from
+    that config contributes nothing and its sessions look unanchored. The sweep that
+    decides what may be closed probes every vault under the Obsidian root, falling back to
+    `FLEET_PROBE_DIRS` for unconfigured ones, so an absence proof taken over the narrower
+    configured set would kill a live anchored tab. Union both: the root-wide probe and the
+    configured scan, which also reaches a configured vault living outside the root.
+    """
+    dirs = list(task_dirs_for(cwd, vault_root, FLEET_PROBE_DIRS))
+    for d in task_dirs_for(cwd, vault_root):
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
 def _vault_for_cwd(cwd):
     """The configured vault whose path is `cwd` or one of its ancestors, else `None`."""
     if not cwd:
@@ -492,7 +515,7 @@ def find_task(session_id, cwd, vault_root=None):
     for batch in (local, rest):
         if not batch:
             continue
-        own, handoff = _grep_task(session_id, batch)
+        own, handoff, _error = _grep_task(session_id, batch)
         if own is not None:
             return own
         if handed_off is None and handoff is not None:
@@ -500,11 +523,54 @@ def find_task(session_id, cwd, vault_root=None):
     return handed_off
 
 
+def find_task_checked(session_id, cwd, vault_root=None):
+    """`(task, error)` — `find_task`, with a failed SEARCH reported instead of collapsed.
+
+    ⚠️ **`find_task` returns `None` for two different facts**: no page claims the session,
+    and the grep that would have found one timed out or exited ≥ 2. A caller that treats
+    `None` as proof of an absent anchor must use this function instead — closing on an
+    unproven absence kills a live anchored session, the unreadable-vs-absent collapse this
+    module forbids everywhere else. `find_task` keeps its old signature for the callers
+    whose next step is a refusal, where collapsing to `None` fails closed.
+
+    ⚠️ **The search covers `fleet_task_dirs`, not `task_dirs_for`.** A vault missing from
+    `vault-cli` config contributes no `tasks_dir`, so an absence proven over the configured
+    set alone would declare a session in an unconfigured vault unanchored and close a live
+    anchored tab — an absence proof must be as wide as the population it quantifies over.
+    """
+    if not session_id:
+        return None, None
+    dirs = fleet_task_dirs(cwd, vault_root)
+    if not dirs:
+        return None, None
+    local = local_task_dirs(cwd)
+    rest = [d for d in dirs if d not in local]
+    handed_off = None
+    error = None
+    for batch in (local, rest):
+        if not batch:
+            continue
+        own, handoff, err = _grep_task(session_id, batch)
+        if err:
+            error = err
+        if own is not None:
+            return own, None
+        if handed_off is None and handoff is not None:
+            handed_off = handoff
+    return handed_off, error
+
+
 def _grep_task(session_id, dirs, timeout=15):
-    """`(own, handed_off)` for one grep pass over `dirs`; either may be `None`.
+    """`(own, handed_off, error)` for one grep pass over `dirs`; each of the first two may
+    be `None`.
 
     Split out of `find_task` so the two passes share one matcher and the ownership rule
     (`claude_session_id` beats a `metrics_sessions` membership) stays in a single place.
+
+    ⚠️ **`error` is not decoration.** A timeout or a grep exit ≥ 2 returns no matches, which
+    is indistinguishable from "no task claims this session" unless the failure is carried
+    out separately — and a caller that reads the absence as proof closes a live anchored
+    session.
     """
     # ⚠️ **ripgrep when it exists, and the difference is not cosmetic.** `grep -rl` over the
     # 11 375-file `private-personal/25 Tasks` measured **19.6 s** on 2026-11-12 — past this
@@ -519,16 +585,26 @@ def _grep_task(session_id, dirs, timeout=15):
             else ["grep", "-rl", "--fixed-strings", session_id, *dirs])
     try:
         found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except Exception:
-        return None, None
+    except Exception as exc:
+        return None, None, f"task lookup failed ({exc})"
+    # ⚠️ **Parse the stdout BEFORE judging the exit code.** `grep -rl` can exit ≥ 2 and
+    # still have printed every match it found before the error — discarding that output
+    # would lose a task that is plainly there, which is the failure the exit-code check is
+    # meant to prevent, arrived at from the other side.
     handed_off = None
     for path in sorted((found.stdout or "").splitlines()):
         fm = frontmatter(path)
         if (fm.get("claude_session_id") or "").strip() == session_id:
-            return (path, fm, False), None
+            return (path, fm, False), None, None
         if handed_off is None and session_id in metrics_session_ids(path):
             handed_off = (path, fm, True)
-    return None, handed_off
+    if handed_off is not None:
+        return None, handed_off, None
+    # No match AND a failed search is the one combination that must not read as absence:
+    # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
+    if found.returncode not in (0, 1):
+        return None, None, f"task lookup failed (exit {found.returncode})"
+    return None, None, None
 
 
 def is_future(value, today):
