@@ -30,6 +30,7 @@ round for the arm.
 
 import argparse
 import datetime
+import importlib.util
 import json
 import statistics
 import sys
@@ -128,30 +129,85 @@ def segment(records: list[dict], prefix: str) -> list[dict]:
     return rounds
 
 
+_MANAGER_RECEIPT = None
+
+
+def _manager_receipt():
+    """`manager-receipt` loaded as a module — one clock parser for both round tools.
+
+    Both scripts report on the same rounds, so a second copy of the parser is a drift
+    risk: a fix to one would leave the other reading a different window. A sibling
+    importlib load is this repo's convention for a shared reader across standalone
+    scripts (`check-handback-size.py::load_legs` loads `check-handback-keys.py` the
+    same way). Loaded once and cached — the parse runs per record.
+    """
+    global _MANAGER_RECEIPT
+    if _MANAGER_RECEIPT is None:
+        path = Path(__file__).resolve().parent / "manager-receipt.py"
+        spec = importlib.util.spec_from_file_location("manager_receipt", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _MANAGER_RECEIPT = module
+    return _MANAGER_RECEIPT
+
+
+def record_epoch(record: dict) -> float | None:
+    """The record's timestamp as an epoch, or None when it carries no usable clock."""
+    return _manager_receipt()._record_epoch(record)
+    stamp = record.get("timestamp")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def window_bytes(records: list[dict], start: float, end: float) -> int:
     """Main-thread bytes whose record timestamp falls in `[start, end]`.
 
     ⚠️ **This is the only exact measurement this tool offers**, and it needs the
     receipt's `round_ended_at`. Every other mode infers where a round ended — the next
     fire, or the first closer — and each inference charges unrelated work to the round
-    (see `segment`'s note and `manager-receipt.py --finish`). A record with no
-    parsable timestamp is counted, not dropped: an unreadable clock is not evidence
-    that the record was outside the window.
+    (see `segment`'s note and `manager-receipt.py --finish`).
+
+    ⚠️ **A record with no parsable timestamp is SKIPPED, not counted.** An unreadable
+    clock is not evidence that the record was *inside* the window either, and the
+    untimestamped population is session-wide harness state rather than round content:
+    measured 2026-11-18 on the live Fleet Manager, 320 `api-request-blob` records
+    carried **726.7 KB**, and counting them charged that constant to every window.
+    Each reading sat 726.7 KB high: a round that truly cost **155.8 KB** read
+    **882.5 KB**, and the newest round on `0.345.0` read **774.1 KB** against a true
+    **47.4 KB**, under the 70 KB bound. The median reported at the time, 758.7 KB
+    against that bound, read as a 10.8× failure of a criterion the newest round met.
+    `unattributed_bytes` reports what was skipped, so the omission is never silent.
     """
     total = 0
     for record in records:
         if record.get("isSidechain"):
             continue
-        stamp = record.get("timestamp")
-        if isinstance(stamp, str):
-            try:
-                ts = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                ts = None
-            if ts is not None and not (start <= ts <= end):
-                continue
+        ts = record_epoch(record)
+        if ts is None or not (start <= ts <= end):
+            continue
         total += record_bytes(record)
     return total
+
+
+def unattributed_bytes(records: list[dict]) -> int:
+    """Main-thread bytes the WINDOW mode cannot place in a round — no parsable timestamp.
+
+    Reported so a window reading is never silently short. A large value is the signal
+    that the transcript carries session-wide harness state rather than round content;
+    see `window_bytes` for the measurement that made this the default.
+
+    ⚠️ Scoped to windows, deliberately: `segment` never reads a timestamp, so in the
+    fire-to-fire mode an untimestamped record is still charged positionally to the
+    round that follows it. This helper describes the receipt mode only.
+    """
+    return sum(
+        record_bytes(record) for record in records
+        if not record.get("isSidechain") and record_epoch(record) is None
+    )
 
 
 def load_receipt(path: Path) -> tuple[float, float] | None:
@@ -226,7 +282,15 @@ def main(argv=None) -> int:
             return 2
         start, end = window
         total = window_bytes(records, start, end)
+        skipped = unattributed_bytes(records)
         kb = total / 1024
+        if skipped:
+            print(
+                f"note: {skipped} B ({skipped / 1024:.1f} KB) of untimestamped records "
+                f"could not be placed in any round and are excluded — session-wide "
+                f"harness state, not this round's cost.",
+                file=sys.stderr,
+            )
         if args.json:
             print(json.dumps({
                 "mode": "receipt",
@@ -234,6 +298,7 @@ def main(argv=None) -> int:
                 "end": datetime.datetime.fromtimestamp(end).isoformat(),
                 "bytes": total,
                 "kb": round(kb, 1),
+                "unattributed_bytes": skipped,
             }, indent=1))
             return 0
         print(
