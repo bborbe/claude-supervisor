@@ -129,8 +129,12 @@ POST_TIMEOUT = 60
 # `WORKING` (no round, but the transcript moved) is not a lapse either, and neither is
 # `LAPSED` — past the hard cap the arm file is dead while the transcript still moves. LAPSED
 # names that state so the keep-alive leg can count it; it is not in any restart set.
+#: `EXITED` (2026-11-18) is a FRESH arm record naming a session that is gone. It is here so a
+#: positive identification is not folded into `PROBE_FAILED` — "this manager exited" and "the
+#: probe could not answer" are different facts. Not in any restart set, for the same reason as
+#: `WORKING`/`LAPSED`: an exited session cannot be restarted, only resumed.
 CADENCE_STATES = ("OK", "WORKING", "LAPSED", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED",
-                  "INVALID", "WRONG-BRANCH")
+                  "INVALID", "WRONG-BRANCH", "EXITED")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
@@ -416,8 +420,12 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         # alive and writing, but its arm file is past the hard cap, so no round is coming and
         # it covers nothing. Counting it as coverage is how a dead goal-manager loop is
         # suppressed by a live-looking topic manager.
+        # ⚠️ `EXITED` too: the arm record is fresh but the session it names is gone, so it
+        # covers nothing. It is inert here today — reaching this check needs a LIVE session
+        # (≤60 s heartbeat) which cannot coexist with `work > limit` (≥ ~480 s) — but the two
+        # membership lists are kept consistent rather than relying on that coincidence.
         if cadence_state(topic_stem, "topic") in (
-            "STOPPED", "LAPSED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
+            "STOPPED", "LAPSED", "STALE", "UNARMED", "WRONG-BRANCH", "EXITED", PROBE_FAILED
         ):
             continue
         return True
