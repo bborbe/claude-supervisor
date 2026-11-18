@@ -29,6 +29,7 @@ round for the arm.
 """
 
 import argparse
+import datetime
 import json
 import statistics
 import sys
@@ -127,6 +128,44 @@ def segment(records: list[dict], prefix: str) -> list[dict]:
     return rounds
 
 
+def window_bytes(records: list[dict], start: float, end: float) -> int:
+    """Main-thread bytes whose record timestamp falls in `[start, end]`.
+
+    ⚠️ **This is the only exact measurement this tool offers**, and it needs the
+    receipt's `round_ended_at`. Every other mode infers where a round ended — the next
+    fire, or the first closer — and each inference charges unrelated work to the round
+    (see `segment`'s note and `manager-receipt.py --finish`). A record with no
+    parsable timestamp is counted, not dropped: an unreadable clock is not evidence
+    that the record was outside the window.
+    """
+    total = 0
+    for record in records:
+        if record.get("isSidechain"):
+            continue
+        stamp = record.get("timestamp")
+        if isinstance(stamp, str):
+            try:
+                ts = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                ts = None
+            if ts is not None and not (start <= ts <= end):
+                continue
+        total += record_bytes(record)
+    return total
+
+
+def load_receipt(path: Path) -> tuple[float, float] | None:
+    """`(round_started_at, round_ended_at)` from a receipt, or None when either is absent."""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    start, end = d.get("round_started_at"), d.get("round_ended_at")
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return None
+    return float(start), float(end)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--transcript", required=True, type=Path,
@@ -134,6 +173,12 @@ def main(argv=None) -> int:
     parser.add_argument("--prompt-prefix", default="/supervisor:fleet-drive",
                         help="the round prompt a scheduler fire must start with")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of lines")
+    parser.add_argument(
+        "--receipt",
+        type=Path,
+        help="measure the EXACT round window from this receipt's round_started_at -> "
+             "round_ended_at, instead of inferring boundaries from fires or closers",
+    )
     parser.add_argument(
         "--include-open",
         action="store_true",
@@ -145,7 +190,39 @@ def main(argv=None) -> int:
     if not args.transcript.exists():
         print(f"transcript not found: {args.transcript}", file=sys.stderr)
         return 2
-    rounds = segment(load(args.transcript), args.prompt_prefix)
+    records = load(args.transcript)
+
+    if args.receipt is not None:
+        window = load_receipt(args.receipt)
+        if window is None:
+            print(
+                f"{args.receipt} carries no round_started_at / round_ended_at pair. A "
+                f"receipt with only a start cannot say where the round ended, which is "
+                f"the whole question — run `manager-receipt.py --finish` on that round "
+                f"first. Inferring the end is what produced three answers from one "
+                f"dataset.",
+                file=sys.stderr,
+            )
+            return 2
+        start, end = window
+        total = window_bytes(records, start, end)
+        kb = total / 1024
+        if args.json:
+            print(json.dumps({
+                "mode": "receipt",
+                "start": datetime.datetime.fromtimestamp(start).isoformat(),
+                "end": datetime.datetime.fromtimestamp(end).isoformat(),
+                "bytes": total,
+                "kb": round(kb, 1),
+            }, indent=1))
+            return 0
+        print(
+            f"round {datetime.datetime.fromtimestamp(start):%Y-%m-%dT%H:%M:%S}"
+            f" -> {datetime.datetime.fromtimestamp(end):%H:%M:%S}  {total} B  {kb:.1f} KB"
+        )
+        return 0
+
+    rounds = segment(records, args.prompt_prefix)
     if rounds and not args.include_open:
         rounds = [r for r in rounds if not r.get("open")]
         if not rounds:

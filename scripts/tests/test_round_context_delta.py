@@ -146,5 +146,74 @@ class CliTest(unittest.TestCase):
         self.assertIn("transcript not found", result.stderr)
 
 
+class ReceiptWindowTest(unittest.TestCase):
+    """`--receipt`: the only exact measurement — `round_started_at -> round_ended_at`.
+
+    Every other mode infers where a round ended and charges unrelated work to it:
+    measured 2026-11-18 on one transcript, 75.4 KB by the next fire, 8.3 KB by the
+    first closer, 233.1 KB after the delegate under the same rule.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = pathlib.Path(self._tmp.name)
+
+    def write(self, name, content):
+        p = self.dir / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def transcript(self):
+        import datetime as dt
+        def iso(h, m, s):
+            return dt.datetime(2026, 11, 18, h, m, s).isoformat() + "Z"
+        lines = [
+            {"type": "assistant", "timestamp": iso(9, 0, 0),
+             "message": {"content": [{"type": "text", "text": "x" * 500}]}},   # before
+            {"type": "assistant", "timestamp": iso(10, 0, 5),
+             "message": {"content": [{"type": "text", "text": "y" * 2048}]}},  # inside
+            {"type": "assistant", "timestamp": iso(10, 0, 30),
+             "message": {"content": [{"type": "text", "text": "z" * 1024}]}},  # inside
+            {"type": "assistant", "timestamp": iso(11, 0, 0),
+             "message": {"content": [{"type": "text", "text": "w" * 4000}]}},  # after
+        ]
+        return self.write("t.jsonl", "\n".join(json.dumps(x) for x in lines))
+
+    def receipt(self, **extra):
+        import datetime as dt
+        # ⚠️ UTC, matching the transcript's `…Z` stamps. A naive local datetime here
+        # shifts the window by the host's offset and the fixture measures the wrong
+        # records — which is what this test caught on itself.
+        utc = dt.timezone.utc
+        d = {"round_started_at": dt.datetime(2026, 11, 18, 10, 0, 0, tzinfo=utc).timestamp()}
+        if "end" in extra:
+            d["round_ended_at"] = dt.datetime(2026, 11, 18, 10, 1, 0, tzinfo=utc).timestamp()
+        return self.write("r.json", json.dumps(d))
+
+    def run_cli(self, transcript, receipt, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--transcript", str(transcript),
+             "--receipt", str(receipt), *args],
+            capture_output=True, text=True)
+
+    def test_measures_only_the_window(self):
+        result = self.run_cli(self.transcript(), self.receipt(end=True))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3072 B", result.stdout)   # 2048 + 1024, not 500 or 4000
+
+    def test_json_shape(self):
+        result = self.run_cli(self.transcript(), self.receipt(end=True), "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["mode"], "receipt")
+        self.assertEqual(payload["bytes"], 3072)
+
+    def test_a_receipt_without_an_end_is_an_error(self):
+        result = self.run_cli(self.transcript(), self.receipt())
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no round_started_at / round_ended_at pair", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

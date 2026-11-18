@@ -1015,6 +1015,31 @@ def start(topic: str, branch: str = "") -> int:
     return 0
 
 
+def finish(topic: str, branch: str = "") -> int:
+    """Close the round: stamp `round_ended_at` on the receipt.
+
+    ⚠️ **The end is what makes a round measurable, and its absence is not a detail.**
+    A receipt carrying only `round_started_at` leaves every consumer to infer where a
+    round ended — the next fire, or the first closer — and each inference charges
+    unrelated work to the round. Measured 2026-11-18 on one transcript: **75.4 KB**
+    bounding by the next fire, **8.3 KB** bounding by the first closer, and **233.1 KB**
+    after the delegate under the same closer rule. Three answers, one dataset, no
+    measurement among them. `round_started_at → round_ended_at` is the only window that
+    is the round.
+
+    Refused, not invented, when no round is open: an end with no start names nothing.
+    """
+    s = slug(topic, branch)
+    d = read_receipt(s)
+    if not d.get("round_started_at"):
+        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    d["round_ended_at"] = time.time()
+    write_atomic(path(s), json.dumps(d) + "\n")
+    print(f"finished {s}")
+    return 0
+
+
 def record(topic: str, branch: str, step: str, artifact: str) -> int:
     s = slug(topic, branch)
     d = read_receipt(s)
@@ -1656,6 +1681,8 @@ def main() -> int:
     )
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--start", action="store_true", help="begin a round (manager, tick head)")
+    mode.add_argument("--finish", action="store_true",
+                      help="close the round: stamp round_ended_at (manager, round tail)")
     mode.add_argument("--record", action="store_true", help="record a step's artifact")
     mode.add_argument("--check", action="store_true", help="validate the round (manager, tail)")
     mode.add_argument("--debt", action="store_true",
@@ -1787,6 +1814,8 @@ def main() -> int:
         return record_outcome(subject, a.goal, a.outcome, a.verdict or "")
     if a.start:
         return start(subject, a.branch)
+    if a.finish:
+        return finish(subject, a.branch)
     if not a.step or not a.path:
         ap.error("--record needs --step and --path")
     return record(subject, a.branch, a.step, a.path)
