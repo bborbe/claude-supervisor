@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.339.1
 
 - fix: **a failed sweep now says why it failed.** The failure path caught `TimeoutExpired / ValueError / OSError` and printed one generic line, so the reason was thrown away — and four separate theories about the same failure (a blocking read, the enumeration's cost, host load, the interpreter) were all plausible and all wrong for want of the actual error. It now logs the return code and the subprocess's stderr on a non-zero exit, the timeout value on a timeout, the exception on a start failure, and the first bytes of stdout when it is not JSON. No behaviour change beyond the message.
 
