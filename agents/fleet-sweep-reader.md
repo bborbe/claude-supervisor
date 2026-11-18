@@ -84,10 +84,10 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 7b. **Render the jump link on every row the caller hands over — this is what keeps the per-row pane read out of the manager's context.** The manager used to resolve one pane per `ESCALATION` row itself (`${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` Step 3b, `commands/fleet-drive.md` step 5); that read now happens here, once, using the same two scripts the sweep already has.
 
    ```bash
-   python3 $P/jump-link.py "$(python3 $P/who-needs-me.py --pane-for <sid8>)"   # → the rendered link
+   python3 $P/jump-link.py "$(curl -sS --max-time 15 "${ATTENTION_STORE_URL:-http://localhost:18080}/api/1.0/who-needs-me" | jq -r --arg s "<sid8>" '[.sessions[] | select((.session_id // "") | startswith($s)) | .pane // ""] | map(select(. != "")) | if length == 1 then .[0] else "" end')"   # → the rendered link
    ```
 
-   `who-needs-me.py --pane-for <sid8>` prints the bare pane id on success and exits non-zero with a reason on failure; `jump-link.py` turns that id into the one-line rendered link (a clickable URL, or the `/supervisor:jump <N>` fallback when the token is absent). ⚠️ **Never pass `--label`** — it costs an extra pane-list query per row.
+   The `jq` filter prints the bare pane id when **exactly one** live session matches the prefix, and `""` otherwise — ⚠️ **an ambiguous prefix never guesses** (the rule `--pane-for` carried), and `jump-link.py` rejects `""` with `pane id must be an integer`, exit 2, so a failed resolution stays loud and emits no link. ⚠️ **Replaced a per-row `python3 who-needs-me.py --pane-for` spawn** (2026-11-18): the answer is in the service's `sessions[]`, and `curl` + `jq` costs no interpreter. ⚠️ **Never pass `--label`** — it costs an extra pane-list query per row.
 
    Three cases, and the reason string is **never** emitted without an attempt:
 
