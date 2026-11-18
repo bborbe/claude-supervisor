@@ -107,8 +107,8 @@
       "enum": ["LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED", "none"]
     },
     "branch": {
-      "description": "Producer: `resolve_branch()`'s ordered first-match list — degraded → unknown → direct → skip-for-role:manager → open-manager → jump → resume → skip → held-owner-live → create. The order IS the partition: an unanswerable probe outranks everything, EXCEPT that a known owner turns it into `degraded` (the registry proved the process alive while the heartbeat says the session is not working, so the row is owned-and-degraded, not unknown), and `held-owner-live` sits after every row-own branch so only a would-be CREATE is suppressed.",
-      "enum": ["degraded", "unknown", "direct", "skip", "open-manager", "jump", "resume", "held-owner-live", "create"]
+      "description": "Producer: `resolve_branch()`'s ordered first-match list — degraded → unknown → direct → skip-for-role:manager → open-manager → jump → skip-for-LIVE → parked → resume → held-owner-live → create. The order IS the partition: an unanswerable probe outranks everything, EXCEPT that a known owner turns it into `degraded` (the registry proved the process alive while the heartbeat says the session is not working, so the row is owned-and-degraded, not unknown), `parked` sits after every LIVE branch so an open session is never counted as waiting, and `held-owner-live` sits after every row-own branch so only a would-be CREATE is suppressed.",
+      "enum": ["degraded", "unknown", "direct", "skip", "open-manager", "jump", "parked", "resume", "held-owner-live", "create"]
     },
     "pane": {
       "description": "Producer: `who-needs-me.py`'s `pane_for()`, which PRINTS the pane — never the session registry or the heartbeat store, neither of which carries one. Null when no pane resolves.",

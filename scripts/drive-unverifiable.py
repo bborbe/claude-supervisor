@@ -101,7 +101,6 @@ MAX_ACTIONS = 3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LEDGER_SCRIPT = os.path.join(HERE, "drive-ledger.py")
-PANE_SCRIPT = os.path.join(HERE, "who-needs-me.py")
 LINK_SCRIPT = os.path.join(HERE, "jump-link.py")
 
 #: A closer line begins the line it renders on. Matched with `startswith` after stripping
@@ -135,22 +134,44 @@ def read_ledger(script=None):
         return None, "drive-ledger.py read emitted unparseable JSON: %s" % exc
 
 
-def resolve_pane(sid, script=None):
+def resolve_pane(sid, script=None, endpoint=None, timeout=15):
     """The WezTerm pane id for a session, or "" when none resolves.
 
-    Delegates to `who-needs-me.py --pane-for`, the plugin's one session→pane resolver: it
-    resolves a prefix, refuses an ambiguous one rather than guessing, and reads the
-    registry at call time. A second resolver here would drift from the sweep's.
+    Read from `GET /api/1.0/who-needs-me` — the service's own session→pane answer —
+    rather than by spawning `who-needs-me.py --pane-for` (changed 2026-11-18). The
+    spawn cost a fresh interpreter per session per round, and the service already
+    holds the registry and the pane list the resolver reads.
+
+    ⚠️ **An ambiguous prefix resolves to "" rather than the first match**, the rule the
+    spawned resolver states: two sessions sharing a prefix are not interchangeable, and
+    a guessed pane links the operator to the wrong tab. A read that fails is "" too —
+    the caller renders "no pane resolves", never a wrong one.
+
+    `script` is accepted and IGNORED: callers and tests still pass it, and removing the
+    parameter would break them for no gain.
     """
-    out = subprocess.run(
-        [sys.executable, str(script or PANE_SCRIPT), "--pane-for", sid],
-        capture_output=True,
-        text=True,
-    )
-    if out.returncode != 0:
+    import urllib.request
+
+    base = (
+        endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080"
+    ).rstrip("/")
+    try:
+        with urllib.request.urlopen(
+            base + "/api/1.0/who-needs-me", timeout=timeout
+        ) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except (OSError, ValueError):
         return ""
-    lines = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
-    return lines[-1] if lines else ""
+    if not isinstance(payload, dict):
+        return ""
+    hits = [
+        str(row.get("pane")).strip()
+        for row in (payload.get("sessions") or [])
+        if isinstance(row, dict)
+        and str(row.get("session_id") or "").startswith(sid)
+        and str(row.get("pane") or "").strip()
+    ]
+    return hits[0] if len(hits) == 1 else ""
 
 
 def pane_text(pane):

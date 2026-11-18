@@ -109,9 +109,50 @@ class Sweep(_Base):
             json.dumps({"unrecorded": [], "unknown": [{"name": "x"}]}))
         self.assertEqual(k.sweep(NOW), ({}, 1))
 
+    def test_a_recorded_row_lands_in_the_watch_set(self):
+        """A COVERED pane must be watched — it is the one that can newly fail.
+
+        Building the watch set from `unrecorded` + `unknown` alone watches only the
+        panes already broken, so the first death of a healthy writer stays invisible
+        until the next full sweep (up to `REFRESH_SECONDS`). Measured 2026-11-18: the
+        watch set was empty while twelve manager panes carried live writers.
+        """
+        self.write_log()
+        k.subprocess.run = lambda argv, **kw: _Done(json.dumps(
+            {"unrecorded": [], "unknown": [],
+             "recorded": [{"pane": "7", "session_id": "sess", "name": "Fleet Manager"}]}))
+        panes, unknown = k.sweep(NOW)
+        self.assertIn("7", panes)
+        self.assertEqual(unknown, 0)
+
     def test_unrunnable_sweep_is_none(self):
         k.subprocess.run = lambda argv, **kw: _Done("", returncode=1)
         self.assertIsNone(k.sweep(NOW))
+
+    def test_a_nonzero_exit_names_the_code_and_stderr(self):
+        """The reason must reach the log: four theories about this failure were wrong without it."""
+        import io as _io
+        from contextlib import redirect_stderr
+        done = _Done("", returncode=2)
+        done.stderr = "boom: registry unreadable"
+        k.subprocess.run = lambda argv, **kw: done
+        err = _io.StringIO()
+        with redirect_stderr(err):
+            self.assertIsNone(k.sweep(NOW))
+        self.assertIn("exited 2", err.getvalue())
+        self.assertIn("registry unreadable", err.getvalue())
+
+    def test_undecodable_output_names_the_failure(self):
+        import io as _io
+        from contextlib import redirect_stderr
+
+        def boom(argv, **kw):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        k.subprocess.run = boom
+        err = _io.StringIO()
+        with redirect_stderr(err):
+            self.assertIsNone(k.sweep(NOW))
+        self.assertIn("could not be decoded", err.getvalue())
 
 
 class Liveness(_Base):

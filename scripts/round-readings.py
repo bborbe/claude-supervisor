@@ -60,7 +60,6 @@ import importlib.util
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 
@@ -92,6 +91,13 @@ DENIAL_TTL = 30 * 60
 # its `answer:` line) or `[   ?]` (neither). Any row marker counts as a gate; which
 # ones resolve to a key is `gate-owner-filter.py`'s `feed_rows`, reused, never re-derived.
 ROW_RE = re.compile(r"^\s*\[\s*(\d+|hst|\?)\s*\]")
+# The kinds the service's `who-needs-me` route returns — `is_open_gate`'s pair. The
+# endpoint already selects them, so this is belt-and-braces: a route that later
+# widened must not silently widen what counts as a gate for a tracked row.
+NEEDS_YOU_KINDS = ("permission", "question")
+# The probe named on a failed read — one home, so the document's `probes` entry and
+# the tests that assert it cannot drift apart.
+FEED_PROBE = "GET /api/1.0/who-needs-me"
 # The `⏰ Ends:` slot, taken from a `Stop` record's `detail`. Non-empty is required:
 # the closer template emits the slot with a blank value when nothing is declared.
 ENDS_RE = re.compile(r"⏰ Ends:\s*(\S.*)$", re.MULTILINE)
@@ -262,56 +268,43 @@ def liveness(session_ids, endpoint, registry_dir):
     return "UNKNOWN"
 
 
-def feed_panes(endpoint=None):
+def feed_panes(endpoint=None, timeout=60):
     """The feed read as one dict: `panes`, `owners`, `orphan_owners`, `state`, `error`.
 
-    `--all` is part of the call, not a preference: the section caps at 20 rows and
-    withholds the rest, so a capped read turns a gated row past the cap into a false
-    `clear` — the defect this verdict exists to remove.
+    Read from `GET /api/1.0/who-needs-me` — the service's own answer — rather than by
+    spawning `who-needs-me.py` (changed 2026-11-18). The spawn cost a fresh interpreter
+    plus 2 788 lines of parsing on every manager round, and the three inputs that work
+    re-derives are all already held by the long-running `attention-controller`.
+
+    ⚠️ **The endpoint returns OPEN gates only, and `--all` is no longer a flag.** The
+    render's 20-row cap — the reason `--all` was mandatory — has no equivalent here: the
+    payload carries every open item, so a gated row can never fall past a cap and read
+    as a false `clear`.
 
     ⚠️ **One retry, then the failure is NAMED — never rendered as a verdict about
-    the rows.** `who-needs-me.py` globs every session's event log and reads the
-    store and transcripts; under load it can exceed the 60 s bound and exit
-    non-zero, and one such miss blanked the whole feed family for a round
-    (measured 2026-11-08 05:06:29Z: `gated=0 · clear=0 · unread=11` for 11 rows,
-    while a direct `who-needs-me.py --section needs-you` in the same minute
-    returned `Needs you (25)`, exit 0; a re-run 39 s later read
-    `gated=1 · clear=10 · unread=0`). A transient that clears in under a minute is
-    exactly what a single retry absorbs; after it, the failure is reported as
-    `error` and every row is honestly `unread` because no feed read succeeded.
+    the rows.** A store read under load can miss once and answer the next time
+    (measured 2026-11-08: a 60 s miss blanked the whole feed family for a round, and
+    a re-run 39 s later read `gated=1 · clear=10 · unread=0`). A transient that clears
+    in under a minute is exactly what a single retry absorbs; after it, the failure is
+    reported as `error` and every row is honestly `unread` because no read succeeded.
 
-    ⚠️ **A fallback render is retried too.** When `who-needs-me.py` answers exit 0
-    from the event log (`STORE_FALLBACK_NOTE`), that read cannot certify a row
-    clear — so one retry is worth its cost, and a store that recovered within the
-    round then produces a complete read instead of a `partial` one. A second
-    fallback is returned as `partial`, named.
+    ⚠️ **A fallback answer is retried too.** When the service answers from the event
+    log (`sources.store` is not `ok`), that read cannot certify a row clear — so one
+    retry is worth its cost, and a store that recovered within the round then produces
+    a complete read instead of a `partial` one. A second fallback is returned as
+    `partial`, named.
     """
-    cmd = [sys.executable, os.path.join(HERE, "who-needs-me.py"),
-           "--section", "needs-you", "--all"]
-    env = None
-    if endpoint:
-        # `--endpoint` is documented as the store URL the caller injects; the
-        # subprocess reads it from the environment, so pass it through here rather
-        # than leaving the flag a no-op.
-        env = dict(os.environ, ATTENTION_STORE_URL=endpoint)
-    fallback_note = _load("who-needs-me").STORE_FALLBACK_NOTE
     last = "no attempt ran"
     fallback = None
     for attempt in range(2):
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                 env=env)
-        except (OSError, subprocess.SubprocessError) as exc:
-            last = f"{type(exc).__name__}: {exc}"
+        payload, error = _feed_payload(endpoint, timeout)
+        if error is not None:
+            last = error
             continue
-        if out.returncode != 0:
-            tail = (out.stderr or out.stdout or "").strip().splitlines()
-            last = f"exit {out.returncode}: {tail[-1] if tail else 'no output'}"
+        if attempt == 0 and _payload_is_fallback(payload):
+            fallback = feed_from_payload(payload)
             continue
-        if attempt == 0 and fallback_note in out.stdout:
-            fallback = parse_feed(out.stdout)
-            continue
-        return parse_feed(out.stdout)
+        return feed_from_payload(payload)
     if fallback is not None:
         return fallback
     return {
@@ -319,12 +312,102 @@ def feed_panes(endpoint=None):
         "owners": {},
         "orphan_owners": [],
         "state": "unread",
-        "error": f"who-needs-me.py --section needs-you --all failed twice: {last}",
+        "error": f"who-needs-me endpoint read failed twice: {last}",
     }
+
+
+def _feed_payload(endpoint=None, timeout=60):
+    """`(payload, error)` — one `GET /api/1.0/who-needs-me`.
+
+    `error` is a string naming the failure, or None on a read that ran. Kept separate
+    from `feed_panes` so the retry loop is exercised without an HTTP server, and so a
+    failed read can never be mistaken for an empty one.
+    """
+    import urllib.request
+
+    base = (
+        endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080"
+    ).rstrip("/")
+    try:
+        with urllib.request.urlopen(
+            base + "/api/1.0/who-needs-me", timeout=timeout
+        ) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except (OSError, ValueError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        return None, "the endpoint returned a body that is not a who-needs-me object"
+    return payload, None
+
+
+def _payload_is_fallback(payload):
+    """True when the service answered from the event log rather than the store."""
+    sources = payload.get("sources") or {}
+    return payload.get("source") != "store" or sources.get("store") != "ok"
+
+
+def feed_from_payload(payload):
+    """The service's JSON as `panes`, `owners`, `orphan_owners`, `state`, `error`.
+
+    Keys are digit panes and `hst:<store item id>` keys, exactly as
+    `gate-owner-filter.feed_rows` derives them from the render, so every downstream
+    hop is unchanged. A headless row's owner is the item's own `session_id` — the
+    value the render carried on its `owner:` line.
+
+    A row that yields NEITHER a key nor an owner is a gate nobody can attribute. That
+    sets `state: partial` — never `read`, because a `clear` from a read that saw an
+    unattributable gate would let that gate's worker read clear. `partial` is still not
+    a whole-family blank: the rows that ARE gated keep their verdict, and only the rows
+    that could own the unattributed gate read `unread`.
+    """
+    filt = _load("gate-owner-filter")
+    panes, owners, orphan_owners = set(), {}, []
+    unkeyed = 0
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") not in NEEDS_YOU_KINDS or item.get("state") != "open":
+            continue
+        owner = item.get("session_id") or ""
+        pane = str(item.get("pane") or "").strip()
+        if pane:
+            panes.add(pane)
+            continue
+        item_id = str(item.get("item_id") or "")
+        if not item_id:
+            if owner:
+                orphan_owners.append(owner)
+            else:
+                unkeyed += 1
+            continue
+        key = filt.HEADLESS_PREFIX + item_id
+        panes.add(key)
+        if owner:
+            owners[key] = owner
+    state = "read" if unkeyed == 0 else "partial"
+    error = None
+    if unkeyed:
+        error = (f"{unkeyed} feed row(s) name neither a key nor an owner — their "
+                 "gates cannot be attributed to a tracked row")
+    # A fallback read cannot certify any row `clear`: the mirror of the fail-closed
+    # defect above. The family is `partial` and the source is named.
+    if _payload_is_fallback(payload):
+        state = "partial"
+        error = error or (
+            "who-needs-me answered from the event log because the attention store was "
+            "unreachable — a fallback read cannot certify a row clear")
+    return {"panes": panes, "owners": owners, "orphan_owners": orphan_owners,
+            "state": state, "error": error}
 
 
 def parse_feed(text):
     """The feed's rendered rows as `panes`, `owners`, `orphan_owners`, `state`, `error`.
+
+    ⚠️ **No longer on the production path** — `feed_panes` reads the service's JSON
+    (`feed_from_payload`). Kept as the render-side REFERENCE: it is the executable
+    statement of what the old render meant, and the parity tests hold the JSON mapping
+    against it. Deleting it would delete the only description of the contract the
+    migration had to reproduce.
 
     Keys are digit panes and `hst:<store item id>` keys, exactly as
     `gate-owner-filter.feed_rows` reads them. A pane-less row also carries the
@@ -810,7 +893,7 @@ def compute(subject, tracked_path, vault, interval, now=None,
     """Build the readings document. Pure over its injected paths.
 
     `feed` injects the feed read (tests do); when None it is taken from
-    `feed_panes`, which runs `who-needs-me.py`.
+    `feed_panes`, which reads the service's `who-needs-me` endpoint.
     """
     now = time.time() if now is None else now
     attention_dir = attention_dir or ATTENTION_DIR
@@ -844,7 +927,7 @@ def compute(subject, tracked_path, vault, interval, now=None,
     # distinction the document must carry.
     probes = []
     if feed.get("error"):
-        probes.append({"probe": "who-needs-me.py --section needs-you --all",
+        probes.append({"probe": FEED_PROBE,
                        "error": feed["error"]})
     if join_error:
         probes.append({"probe": "gate-owner-filter.py feed join",
