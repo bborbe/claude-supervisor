@@ -256,11 +256,26 @@ def _mcp_delivery_verdict(result):
         # function exists to remove. Where `delivered` is present it decides; `sent` is the
         # fallback for the hand-back shapes that carry only one of the two.
         for key in ("delivered", "sent"):
-            value = payload.get(key)
+            if key not in payload:
+                continue
+            value = payload[key]
             if value is True:
                 return "delivered"
             if value is False:
                 return "refused"
+            # ⚠️ **`delivered` is a tri-state STRING on the wrapper's pane hand-back**
+            # (`delivered: 'unverified'`), not only a boolean. A present but unrecognized
+            # value is a verdict in its own right and must NOT fall through to `sent`:
+            # `delivered: 'unverified'` beside `sent: true` is the unconfirmed-submit
+            # shape, and reading it as delivered re-introduces the false success this
+            # function exists to remove.
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("true", "delivered"):
+                    return "delivered"
+                if normalized in ("false", "refused"):
+                    return "refused"
+            return "unknown"
     return "unknown"
 
 

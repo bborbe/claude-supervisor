@@ -118,6 +118,22 @@ class McpDeliveryVerdictTest(unittest.TestCase):
     def test_delivered_true_wins_over_sent_false(self):
         self.assertEqual(self._verdict({"sent": False, "delivered": True}), "delivered")
 
+    def test_unverified_string_beside_sent_true_is_not_a_delivery(self):
+        """`delivered: 'unverified'` is the wrapper's documented unconfirmed-submit state.
+
+        It must not fall through to `sent: true` — reading it as delivered is the false
+        success this function exists to remove, pointing the wrong way.
+        """
+        self.assertEqual(
+            self._verdict({"sent": True, "delivered": "unverified"}), "unknown"
+        )
+
+    def test_delivered_string_true_is_delivered(self):
+        self.assertEqual(self._verdict({"delivered": "true"}), "delivered")
+
+    def test_delivered_string_refused_is_a_refusal(self):
+        self.assertEqual(self._verdict({"delivered": "refused"}), "refused")
+
     def test_hand_back_without_a_signal_is_unknown(self):
         self.assertEqual(self._verdict({"name": "agent-x"}), "unknown")
 
