@@ -610,6 +610,38 @@ def period_floor_applies(spans, declared: int) -> bool:
     return not any(iv == declared and gap < declared / 2 for gap, iv in spans)
 
 
+def read_high_water(s: str) -> float:
+    """The persisted high-water mark for a subject, or 0.0 when absent or unreadable.
+
+    A missing or malformed file is not an error: it means "no mark yet", and every
+    caller then falls back to the ring it already has.
+    """
+    try:
+        with open(path(s, "hwm"), encoding="utf-8") as fh:
+            return float(fh.read().strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def write_high_water(s: str, seconds: float) -> None:
+    """Persist a mark beside the arm ring so it outlives the ring's roll.
+
+    ⚠️ **This is the fix for the regression a ring-recomputed maximum has.** `.arms`
+    keeps only `ARMS_KEEP` rows, so a long gap ages out within ~10 arms and a value
+    recomputed from the ring alone falls back to the ordinary cadence — the false
+    `STALE` returns a couple of hours after it was fixed. The mark is written on every
+    read, so it tracks the ring without needing a separate write path. Failure to
+    persist is swallowed deliberately: an unwritable state dir must degrade to today's
+    behaviour, never break a liveness read.
+    """
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(path(s, "hwm"), "w", encoding="utf-8") as fh:
+            fh.write(f"{int(seconds)}\n")
+    except OSError:
+        pass
+
+
 def observed_period(s: str):
     """The p90 ROUND-to-round gap, capped at PERIOD_CAP x the median; None without history.
 
@@ -691,18 +723,33 @@ def observed_period(s: str):
     # ⚠️ FLEET ONLY: the p90 is the wrong statistic for the fleet subject, because the
     # round's own duration sits in the tail the p90 discards BY CONSTRUCTION. An arm
     # gap is start-to-start, so a round that runs long sets a floor on its own gap —
-    # and a healthy long round then reads STALE. Measured 2026-11-18: 72 rounds in the
-    # retained handback window had a median duration of 1262 s (21.0 min) and 42 of 72
-    # exceeded the then-live 1157 s limit (p90 977 + SLACK 180); one round ran 1355 s
-    # start-to-start against that limit. The fleet therefore measures the DECAYED
-    # MAXIMUM of its window — decayed by ARMS_KEEP, still capped by PERIOD_CAP x the
-    # median so one historic stop cannot stretch it for ever (the failure the p90 was
-    # chosen to avoid). Every other branch keeps the p90: a topic or goal manager's
-    # limit must not move with this change.
-    period = max(gaps) if s.startswith("fleet--") else p90
+    # and a healthy long round then reads STALE. Measured 2026-11-18: one round ran
+    # 1355 s start-to-start against a 1157 s limit (p90 977 + SLACK 180).
+    #
+    # The fleet therefore takes the MAXIMUM of (its ring, its persisted high-water
+    # mark). The mark is load-bearing, not a nicety: `.arms` keeps only ARMS_KEEP rows,
+    # so a ring-recomputed maximum forgets the 1355 s gap within ~10 arms and the limit
+    # drops back to the ordinary cadence — the false STALE returns hours after the fix.
+    # The mark is what makes the bound survive the ring's roll.
+    #
+    # Its upper bound is 2x the median, not PERIOD_CAP (2.5x): the goal's own detection
+    # bound is two observed periods, and a 2.5x cap would let a single historic stop
+    # breach it. Every other branch keeps the p90 and the 2.5x cap — a topic or goal
+    # manager's limit must not move with this change.
+    fleet = s.startswith("fleet--")
+    if fleet:
+        ring_max = max(gaps)
+        mark = read_high_water(s)
+        if ring_max > mark:
+            write_high_water(s, ring_max)
+            mark = ring_max
+        period = mark
+    else:
+        period = p90
     if declared and period_floor_applies(spans, declared):
-        return max(declared, min(period, PERIOD_CAP * max(med, declared)))
-    return min(period, PERIOD_CAP * med)
+        floor_cap = 2.0 * max(med, declared) if fleet else PERIOD_CAP * max(med, declared)
+        return max(declared, min(period, floor_cap))
+    return min(period, 2.0 * med if fleet else PERIOD_CAP * med)
 
 
 # ⚠️ `stopped` is NOT here, and its absence is the fix this list is part of. Migration
