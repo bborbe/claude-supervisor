@@ -181,14 +181,36 @@ class RoleResolution(unittest.TestCase):
         self.assertEqual(self.normalised(root), [])
 
 
+class ParkedFor(unittest.TestCase):
+    """`parked_for` reads one session's log, once per run, and never live state in a fixture."""
+
+    def test_no_wait_disables_the_read(self):
+        self.assertFalse(fr.parked_for({"no_wait": True}, "s1"))
+
+    def test_a_sessionless_row_is_never_parked(self):
+        self.assertFalse(fr.parked_for({}, None))
+
+    def test_the_answer_is_cached_per_run(self):
+        calls = []
+        original = fr.declared_wait.declared_wait
+        fr.declared_wait.declared_wait = lambda sid: calls.append(sid) or True
+        try:
+            ctx = {}
+            self.assertTrue(fr.parked_for(ctx, "s1"))
+            self.assertTrue(fr.parked_for(ctx, "s1"))
+        finally:
+            fr.declared_wait.declared_wait = original
+        self.assertEqual(calls, ["s1"])
+
+
 class BranchPartition(unittest.TestCase):
     """The ordered predicate list — first match wins, so the set is a partition."""
 
     def branch(self, kind="task", role="agent", sid=None, live="none", pane=None,
-               chain_live=None, block=None, owner=None, owner_live=None):
+               chain_live=None, block=None, owner=None, owner_live=None, parked=False):
         return fr.resolve_branch(kind, role, sid, live, pane, chain_live,
                                  block or page("role: agent"),
-                                 owner=owner, owner_live=owner_live)
+                                 owner=owner, owner_live=owner_live, parked=parked)
 
     def test_unknown_outranks_everything(self):
         for verdict in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
@@ -202,6 +224,37 @@ class BranchPartition(unittest.TestCase):
 
     def test_sessionless_human_is_direct_not_create(self):
         self.assertEqual(self.branch(role="human", live="none", sid=None)[0], "direct")
+
+    def test_parked_outranks_resume(self):
+        # The criterion's own case: a row whose last closer declared an external wait
+        # must never read `resume`, or the tick reopens it on every pass.
+        self.assertEqual(self.branch(live="ABSENT", sid="s1", parked=True)[0], "parked")
+
+    def test_parked_outranks_create(self):
+        self.assertEqual(self.branch(live="none", sid=None, parked=True)[0], "parked")
+
+    def test_a_live_row_is_never_parked(self):
+        # A LIVE row is OPEN. Folding it into `parked` would drop a session that exists
+        # out of coverage's numerator, so jump and skip stay in front of the predicate.
+        self.assertEqual(
+            self.branch(live="LIVE", sid="s1", pane="p1", parked=True)[0], "jump")
+        self.assertEqual(self.branch(live="LIVE", sid="s1", parked=True)[0], "skip")
+
+    def test_parked_does_not_outrank_an_unanswerable_probe(self):
+        for verdict in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
+            self.assertEqual(
+                self.branch(live=verdict, sid="s1", parked=True)[0], "unknown", verdict)
+
+    def test_parked_does_not_outrank_a_manager_row(self):
+        branch, refused = self.branch(live="ABSENT", sid="s1", parked=True,
+                                      block=page("role: manager"))
+        self.assertEqual(branch, "skip")
+        self.assertEqual(refused, ["manager-row"])
+
+    def test_parked_does_not_outrank_open_manager(self):
+        self.assertEqual(
+            self.branch(kind="goal", live="ABSENT", sid="s1", chain_live=False,
+                        parked=True)[0], "open-manager")
 
     def test_manager_row_is_skip_in_every_reachable_state(self):
         block = page("role: manager")
@@ -1303,6 +1356,99 @@ class ProbeTimeoutTest(unittest.TestCase):
         # The daemon kills a read at 25 minutes. A per-probe bound near that would let
         # a handful of slow probes reproduce the very kill this guard exists to stop.
         self.assertLessEqual(fr.PROBE_TIMEOUT, 60)
+
+
+class ParallelProbeTest(unittest.TestCase):
+    """One run's liveness probes: each distinct sid once, concurrently, under one deadline."""
+
+    SID = "616a52dd-833b-475b-889f-ee1580c73c37"
+
+    def test_each_distinct_sid_is_probed_exactly_once(self):
+        seen = []
+
+        def live(sid):
+            seen.append(sid)
+            return "LIVE"
+
+        # The same sid as row, owner and subject reaches the pre-pass three times.
+        with unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+            out = fr.probe_all(["a", "a", "b", None, "a", "b"])
+        self.assertEqual(["a", "b"], sorted(seen))
+        self.assertEqual({"a": "LIVE", "b": "LIVE"}, out)
+
+    def test_row_owner_and_subject_read_the_shared_result_without_probing(self):
+        ctx = {"liveness_cache": {}, "no_liveness": False, "fleet_sid": self.SID,
+               "sid_verdicts": {self.SID: "ABSENT"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            page_path = os.path.join(tmp, "A Goal.md")
+            write(page_path, "---\nclaude_session_id: %s\n---\n" % self.SID)
+            with unittest.mock.patch.object(fr, "liveness_of",
+                                            side_effect=AssertionError("probed")), \
+                 unittest.mock.patch.object(fr, "subject_page", return_value=page_path):
+                self.assertEqual("ABSENT", fr.row_liveness(ctx, self.SID))
+                self.assertFalse(fr.subject_liveness(ctx, "v", "goal", "A Goal"))
+                self.assertFalse(fr.fleet_liveness(ctx))
+
+    def test_probes_overlap_in_time_and_respect_the_worker_bound(self):
+        import threading
+        import time
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0}
+
+        def live(sid):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time.sleep(0.05)
+            with lock:
+                state["now"] -= 1
+            return "LIVE"
+
+        with unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+            out = fr.probe_all(["s%d" % i for i in range(20)], workers=4)
+        self.assertEqual(20, len(out))
+        self.assertGreater(state["peak"], 1)
+        self.assertLessEqual(state["peak"], 4)
+
+    def test_the_total_deadline_yields_unknown_never_absent(self):
+        import time
+
+        def live(sid):
+            time.sleep(0.5)
+            return "ABSENT"
+
+        with unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+            out = fr.probe_all(["a", "b", "c", "d"], workers=1, deadline=0.1)
+        self.assertEqual({"a", "b", "c", "d"}, set(out))
+        self.assertNotIn("ABSENT", out.values())
+        self.assertEqual({"UNKNOWN"}, set(out.values()))
+
+    def test_row_output_is_unchanged_by_prefetching(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "Live Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent\n"
+                   "claude_session_id: %s" % self.SID))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+
+        def ctx(extra):
+            base = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+                    "no_liveness": False, "no_pane": True, "managers": set(),
+                    "topic_map": {}, "mode_default": "interactive", "normalised": [],
+                    "subjects": {}, "liveness_cache": {}, "fleet_sid": None}
+            base.update(extra)
+            return base
+
+        path = os.path.join(tasks, "Live Task.md")
+        with unittest.mock.patch.object(fr, "liveness_of", return_value="LIVE"):
+            sequential, _ = fr.row_for("v", cfg, "task", path, ctx({}))
+            c = ctx({})
+            pending, _ = fr.row_prepare("v", cfg, "task", path, c)
+            c["sid_verdicts"] = fr.probe_all(pending.sids())
+            prefetched = pending.finish()
+        self.assertEqual(sequential, prefetched)
+        self.assertIn(self.SID, c["sid_verdicts"])
 
 
 class PageCacheTest(unittest.TestCase):

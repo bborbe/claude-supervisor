@@ -50,10 +50,12 @@ HEARTBEAT = os.path.join(STATE_DIR, "keeper-heartbeat")
 PRODUCER_ID = "exit-observer-keeper"
 
 POLL_SECONDS = 5        # between sweeps: one `stat` per watched pane, nothing else
-REFRESH_SECONDS = 600   # how often the pane list is re-swept (one ~24 s sweep each)
-RETRY_SECONDS = 60      # a failed sweep is retried sooner than a full refresh interval
+REFRESH_SECONDS = 600   # how often the pane list is re-swept (one ~55 s sweep each)
 OBSERVER_STALE = 45     # log silence that means the writer is gone (1.5 x its 30 s interval)
-SWEEP_TIMEOUT = 300     # a slow sweep must not wedge the loop forever
+# ⚠️ Must stay BELOW `exit-record-coverage.py`'s KEEPER_STALE_SECONDS (300): a sweep measured
+# ~55 s idle and >240 s under load, and if one blocks longer than that threshold the board
+# reports the keeper itself as stale. 120 s is the honest ceiling.
+SWEEP_TIMEOUT = 120
 
 
 class Loop:
@@ -86,7 +88,10 @@ class Loop:
                 print("exit-observer-keeper: coverage sweep failed — cannot tell whether any "
                       "observer is dead; not reporting that as fine", file=sys.stderr)
                 self.rc = 1
-                self.refreshed = now - REFRESH_SECONDS + RETRY_SECONDS
+                # A failed sweep waits a FULL refresh interval. Retrying after 60 s re-ran a
+                # ~55 s vault scan almost continuously, which kept the vault hot and every
+                # sweep slow — the retry was the reason the failures persisted.
+                self.refreshed = now
             else:
                 self.panes, self.unknown = result
                 self.refreshed = now
@@ -121,11 +126,37 @@ def sweep(now):
     try:
         out = subprocess.run([sys.executable, COVERAGE, "--json"], capture_output=True,
                              text=True, timeout=SWEEP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"exit-observer-keeper: sweep TIMEOUT after {SWEEP_TIMEOUT}s", file=sys.stderr)
+        return None
+    except OSError as exc:
+        print(f"exit-observer-keeper: sweep could not start: {exc}", file=sys.stderr)
+        return None
+    except ValueError as exc:
+        # `text=True` decodes as it reads, and a non-UTF-8 byte raises UnicodeDecodeError —
+        # itself a ValueError — from inside the call rather than from `json.loads`.
+        print(f"exit-observer-keeper: sweep output could not be decoded: {exc}", file=sys.stderr)
+        return None
+    # ⚠️ The return code and stderr are logged, not discarded. Four separate theories about why
+    # this sweep failed (blocking read, enumeration cost, host load, interpreter) were all
+    # plausible and all wrong, because this path used to print one generic line and throw the
+    # reason away. One line of real error text ends that guessing.
+    if out.returncode != 0:
+        print(f"exit-observer-keeper: sweep exited {out.returncode}: "
+              f"{(out.stderr or '').strip()[:400]}", file=sys.stderr)
+        return None
+    try:
         doc = json.loads(out.stdout)
-    except (subprocess.TimeoutExpired, ValueError, OSError):
+    except ValueError:
+        print(f"exit-observer-keeper: sweep output is not JSON: {out.stdout[:200]!r}", file=sys.stderr)
         return None
     panes = {}
-    for row in list(doc.get("unrecorded", [])) + list(doc.get("unknown", [])):
+    # ⚠️ `recorded` is in this union on purpose. Building the watch set from `unrecorded` and
+    # `unknown` alone watches only the panes ALREADY broken, so the first death of a healthy
+    # writer is invisible until the next full sweep — up to `REFRESH_SECONDS`. Measured
+    # 2026-11-18: the watch set was empty while eight manager panes carried live writers.
+    for row in (list(doc.get("unrecorded", [])) + list(doc.get("unknown", []))
+                + list(doc.get("recorded", []))):
         pane = row.get("pane")
         if not pane:
             continue

@@ -28,6 +28,7 @@ import json
 import os
 import socket
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -104,8 +105,29 @@ class SessionLiveness(unittest.TestCase):
         # let 1900 real spawn records decide a fixture's verdict — the isolation rule unchanged,
         # only its shape.
         self.ledger_rows = []
+        # Transcripts are found under `$CLAUDE_CONFIG_DIR/projects`; isolated like the stores above
+        # so the machine's real transcripts cannot turn a fixture's UNKNOWN into ABSENT.
+        self.config = os.path.join(self.tmp.name, "config")
+        os.makedirs(os.path.join(self.config, "projects", "-some-project"))
+        self._prior_config_env = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.config
+
+    def transcript(self, session_id, idle_seconds, project="-some-project"):
+        """A transcript for `session_id`, last written `idle_seconds` ago."""
+        directory = os.path.join(self.config, "projects", project)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "%s.jsonl" % session_id)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        then = time.time() - idle_seconds
+        os.utime(path, (then, then))
+        return path
 
     def tearDown(self):
+        if self._prior_config_env is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._prior_config_env
         if self._prior_cache_env is None:
             os.environ.pop("SUPERVISOR_START_CACHE", None)
         else:
@@ -308,6 +330,63 @@ class SessionLiveness(unittest.TestCase):
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
+
+    def test_no_registry_entry_no_heartbeat_row_and_an_idle_transcript_is_absent(self):
+        # The expired-row shape: the endpoint dropped the row after its retention window, so the
+        # stale-row rule cannot fire. A transcript idle past the threshold disproves "spawned
+        # moments ago". Both the 404 shape and the all-null 200 shape are the same fact.
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 7 * 24 * 3600)
+        with self.fixture([]) as fx:
+            rc, out = self.check(sid, fx.url)
+            rc_prefix, _ = self.check("fe0f08d3", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("transcript idle for 10080 minutes", out)
+        self.assertIn("no heartbeat row", out)
+        self.assertEqual(rc_prefix, ABSENT)
+        with self.fixture([row(sid, live=None, age_seconds=None)]) as fx:
+            rc_null, out_null = self.check(sid, fx.url)
+        self.assertEqual(rc_null, ABSENT)
+        self.assertIn("transcript idle", out_null)
+
+    def test_the_newest_of_several_transcripts_decides(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 7 * 24 * 3600, project="-old")
+        self.transcript(sid, 30, project="-new")
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_a_fresh_transcript_keeps_unknown(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 60)
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_no_transcript_keeps_unknown(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_an_unreachable_or_erroring_endpoint_keeps_unknown_despite_an_idle_transcript(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 7 * 24 * 3600)
+        rc_dead, _ = self.check(sid, dead_url())
+        self.assertEqual(rc_dead, UNKNOWN)
+        with self.fixture([], list_status=500) as fx:
+            rc_err, _ = self.check(sid, fx.url)
+        self.assertEqual(rc_err, UNKNOWN)
+
+    def test_a_registry_entry_keeps_unknown_despite_an_idle_transcript(self):
+        # Unchanged behaviour: a non-dead registry entry means the session may be live.
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.plant(sid)
+        self.transcript(sid, 7 * 24 * 3600)
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
 
     def test_no_registry_entry_and_a_fresh_heartbeat_is_not_absent(self):
         # A fresh record is `live: true` — the session is stamping, so it is LIVE, never ABSENT.
@@ -742,10 +821,115 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, LIVE)
         self.assertIn(sid, out)
 
-    def test_list_on_an_unreachable_endpoint_is_unknown(self):
-        rc, out = self.listing(dead_url())
+    def test_list_on_an_unreachable_endpoint_degrades_instead_of_refusing(self):
+        # ⚠️ **The union's list half, and the 2026-11-18 outage it removes.** An unreadable
+        # endpoint used to make this exit 2, so a single local process restarting blanked every
+        # caller: measured that day, `--list --json` exited 2 with `ECONNREFUSED` for ~70 minutes
+        # and 15 of 25 flagged rows could not be opened — while the identity registry sat
+        # readable on disk the whole time.
+        #
+        # ⚠️ **Every row is `degraded: true`, and that is the price of exiting 0.** A
+        # registry-built list structurally omits cluster and a2a sessions, so
+        # `commands/open.md` Step 2C must stop on a degraded row rather than fall through to its
+        # spawn branch. A fix that exits 0 with plain rows re-opens the duplicate-spawn hazard
+        # and fails this case.
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant(sid)
+        rc, rows = self.json_listing(dead_url())
+        self.assertEqual(rc, LIVE)
+        by_id = {r["sessionId"]: r for r in rows}
+        self.assertIn(sid, by_id)
+        self.assertTrue(by_id[sid]["degraded"])
+
+    def test_list_on_an_unreachable_endpoint_with_no_sessions_is_unknown(self):
+        """An EMPTY degraded list must not read as an empty fleet.
+
+        `[]` with exit 0 is the one shape carrying no `degraded` row for `commands/open.md`
+        Step 2B/2C to key on, so it would be read as "none is running now" and fall through to
+        a spawn — the duplicate-spawn hazard, on exactly the restarted machine where the
+        registry has not been written yet. "I could not measure" is UNKNOWN, never a zero.
+        """
+        prior = self.m._headless_live_ids
+        self.m._headless_live_ids = lambda: set()
+        try:
+            rc, out = self.listing(dead_url())
+        finally:
+            self.m._headless_live_ids = prior
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
+
+    def test_a_dead_registry_row_is_not_absent_when_a_headless_stamp_is_live(self):
+        """The two fallback channels are unioned BEFORE a verdict, not consulted in order.
+
+        A live headless stamp is the endpoint-down substitute for a heartbeat row, so a dead
+        registry row must not answer ABSENT while that stamp sits unread — ABSENT is the one
+        verdict that authorises a resume.
+        """
+        sid = "9c0ffee4-1111-2222-3333-444455556666"
+
+        class _RegistryHoldsItDead:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": False, "pid": 1234}}
+
+        prior_id, prior_headless = self.m._IDENTITY, self.m._headless_live_ids
+        self.m._IDENTITY = _RegistryHoldsItDead()
+        self.m._headless_live_ids = lambda: {sid}
+        try:
+            rc, out = self.check(sid, dead_url())
+        finally:
+            self.m._IDENTITY, self.m._headless_live_ids = prior_id, prior_headless
+        self.assertEqual(rc, LIVE)
+        self.assertIn("headless", out)
+
+    def test_check_on_an_unreachable_endpoint_reads_live_from_the_registry(self):
+        # ⚠️ **SC1(b).** With the endpoint stopped, a session whose registry pid is running must
+        # still answer LIVE — that is the whole population the fleet lost during the outage.
+        sid = "9c0ffee1-1111-2222-3333-444455556666"
+
+        class _RegistryHoldsItLive:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": True, "pid": 1234}}
+
+        prior = self.m._IDENTITY
+        self.m._IDENTITY = _RegistryHoldsItLive()
+        try:
+            rc, out = self.check(sid, dead_url())
+        finally:
+            self.m._IDENTITY = prior
+        self.assertEqual(rc, LIVE)
+        self.assertIn("identity registry", out)
+
+    def test_check_on_an_unreachable_endpoint_reads_absent_only_from_a_dead_entry(self):
+        # ⚠️ **The one cell that may license ABSENT with the endpoint down.** The registry HOLDS
+        # an entry and computes death — the same predicate that licenses ABSENT at the end of
+        # `_absent_licensed`. A missing entry may NOT license it (the case below).
+        sid = "9c0ffee2-1111-2222-3333-444455556666"
+
+        class _RegistryHoldsItDead:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": False, "pid": 1234}}
+
+        prior = self.m._IDENTITY
+        self.m._IDENTITY = _RegistryHoldsItDead()
+        try:
+            rc, out = self.check(sid, dead_url())
+        finally:
+            self.m._IDENTITY = prior
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("pid gone", out)
+
+    def test_check_on_an_unreachable_endpoint_is_unknown_for_an_unprovable_pid(self):
+        # ⚠️ **`alive is None` is "cannot tell", never death.** With the endpoint down there is no
+        # second channel to break the tie, so the answer stays UNKNOWN — the direction that
+        # withholds a resume. This is the `plant()` shape: a record with no usable `procStart`.
+        sid = "9c0ffee3-1111-2222-3333-444455556666"
+        self.plant(sid)
+        rc, out = self.check(sid, dead_url())
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("cannot prove", out)
 
     def test_list_on_an_unreadable_registry_is_unknown(self):
         # The names half is load-bearing: a names-less list makes `/supervisor:open`'s

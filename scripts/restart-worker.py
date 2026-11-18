@@ -1456,6 +1456,54 @@ def task_terminal_refusal(sid, cwd):
     )
 
 
+# Registrations are written by three sites that do not validate against the configured vault
+# names — `fleet-register.py` defaults `--vault` to the cwd's basename, `docs/subject-resolution.md`
+# § Recording lowercases whatever it is handed, and state files written before 2026-09-23 may
+# carry a display-case name. Measured 2026-11-18: 42 of 198 live registrations carried a value
+# that was not a configured name, and an exact-name lookup refused every one of them.
+LEGACY_VAULT_ALIASES = {
+    "personal": "private-personal",
+    "brogrammers": "seibert-brogrammers",
+}
+
+
+def resolve_registered_vault(vault_name, configs):
+    """Resolve a registration's `vault` value to a configured vault dict, or `None`.
+
+    First match wins: exact configured name; a path-shaped value whose directory is a
+    configured vault's path; a case-insensitive name match; the legacy alias table. A value
+    matching none of these returns `None` rather than guessing — resuming a manager into the
+    wrong vault is worse than refusing it.
+    """
+    if not vault_name or not isinstance(configs, list):
+        return None
+    named = {str(v.get("name") or "").strip(): v for v in configs if isinstance(v, dict)}
+    if vault_name in named:
+        return named[vault_name]
+    if vault_name.startswith(("/", "~")):
+        wanted = os.path.realpath(os.path.expanduser(vault_name))
+        for vault in named.values():
+            path = str(vault.get("path") or "").strip()
+            if not path:
+                continue
+            candidate = os.path.expanduser(path)
+            try:
+                if os.path.samefile(candidate, wanted):
+                    return vault
+            except OSError:
+                if os.path.realpath(candidate) == wanted:
+                    return vault
+        return None
+    folded = vault_name.casefold()
+    insensitive = [v for name, v in named.items() if name.casefold() == folded]
+    if len(insensitive) == 1:
+        return insensitive[0]
+    if insensitive:
+        return None  # two configured names differ only by case: ambiguous, never guess
+    alias = LEGACY_VAULT_ALIASES.get(folded)
+    return named.get(alias) if alias else None
+
+
 def resume_absent(sid, sessions_dir, dry_run):
     """Resume a session whose process is GONE. Signals nothing; exits 0 only on a resume.
 
@@ -1521,12 +1569,21 @@ def resume_absent(sid, sessions_dir, dry_run):
 
     vault_name = str(reg.get("vault") or "").strip()
     configs = vault_configs()
-    vault = next((v for v in (configs or []) if isinstance(v, dict) and v.get("name") == vault_name), None)
-    cwd = os.path.expanduser(str(vault.get("path") or "").strip()) if vault else ""
+    vault = resolve_registered_vault(vault_name, configs)
+    if vault is None:
+        configured = ", ".join(sorted(
+            str(v.get("name") or "").strip() for v in (configs or [])
+            if isinstance(v, dict) and str(v.get("name") or "").strip()
+        )) or "none readable"
+        print(f"❌ error: the registration names vault {vault_name!r}, which matches no "
+              f"configured vault (configured: {configured}) — resuming without a cwd "
+              f"strands the session on a workspace-trust dialog")
+        return 1
+    cwd = os.path.expanduser(str(vault.get("path") or "").strip())
     if not cwd or not os.path.isdir(cwd):
-        print(f"❌ error: the registration names vault {vault_name!r}, which resolves to no "
-              f"existing directory — resuming without a cwd strands the session on a "
-              f"workspace-trust dialog")
+        print(f"❌ error: the configured vault {str(vault.get('name') or '').strip()!r} "
+              f"resolves to no existing directory ({cwd or '(no path)'}) — resuming without "
+              f"a cwd strands the session on a workspace-trust dialog")
         return 1
 
     # A resume must not start a process for a task that is already finished. This is the only

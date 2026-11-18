@@ -1015,6 +1015,39 @@ open tasks) and lists a **suspect** without failing: a stamp on one open task wh
 it. The field is read from the frontmatter block only, and an empty `claude_session_id:` is no
 stamp.
 
+## Liveness and reachability — which instrument answers which question
+
+Four stores can each hold a different answer about one session id, and the answers are not
+contradictions once each instrument's own question is fixed. Read the question before the
+answer.
+
+| Instrument | Its question | May be concluded | Must not be concluded |
+|---|---|---|---|
+| `scripts/session-liveness.py --check <id>` | Is this session running **now**? | The liveness verdict. `LIVE` comes from the session-heartbeat endpoint — with the registry row moved aside it still answered `LIVE` (measured 2026-11-17) — and, **when that endpoint is unreadable, from the identity registry and the headless heartbeat store instead** (a union, 2026-11-18: one local process restarting used to blank the fleet for ~70 minutes). `ABSENT` is licensed by the registry and the endpoint together, which is why an expired heartbeat row or a registry entry that reads dead is required before it will say so; with the endpoint down it is licensed ONLY by a registry entry that computes death, never by a missing one. | That the session is reachable, or which task it holds. `UNKNOWN` is never `ABSENT`. |
+| The identity registry, `~/.claude/sessions/<pid>.json` | Will `SendMessage` resolve this id? | That a `SendMessage` attempt will find the session. | Liveness, either way. Claude Code deletes the row on exit, and a live session's row can be removed: a *settled* worker answered `LIVE` with its row moved aside. |
+| The wrapper roster, `GET 127.0.0.1:18090/api/1.0/sessions` (and `ListAgents`, joined on the id) | Which channel can carry a turn? | The deliverable channel — `controls: ["message"]` — plus `state`, `cwd` and `pending_turns`. | Liveness. It can read `starting` for a session already beating, and `starting` is not a dead session. |
+| The spawn ledger, the store's `/api/1.0/session-ledger` | Who spawned this, in what mode, from where? | `label`, `spawner_session_id`, `spawned_at`, `mode`, `role` — and it still resolves an id whose registry row is gone. | Liveness. Its own `status` is not a liveness source. |
+
+**Precedence.** Liveness → `--check`. Deliverable channel → the roster. `SendMessage`
+addressability → the registry. Provenance → the ledger. A manager asking "is it alive" reads
+`--check`; "can I reach it" reads the roster; "will `SendMessage` work" reads the registry.
+No instrument is read for another's question, and a disagreement between two of them is
+usually a question asked of the wrong one.
+
+⚠️ **`UNKNOWN` is not `ABSENT`, and only `ABSENT` licenses a resume** (see the verdict table
+below). `--check` answers `UNKNOWN`
+while the registry holds no entry for an id (a fresh spawn) and while the endpoint holds no
+heartbeat row for an id the registry does carry (the `starting` window). Both windows are
+real and both were measured on 2026-11-17: a spawned worker took **90 s** to gain a registry
+row and a further ~25 s to answer `LIVE`, and it was running throughout. Treating either
+window as death is what makes a reaper act on a live session.
+
+⚠️ **A 202 is a statement about the HTTP call, not about delivery.** The REST
+`…/sessions/<id>/message` route answers `202 {"status":"sent"}` and is fire-and-forget by
+design; `send_agent_message` writes a turn but returns no result for a headless worker.
+Neither is evidence that the text reached the session — when that is the claim being made,
+grep the transcript.
+
 ## Which launcher a manager opens on
 
 A **manager** session — a topic or goal manager opened by `/supervisor:open` Step 2C, a `spawn_agent` call with `role: manager`, or a manager resumed by `/supervisor:restart` — does **not** take the worker launcher rule in § Spawn a worker item 8. Operator decision 2026-10-19: managers run on the vault's Claude launcher, so their model and effort are deliberate (`cc-private-claude` / `cc-seibert-claude` start `--model claude-opus-5-5[1m] --effort low`) rather than inheriting the vault's cheaper `-deepseek` default. Precedence:
@@ -1103,7 +1136,7 @@ session, not whether it owns anything:
 | `session-liveness.py --check` | exit | action |
 |---|---|---|
 | `LIVE` | 0 | jump to it |
-| `ABSENT` | 1 | resume it by id — the conversation is what is durable, not the process. Licensed by a readable endpoint that reports the id not live **and** the identity registry not holding it non-dead: either the registry holds it dead, or it holds **no entry** (Claude Code deletes the entry when a session exits) while the endpoint serves a `live: false` record with a measured `age_seconds` — the one thing a session spawned moments ago cannot have |
+| `ABSENT` | 1 | resume it by id — the conversation is what is durable, not the process. Licensed by a readable endpoint that reports the id not live **and** the identity registry not holding it non-dead: either the registry holds it dead, or it holds **no entry** (Claude Code deletes the entry when a session exits) while the endpoint serves a `live: false` record with a measured `age_seconds` — the one thing a session spawned moments ago cannot have — **or** it holds no entry **and** the endpoint holds no usable row (404, or a row with `live` and `age_seconds` null: heartbeat rows expire) **and** the session's transcript (`<config dir>/projects/*/<id>.jsonl`, newest match) has been idle for over 15 minutes. No transcript, a fresh one, or an unreadable endpoint keeps UNKNOWN |
 | `UNKNOWN` | 2 | start a fresh manager; `--check` reads the session-heartbeat endpoint and never the registry, so this is an unreachable or non-200 endpoint, a malformed row, a non-boolean `live`, a stale cluster-reachability marker, or a session in the **startup shape** — no registry entry yet **and** no heartbeat record (the per-id 404) or a not-live record with no measurable age — *cannot tell*, never *dead* |
 | `AMBIGUOUS` | 3 | start a fresh manager; the prefix matches two rows the store holds, which need not both be **live** (the matcher spans stale rows too), and a longer id resolves it |
 | `MALFORMED` — malformed argument | 4 | **no verdict was reached**: the argument is not a single session id — a newline-separated id blob, a value carrying whitespace, or a string with no session-id shape. Never *dead*, and never a resume authorisation. ⚠️ **A caller that arrives here with a multi-id set has a shell bug, not a dead session**: under zsh an unquoted expansion is **not** word-split, so `for id in $ids` hands the whole blob over as ONE argument — probe **one id per invocation** |
@@ -1126,6 +1159,8 @@ writes it, and no reader resolves it. The `claude_session_id` on a goal or topic
 is a fallback for the other. And a missing `managed_by` is **not** an error: the task's own
 `goals:` are the documented default, tried in order, which is why a single-goal task never
 needs the field.
+
+⚠️ **A degraded liveness list is "cannot tell" — but only in the endpoint-down FALLBACK, and the signal is the WARNING, not a degraded row.** `session-liveness.py --list --json` exits 0 and prints `WARNING — the session-heartbeat endpoint at … is unreadable` when the endpoint is down; that list is built from the registry alone and omits cluster/a2a sessions, so a no-match in it does **not** mean "none is running now" and `commands/open.md` Steps 2B/2C stop on it. ⚠️ **The per-row `degraded: true` flag is NOT this signal and must never be used as one.** `_list_payload` sets it for every registry-live session the endpoint holds no `live: true` row for — the ordinary stale-plugin population that recurs at every plugin release — so a consumer stopping on any degraded row refuses to open managers in normal operation, which is the regression the 2026-10-18 per-row degrade was introduced to avoid.
 
 ## Approval provenance
 

@@ -1000,18 +1000,64 @@ def start(topic: str, branch: str = "") -> int:
     # Fields are CLEARED, not carried: a receipt that survived its own round would
     # let a skipped round inherit the previous round's artifacts and pass.
     #
-    # `previous_round_started_at` is CARRIED, not cleared: it is the lag window's
-    # other end. The current turn's transcript is written as the turn progresses, so a
-    # window ending "now" cannot see the round's own spend — measured 2026-11-12, a
-    # gated tick printed `spent: 0` however long it took. `previous_round_started_at →
+    # The two PREVIOUS values are CARRIED, not cleared — they are the lag window's two
+    # ends. The current turn's transcript is written as the turn progresses, so a window
+    # ending "now" cannot see the round's own spend — measured 2026-11-12, a gated tick
+    # printed `spent: 0` however long it took. `previous_round_started_at →
     # round_started_at` is the only window that can measure a completed round, at the
     # cost of a one-tick lag.
-    old = read_receipt(s).get("round_started_at")
+    #
+    # ⚠️ **`previous_round_ended_at` is carried for exactly that reason, and its absence
+    # was a defect in the `--finish` change.** This dict is built FRESH, so a bare
+    # `{"round_started_at": …}` silently DROPS the end `--finish` just wrote: the completed
+    # window then survives only from one round's tail to the next round's head, which
+    # nothing can read. Measured 2026-11-18 — `--finish` had run, the very next `--start`
+    # wiped it, `round_ended_at` read `None` on every inspection, and the round stayed
+    # unmeasurable with the fix already deployed. Carrying it makes
+    # `previous_round_started_at → previous_round_ended_at` the one window that IS a
+    # completed round, mirroring the start pair exactly.
+    previous = read_receipt(s)
     d = {"topic": topic, "round_started_at": time.time(), "fields": {}}
-    if old:
-        d["previous_round_started_at"] = old
+    if previous.get("round_ended_at"):
+        # the round that just finished is the window to carry
+        d["previous_round_started_at"] = previous["round_started_at"]
+        d["previous_round_ended_at"] = previous["round_ended_at"]
+    elif previous.get("previous_round_ended_at"):
+        # ⚠️ **An abandoned round must not destroy the last completed window.** A round
+        # that is `--start`ed and never `--finish`ed replaces a receipt that still holds
+        # the previous completed pair; carrying only `round_started_at` would drop it, so
+        # `start → finish → start → start` would lose the window this carry exists to keep.
+        d["previous_round_started_at"] = previous["previous_round_started_at"]
+        d["previous_round_ended_at"] = previous["previous_round_ended_at"]
+    elif previous.get("round_started_at"):
+        d["previous_round_started_at"] = previous["round_started_at"]
     write_atomic(path(s), json.dumps(d) + "\n")
     print(f"started {s}")
+    return 0
+
+
+def finish(topic: str, branch: str = "") -> int:
+    """Close the round: stamp `round_ended_at` on the receipt.
+
+    ⚠️ **The end is what makes a round measurable, and its absence is not a detail.**
+    A receipt carrying only `round_started_at` leaves every consumer to infer where a
+    round ended — the next fire, or the first closer — and each inference charges
+    unrelated work to the round. Measured 2026-11-18 on one transcript: **75.4 KB**
+    bounding by the next fire, **8.3 KB** bounding by the first closer, and **233.1 KB**
+    after the delegate under the same closer rule. Three answers, one dataset, no
+    measurement among them. `round_started_at → round_ended_at` is the only window that
+    is the round.
+
+    Refused, not invented, when no round is open: an end with no start names nothing.
+    """
+    s = slug(topic, branch)
+    d = read_receipt(s)
+    if not d.get("round_started_at"):
+        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    d["round_ended_at"] = time.time()
+    write_atomic(path(s), json.dumps(d) + "\n")
+    print(f"finished {s}")
     return 0
 
 
@@ -1656,6 +1702,8 @@ def main() -> int:
     )
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--start", action="store_true", help="begin a round (manager, tick head)")
+    mode.add_argument("--finish", action="store_true",
+                      help="close the round: stamp round_ended_at (manager, round tail)")
     mode.add_argument("--record", action="store_true", help="record a step's artifact")
     mode.add_argument("--check", action="store_true", help="validate the round (manager, tail)")
     mode.add_argument("--debt", action="store_true",
@@ -1787,6 +1835,8 @@ def main() -> int:
         return record_outcome(subject, a.goal, a.outcome, a.verdict or "")
     if a.start:
         return start(subject, a.branch)
+    if a.finish:
+        return finish(subject, a.branch)
     if not a.step or not a.path:
         ap.error("--record needs --step and --path")
     return record(subject, a.branch, a.step, a.path)

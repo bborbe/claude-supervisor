@@ -69,6 +69,14 @@ class Liveness(unittest.TestCase):
         p = self.m.path(self.m.slug(topic, "goal"), "cadence")
         os.utime(p, (t, t))
 
+    def stop_with_age(self, topic, age):
+        """Stand a subject down and backdate its `.stopped` marker to `age` seconds ago."""
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(topic, "goal")
+        p = self.m.path(self.m.slug(topic, "goal"), "stopped")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
     def test_fresh_is_ok(self):
         self.arm("Manager Layer", 300, age=100)
         self.assertEqual(self.check(), (0, ""))
@@ -107,6 +115,73 @@ class Liveness(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.m.stop("Manager Layer", "goal")
         self.assertEqual(self.check(), (0, ""))
+
+    def test_a_stand_down_past_two_periods_is_reported(self):
+        # SC1: silent at <=1x the observed period, a STOPPED line past 2x, and a retry on
+        # the very next poll. The declared interval stands in for the observed one here
+        # (a single arm writes no arm-to-arm history), and `--stop` leaves the cadence
+        # file untouched, so 2 x 300 = 600 s is the bound.
+        self.arm("Manager Layer", 300, age=0)
+        self.stop_with_age("Manager Layer", age=1.5 * 300)  # below the bound: silent
+        self.assertEqual(self.check(), (0, ""), "must be silent before two periods")
+        self.stop_with_age("Manager Layer", age=2 * 300 + 61)  # past the bound
+        rc, first = self.check()
+        self.assertEqual(rc, 10)
+        self.assertTrue(first.startswith("STOPPED goal--manager-layer "), first)
+        self.assertIn("age=", first)
+        self.assertNotIn("retry=1", first, "the first emission IS the firing")
+        rc, second = self.check()
+        self.assertEqual(rc, 10, "the retry must still exit 10 or delivery stops")
+        self.assertTrue(second.startswith("STOPPED goal--manager-layer "), second)
+        self.assertIn("retry=1", second, "the second emission is a retry of the first")
+
+    def test_stood_down_and_lapsed_are_distinct_tokens(self):
+        # SC2: a stood-down subject and a genuinely lapsed one must carry different
+        # tokens, and neither token may appear on the other's line.
+        self.arm("Stood Down", 300, age=0)
+        self.stop_with_age("Stood Down", age=2 * 300 + 61)
+        self.arm("Lapsed", 300, age=2 * 300 + 61)  # no marker: a real lapse
+        rc, out = self.check()
+        self.assertEqual(rc, 10)
+        by_slug = {}
+        for line in out.splitlines():
+            fields = line.split()
+            if len(fields) >= 2:
+                by_slug[fields[1]] = fields[0]
+        self.assertEqual(by_slug.get("goal--stood-down"), "STOPPED", out)
+        self.assertEqual(by_slug.get("goal--lapsed"), "STALE", out)
+
+    def test_a_stand_down_that_ends_is_not_a_recovered_lapse(self):
+        # A deliberate stop that is lifted is not a lapse anyone recovered from: the
+        # pending entry carries kind="stopped", so the resume drops it rather than
+        # emitting RECOVERED-PENDING — a stand-down must never be counted as a lapse.
+        self.arm("Manager Layer", 300, age=0)
+        self.stop_with_age("Manager Layer", age=2 * 300 + 61)
+        self.assertEqual(self.check()[0], 10)  # the stand-down is owed
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 300, resume=True)
+        rc, out = self.check()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("RECOVERED-PENDING", out)
+        self.assertNotIn("STOPPED", out)
+
+    def test_a_lapse_owed_then_stood_down_then_resumed_is_not_recovered_pending(self):
+        # The blocking case: a subject whose LAPSE report is still owed is stood down
+        # inside the ack window, then resumed. The STOPPED branch must NORMALISE the
+        # reused lapse entry to kind="stopped" (fresh crossing), so the resume drops it
+        # rather than emitting RECOVERED-PENDING for a deliberate stand-down.
+        self.arm("Manager Layer", 300, age=2 * 300 + 61)  # genuinely lapsed, report owed
+        self.assertEqual(self.check()[0], 10)
+        self.stop_with_age("Manager Layer", age=2 * 300 + 61)  # stood down while owed
+        rc, out = self.check()
+        self.assertEqual(rc, 10)
+        self.assertTrue(out.startswith("STOPPED goal--manager-layer "), out)
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 300, resume=True)
+        rc, out = self.check()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("RECOVERED-PENDING", out)
+        self.assertNotIn("STOPPED", out)
 
     def test_rearm_preserves_stop_marker(self):
         # ⚠️ THE DEFECT THIS FILE EXISTS TO PIN. An arm is a READING — every round takes
@@ -443,12 +518,17 @@ class Liveness(unittest.TestCase):
 
     def test_an_historic_outage_does_not_inflate_the_limit_forever(self):
         # One long stop stays in the retained history. Uncapped, its p90 lets that
-        # subject fire at 13.4x its own median for ever; the cap keeps it bounded.
+        # subject fire at 13.4x its own median for ever. The idle-break cut now
+        # removes the stop from the population outright — the ring below keeps a
+        # 3-span gap-free tail — so the period is the real 900 s rather than the
+        # 2250 s the 2.5x cap used to bound it to. The cap still governs a ring whose
+        # tail is too short to measure; see
+        # `test_observed_period_keeps_the_capped_reading_when_the_tail_is_too_short`.
         self.plant_arms("Manager Layer", [90000, 2700, 1800, 900])
         self.arm("Manager Layer", 900, age=1000)
         state, detail = self.m.classify("goal--manager-layer", time.time())
         self.assertEqual(state, "OK")
-        self.assertRegex(detail, r"period=225\d+s")
+        self.assertIn("period=900s", detail)
 
     def test_rearm_after_a_stand_down_resets_the_history(self):
         # The outage gap must never count as cadence. It cannot be filtered at read
@@ -509,6 +589,25 @@ class Liveness(unittest.TestCase):
         # every machine today is head-only, and their periods must be untouched.
         self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
         self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
+    def test_observed_period_ignores_an_idle_gap_in_the_ring(self):
+        # A manager that stops overnight and resumes writes its stop into the 12-arm
+        # window. Both the p90 and the median follow it, so the limit stretches until a
+        # genuinely stopped loop reads OK for most of a day — measured 2026-11-18:
+        # period=23997 s from a 17 h gap, limit=24177 s (~6.7 h). The ring below is two
+        # overnight gaps followed by a 900 s burst: before the fix the p90 is 61200 and
+        # the 2.5x cap on a 900 s median gives 2250 s; after it, the gap-free tail
+        # gives the cadence the manager is actually running.
+        self.plant_arms("Manager Layer", [125100, 63900, 2700, 1800, 900, 0])
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
+    def test_observed_period_keeps_the_capped_reading_when_the_tail_is_too_short(self):
+        # A ring that has just woken up carries one idle break and only two post-gap
+        # spans. Two spans are noise, so the old capped reading stands rather than the
+        # period dropping to None — None moves every caller onto the declared interval,
+        # a bigger change than the gap it would be correcting for.
+        self.plant_arms("Manager Layer", [63000, 62100, 61200, 0])
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 2250)
 
     def plant_tail_store(self, topic, epochs):
         """Mark epochs as tail beats in `<slug>.tail`, leaving the ring untouched."""
@@ -718,7 +817,10 @@ class Liveness(unittest.TestCase):
         self.arms(self.WEEKLY, [None] * 12)
         state, detail = self.limit_at(3757, 3600)
         self.assertEqual(state, "OK", detail)
-        self.assertIn("limit=3937s", detail)  # uncapped code says 2877
+        # The ring carries a 30 541 s idle gap, so the period is measured from the
+        # gap-free tail: 3750 s, not the 3937 s the whole-ring p90 gave before the
+        # idle-break cut. The floor still applies — that is what this test asserts.
+        self.assertIn("limit=3930s", detail)
 
     def test_a_legacy_window_is_floored_by_its_gap_quantile(self):
         # The same history, one arm later: the ring is now 11 legacy lines plus one
@@ -727,7 +829,8 @@ class Liveness(unittest.TestCase):
         self.arms(self.WEEKLY, [None] * 11 + [3600])
         state, detail = self.limit_at(3757, 3600)
         self.assertEqual(state, "OK", detail)
-        self.assertIn("limit=3937s", detail)
+        # Gap-free tail, as in the sibling above: 3750 s, not 3937 s.
+        self.assertIn("limit=3930s", detail)
 
     def test_arm_keeps_each_lines_own_interval(self):
         # SC1(c). The rise can only fire if `arm` PRESERVES earlier lines' intervals.
@@ -774,13 +877,15 @@ class Liveness(unittest.TestCase):
     def test_a_declared_interval_that_never_ticks_at_it_is_not_floored(self):
         # SC2(b). deploy-and-merge declares 3600 and ticks at ~900. Neither rise limb
         # fires — no recorded interval below 3600, and its p75 is 994 s against the
-        # 1800 s threshold — so the limit stays where it is today.
+        # 1800 s threshold — so the floor does not apply. Its ring also carries a
+        # 19 100 s idle gap, so the period comes from the gap-free tail: 1435 s, not
+        # the 1560 s the whole-ring p90 gave before the idle-break cut.
         for label, intervals in (("recorded", [3600] * 12), ("legacy", [None] * 12)):
             with self.subTest(window=label):
                 self.arms(self.DEPLOY, intervals)
                 state, detail = self.limit_at(1800, 3600)
                 self.assertEqual(state, "STALE", detail)
-                self.assertIn("limit=1740s", detail)
+                self.assertIn("limit=1615s", detail)
 
     def test_the_first_arm_after_deploy_does_not_loosen_a_mixed_file(self):
         # SC2(d). Every live file becomes a mixed legacy+new file at its first post-
@@ -790,7 +895,8 @@ class Liveness(unittest.TestCase):
         self.arms(self.DEPLOY + [self.DEPLOY[-1] + 900], [None] * 12 + [3600])
         state, detail = self.limit_at(1800, 3600)
         self.assertEqual(state, "STALE", detail)
-        self.assertIn("limit=1740s", detail)
+        # Gap-free tail, as in SC2(b): 1372 s, so 1552 s rather than 1740 s.
+        self.assertIn("limit=1552s", detail)
 
     def test_a_rise_then_a_shorter_actual_cadence_is_not_floored(self):
         # SC2(e). A real rise, but the manager keeps ticking at 900. The first completed
@@ -924,16 +1030,19 @@ class StateVerb(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.state("--state")
 
-    def test_check_still_never_prints_stopped(self):
-        # The property the new verb exists for, pinned so a later change to
-        # --check cannot quietly make the two agree and hide the distinction.
+    def test_check_prints_nothing_for_a_fresh_stand_down(self):
+        # A stand-down is reported only PAST two of its own periods, so a just-written
+        # marker must stay silent — reporting it at once would fire on every ordinary
+        # stand-down. The past-the-bound case is pinned in
+        # Liveness.test_a_stand_down_past_two_periods_is_reported; together they keep
+        # the bound honest rather than letting either half stand alone.
         with redirect_stdout(io.StringIO()):
             self.m.arm("Manager Layer", "goal", 300)
             self.m.stop("Manager Layer", "goal")
         out = io.StringIO()
         with redirect_stdout(out):
             self.m.check()
-        self.assertNotIn("STOPPED", out.getvalue())
+        self.assertEqual(out.getvalue(), "")
 
 
 class SleepState(unittest.TestCase):
@@ -2031,6 +2140,139 @@ class WorkSignal(unittest.TestCase):
         state, detail = self.m.classify(s, time.time())
         self.assertEqual("OK", state)
         self.assertIn("work=none", detail)
+
+    def test_a_fresh_cadence_does_not_mask_an_exited_session(self):
+        """EXITED wins over a fresh arm record — the 2026-11-18 defect.
+
+        A `.cadence` file survives the session that wrote it: nothing deletes it on exit. So a
+        manager that died minutes ago kept a FRESH record and read `OK`, while the board showed
+        it closed and the fleet showed it healthy. Measured that day on five flagged managers,
+        found only by reading `~/.claude/sessions/*.json` by hand.
+
+        ⚠️ **Fails on the pre-fix code**, where `classify` returned `OK` on cadence freshness
+        alone and never consulted the registry.
+        """
+        s = self.arm_old(age=100, session=self.SID)  # a FRESH cadence
+        self.transcript(self.SID, 4000)  # a transcript that stopped moving
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: False
+        try:
+            state, detail = self.m.classify(s, time.time())
+        finally:
+            self.m.registry_holds = prior
+        self.assertEqual("EXITED", state)
+        self.assertIn("exited", detail)
+
+    def test_a_registered_session_is_never_exited(self):
+        """A live registry entry is the positive half of the agreement rule."""
+        s = self.arm_old(age=100, session=self.SID)
+        self.transcript(self.SID, 4000)
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: True
+        try:
+            state, _ = self.m.classify(s, time.time())
+        finally:
+            self.m.registry_holds = prior
+        self.assertNotEqual("EXITED", state)
+
+    def test_an_unreadable_registry_is_never_exited(self):
+        """`None` is "could not tell", never death — the resume-authorising direction.
+
+        `read_registry` returns `None` for an unreadable directory, distinct from `{}`, and
+        folding that into EXITED would report a manager dead on a host where the registry is
+        merely unreadable.
+        """
+        s = self.arm_old(age=100, session=self.SID)
+        self.transcript(self.SID, 4000)
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: None
+        try:
+            state, _ = self.m.classify(s, time.time())
+        finally:
+            self.m.registry_holds = prior
+        self.assertNotEqual("EXITED", state)
+
+    def test_a_moving_transcript_is_never_exited(self):
+        """An unregistered id with a MOVING transcript is a session that just started.
+
+        Claude Code writes the registry row seconds to minutes after the process starts, so
+        "no entry" alone covers the startup shape. The transcript is what tells it apart.
+        """
+        s = self.arm_old(age=100, session=self.SID)
+        self.transcript(self.SID, 5)  # written moments ago
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: False
+        try:
+            state, _ = self.m.classify(s, time.time())
+        finally:
+            self.m.registry_holds = prior
+        self.assertNotEqual("EXITED", state)
+
+    def _state_cli(self):
+        """Run `--state` as the CLI would and return its stdout.
+
+        The observation, not the plan: `classify()` is the unit under test in the cases above,
+        but SC2's probe reads `--state` output, so at least one case must go through `main()`.
+        """
+        out, old = io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", "--state", "--subject", self.SUBJECT, "--branch", "goal"]
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                self.m.main()
+        finally:
+            sys.argv = old
+        return out.getvalue()
+
+    def test_state_cli_reports_exited_for_a_fresh_cadence_with_a_gone_session(self):
+        """SC2 probe (a), through the CLI. Fails on the pre-fix code, which printed OK."""
+        self.arm_old(age=100, session=self.SID)
+        self.transcript(self.SID, 4000)
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: False
+        try:
+            out = self._state_cli()
+        finally:
+            self.m.registry_holds = prior
+        self.assertIn("EXITED", out)
+
+    def test_state_cli_reports_idle_for_a_gate_watched_goal_whose_session_is_unregistered(self):
+        """SC2 probe (b), through the CLI — the non-regression limb.
+
+        A goal-tier manager's liveness is its sweep gate, not a live model session, so an
+        unregistered `.session` id with a still transcript is the NORMAL state. `OK` fails this
+        case too: `classify()` is explicit that a gate tick proves the timer works and never
+        that the manager ran.
+        """
+        self.arm_old(age=5000, session=self.SID)
+        self.transcript(self.SID, 4000)
+        self.watched()
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: False
+        try:
+            out = self._state_cli()
+        finally:
+            self.m.registry_holds = prior
+        self.assertIn("IDLE", out)
+        self.assertNotIn("EXITED", out)
+        self.assertNotIn("\tOK", out)
+
+    def test_a_stale_cadence_stays_stale_even_when_the_session_is_gone(self):
+        """EXITED must not steal the STALE population — that would drop dead managers.
+
+        Every consumer acts on STALE / INVALID only (the `--check` sweep, `topic-keepalive.py`
+        and `crashed-managers.py`). If a dead manager with a stale cadence read EXITED instead,
+        it would leave both the alert set and the restart set — the opposite of what this
+        change is for. EXITED is the narrow answer for a record that still looks HEALTHY.
+        """
+        s = self.arm_old(age=5000, session=self.SID)  # a STALE cadence
+        self.transcript(self.SID, 6000)
+        prior = self.m.registry_holds
+        self.m.registry_holds = lambda sid: False
+        try:
+            state, _ = self.m.classify(s, time.time())
+        finally:
+            self.m.registry_holds = prior
+        self.assertEqual("STALE", state)
 
     def test_a_topic_subject_with_no_work_is_stale_not_idle(self):
         """IDLE is goal-tier only — the other tiers arm their own cadence."""

@@ -46,12 +46,15 @@ reporting `liveness: none` and `owner_live: null`. Rows then fall through to
 `create` / `direct` because nothing can be proven live — useful offline, and it is
 what the fixture tests use so they never touch the live fleet. It is NOT a
 substitute for a live run: `open-manager` can never fire under it, since that
-branch needs a subject proven to have no live manager.
+branch needs a subject proven to have no live manager. It also disables the
+`parked` read, because the declared-wait log is live fleet state — see
+`ctx["no_wait"]`. `--no-wait` disables that read on its own, with liveness left on.
 
 Exit codes: 0 ok, 2 usage or config error.
 """
 
 import argparse
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -75,6 +78,15 @@ _FLAG_SPEC.loader.exec_module(flag_provenance)
 #: names; the values live in exactly one place.
 FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
 OPENING_ACTORS = flag_provenance.OPENING_ACTORS
+
+#: The `⏰ Ends:` reader, loaded by path for the same reason `flag_provenance` is.
+#: `parked` reuses it rather than re-parsing a closer: one home for the marker, so a
+#: row the tick would re-drive and a row the census would count `absent` cannot
+#: disagree about what "waiting" means.
+_WAIT_SPEC = importlib.util.spec_from_file_location(
+    "declared_wait", os.path.join(HERE, "declared-wait.py"))
+declared_wait = importlib.util.module_from_spec(_WAIT_SPEC)
+_WAIT_SPEC.loader.exec_module(declared_wait)
 
 #: The tokens `refused` may carry. Two producers: `refusals()` adds
 #: `agent-set-flag` from the per-kind provenance rule, `resolve_branch()` adds
@@ -353,10 +365,21 @@ def live_sessions():
     an answer. Folding the second into the first empties `managers`, so `subject_live`
     returns False for every subject and every goal/topic row emits `open-manager` — a
     duplicate-spawn hazard, and the exact fold `branch: unknown` exists to reject.
+
+    ⚠️ **Exit 0 is not sufficient either, and this is the 2026-11-18 addition.** When the
+    session-heartbeat endpoint is unreadable, `--list` exits 0 built from the identity
+    registry and the headless store — a list that structurally OMITS cluster and a2a
+    sessions, because they have no local pid and no registry entry. Reading that as a
+    complete fleet makes a live cluster manager read absent and emits `open-manager` against
+    it: the same duplicate-spawn hazard as a non-zero exit, arriving through exit 0. The
+    fallback announces itself on stderr, so that line is the signal.
     """
     out = subprocess.run([sys.executable, os.path.join(HERE, "session-liveness.py"),
                           "--list"], capture_output=True, text=True, check=False)
     if out.returncode != 0:
+        return None
+    if "WARNING — the session-heartbeat endpoint" in (out.stderr or ""):
+        # The registry fallback: omits cluster/a2a, so a no-match is not "not live".
         return None
     sessions = {}
     for line in out.stdout.splitlines():
@@ -433,11 +456,56 @@ def liveness_of(sid):
     return LIVENESS_EXIT.get(out.returncode, "UNKNOWN")
 
 
+#: Probes of one run execute at most this many at a time. Each probe is a Python
+#: interpreter start, so the sequential run was bound by spawn latency, not by work.
+PROBE_WORKERS = 8
+
+#: Total wall-clock budget for every probe of one run. A sid not answered inside it
+#: reads `UNKNOWN` — the verdict a probe that timed out already gets — never `ABSENT`,
+#: because `ABSENT` licenses spawning a second session.
+PROBE_DEADLINE = 60
+
+
+def probe_all(sids, workers=PROBE_WORKERS, deadline=PROBE_DEADLINE):
+    """{sid: verdict} for every distinct sid, probed concurrently, each exactly once.
+
+    Same verdict `liveness_of` returns sequentially; only the schedule changes.
+    """
+    wanted = sorted({sid for sid in sids if sid})
+    if not wanted:
+        return {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    futures = {pool.submit(liveness_of, sid): sid for sid in wanted}
+    done, pending = concurrent.futures.wait(futures, timeout=deadline)
+    results = {}
+    for future in done:
+        try:
+            results[futures[future]] = future.result()
+        except Exception:  # a probe that cannot answer is UNKNOWN, never absent
+            results[futures[future]] = "UNKNOWN"
+    for future in pending:
+        future.cancel()
+        results[futures[future]] = "UNKNOWN"
+    if pending:
+        print("flagged-rows: %d liveness probe(s) not answered within %ds — UNKNOWN"
+              % (len(pending), deadline), file=sys.stderr)
+    pool.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
+def probed(ctx, sid):
+    """The verdict for one sid: the run's shared result when prefetched, else a live probe."""
+    results = ctx.get("sid_verdicts")
+    if results is not None and sid in results:
+        return results[sid]
+    return liveness_of(sid)
+
+
 def row_liveness(ctx, sid):
     """`liveness_of` with a per-run cache — several rows share a session id."""
     key = ("row", sid)
     if key not in ctx["liveness_cache"]:
-        ctx["liveness_cache"][key] = liveness_of(sid)
+        ctx["liveness_cache"][key] = probed(ctx, sid)
     return ctx["liveness_cache"][key]
 
 
@@ -688,6 +756,17 @@ def subject_live(ctx, vault, kind, name):
     return name in ctx["managers"]
 
 
+def subject_sid(ctx, vault, kind, name):
+    """The `claude_session_id` a subject page records its manager in, or None."""
+    path = subject_page(ctx, vault, kind, name)
+    block = read_block(path) if path else None
+    if block is None:
+        return None
+    # `claude_session_id` is the only field a subject page records its manager in;
+    # the retired-key fallback was removed once both vaults were migrated.
+    return (open_queue.field(block, "claude_session_id") or "").strip() or None
+
+
 def subject_liveness(ctx, vault, kind, name):
     """`true` / `false` / `null` for one subject's recorded manager session.
 
@@ -703,18 +782,11 @@ def subject_liveness(ctx, vault, kind, name):
         return ctx["liveness_cache"][key]
     if ctx["no_liveness"]:
         return None
-    path = subject_page(ctx, vault, kind, name)
-    block = read_block(path) if path else None
-    sid = None
-    if block is not None:
-        # `claude_session_id` is the only field a subject page records its manager in;
-        # the retired-key fallback was removed once both vaults were migrated.
-        sid = ((open_queue.field(block, "claude_session_id") or "").strip()
-               or None)
+    sid = subject_sid(ctx, vault, kind, name)
     if not sid:
         verdict = False
     else:
-        live = liveness_of(sid)
+        live = probed(ctx, sid)
         verdict = True if live == "LIVE" else (False if live == "ABSENT" else None)
     ctx["liveness_cache"][key] = verdict
     return verdict
@@ -731,7 +803,7 @@ def fleet_liveness(ctx):
         return ctx["liveness_cache"][FLEET_KEY]
     if ctx["no_liveness"]:
         return None
-    verdict = liveness_of(ctx["fleet_sid"])
+    verdict = probed(ctx, ctx["fleet_sid"])
     live = True if verdict == "LIVE" else (False if verdict == "ABSENT" else None)
     ctx["liveness_cache"][FLEET_KEY] = live
     return live
@@ -801,7 +873,7 @@ def owner_liveness(owner, kind, name, ctx, vault):
 
 
 def resolve_branch(kind, role, sid, live, pane, chain_live, block,
-                   owner=None, owner_live=None, registry_ok=False):
+                   owner=None, owner_live=None, registry_ok=False, parked=False):
     """The ordered predicate list — first match wins, so the set is a partition.
 
     `unknown` outranks everything: an unanswerable probe must never be folded into
@@ -834,6 +906,13 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
       selected that owner — the two probes are deliberately independent. An
       unanswerable probe (`None`) falls through to `create`: a probe that cannot
       answer must not suppress work, the same reason `unknown` outranks `create`.
+
+    `parked` is the one branch that is NOT a liveness verdict. It is the row's own
+    last closer declaring an external observable — the `⏰ Ends:` marker, which the
+    global CLAUDE.md § Async State Closer scopes to the 🟡 WAITING panel alone. Its
+    input is `declared-wait.py`'s `declared_wait()`, the single reader, never a second
+    parser: a row parked on a card, a PR, a `defer_date` or a host probe reads
+    `parked` and never `absent`. See `parked_for` for the per-run cache.
     """
     refused = []
     if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
@@ -848,10 +927,20 @@ def resolve_branch(kind, role, sid, live, pane, chain_live, block,
         return "open-manager", refused
     if live == "LIVE" and pane:
         return "jump", refused
-    if live == "ABSENT" and sid:
-        return "resume", refused
     if live == "LIVE":
         return "skip", refused
+    # ⚠️ `parked` sits AFTER every LIVE branch and BEFORE `resume`/`create`, and that
+    # position IS the rule. A LIVE row is open — it jumps or skips — and folding it
+    # into `parked` would drop a session that exists out of coverage's numerator. An
+    # ABSENT row whose last closer declared an external wait is exactly the row
+    # `resume` would otherwise reopen on every tick, so this is what stops a 100 %
+    # target from driving the fleet back into resuming idle workers.
+    # Moving the LIVE `skip` above `resume` is behaviour-preserving: `live` carries one
+    # value, so the two predicates are disjoint.
+    if parked:
+        return "parked", refused
+    if live == "ABSENT" and sid:
+        return "resume", refused
     if kind == "task" and owner is not FLEET and owner_live is True:
         return "held-owner-live", refused
     return "create", refused
@@ -935,7 +1024,39 @@ def cached_skip(ctx, vault, kind, path):
     return None, key
 
 
+def parked_for(ctx, sid):
+    """Is `sid`'s newest `Stop` record declaring a live `⏰ Ends:`? Cached per run.
+
+    Reads ONE session's log, never the whole store — see `ctx["parked_ids"]` for the
+    measurement that rules out `declared_wait_ids()` here. A missing sid, an unreadable
+    log and `--no-wait`/`--no-liveness` all answer `False`, which is `declared-wait.py`'s
+    own failed-read rule: an unanswerable probe must not suppress work.
+    """
+    if ctx.get("no_wait") or not sid:
+        return False
+    cache = ctx.setdefault("parked_ids", {})
+    if sid not in cache:
+        cache[sid] = declared_wait.declared_wait(sid)
+    return cache[sid]
+
+
 def row_for(vault, cfg, kind, path, ctx):
+    pending, reason = row_prepare(vault, cfg, kind, path, ctx)
+    if pending is None:
+        return None, reason
+    return pending.finish(), None
+
+
+class Pending:
+    """A row built up to its liveness reads: `sids()` names the probes it will make,
+    `finish()` makes them (from the shared result when prefetched) and returns the row."""
+
+    def __init__(self, sids, finish):
+        self.sids = sids
+        self.finish = finish
+
+
+def row_prepare(vault, cfg, kind, path, ctx):
     hit, key = cached_skip(ctx, vault, kind, path)
     if hit is not None:
         return None, hit
@@ -974,6 +1095,22 @@ def row_for(vault, cfg, kind, path, ctx):
         return None, "no launcher resolved"
     sid = ((open_queue.field(block, "claude_session_id") or "").strip()
            or None)
+
+    def sids():
+        if ctx["no_liveness"]:
+            return []
+        owner = resolve_owner(page_kind, name, block, ctx, vault)
+        owner_sid = (ctx["fleet_sid"] if owner is FLEET
+                     else subject_sid(ctx, vault, owner["kind"], owner["name"]))
+        return [sid, owner_sid]
+
+    return Pending(sids, lambda: _finish_row(vault, kind, path, ctx, block, name,
+                                             page_kind, role, role_source, mode,
+                                             launcher, launcher_source, sid)), None
+
+
+def _finish_row(vault, kind, path, ctx, block, name, page_kind, role, role_source,
+                mode, launcher, launcher_source, sid):
     live = "none" if ctx["no_liveness"] else row_liveness(ctx, sid)
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
     # 2000-line module per call — probing ABSENT rows too tripled the run time for
@@ -991,7 +1128,8 @@ def row_for(vault, cfg, kind, path, ctx):
     owner_live, chain_live = owner_liveness(owner, page_kind, name, ctx, vault)
     branch, refused = resolve_branch(page_kind, role, sid, live, pane, chain_live, block,
                                      owner=owner, owner_live=owner_live,
-                                     registry_ok=ctx["managers"] is not None)
+                                     registry_ok=ctx["managers"] is not None,
+                                     parked=parked_for(ctx, sid))
     # Provenance first: `refusals()` is the per-kind rule SC4 names, and it is
     # independent of the branch partition, so a row can carry both tokens.
     refused = refusals(page_kind, block) + refused
@@ -1015,7 +1153,7 @@ def row_for(vault, cfg, kind, path, ctx):
         "pane": pane,
         "blocked_by": blocked_by_of(block, os.path.dirname(path) if kind == "task" else None),
         "refused": refused,
-    }, None
+    }
 
 
 def role_map(path):
@@ -1055,6 +1193,17 @@ def collect(args):
         #: through. Filled as the directories are walked, before any row is built.
         "subjects": {},
         "liveness_cache": {},
+        #: sid → is-parked, filled on demand by `parked_for`. A whole-store read
+        #: (`declared_wait_ids()`) is the WRONG shape here: it is O(total log bytes)
+        #: over every session on the machine — measured 2026-11-17 at 159 MB across
+        #: 6,978 files — and this script runs on the tick and in the census. The
+        #: per-session form reads one file, and a fleet's eligible rows number tens.
+        "parked_ids": {},
+        #: Read no live fleet state at all: `--no-wait` names it, and `--no-liveness`
+        #: already promises the fixture tests never touch the live fleet — the events
+        #: log is exactly that. Without this limb the fixture suite blocked 6+ minutes
+        #: on the operator's real log (measured 2026-11-17).
+        "no_wait": getattr(args, "no_wait", False) or args.no_liveness,
         #: The mtime page cache — `None` under `--no-cache`. `new` holds only pages
         #: visited THIS run, so a deleted or renamed page leaves no key behind.
         "cache": (None if args.no_cache else
@@ -1091,17 +1240,22 @@ def collect(args):
                 if filename.endswith(".md"):
                     ctx["subjects"][(vault, kind, filename[:-3])] = os.path.join(
                         directory, filename)
-        # Pass 2 — build the rows.
+        # Pass 2 — prepare the rows, probe every distinct session id they need
+        # concurrently, then finish them in walk order.
+        pendings = []
         for kind, directory in scanned:
             for filename in sorted(os.listdir(directory)):
                 if not filename.endswith(".md"):
                     continue
-                row, reason = row_for(vault, cfg, kind,
-                                      os.path.join(directory, filename), ctx)
-                if row is None:
+                pending, reason = row_prepare(vault, cfg, kind,
+                                              os.path.join(directory, filename), ctx)
+                if pending is None:
                     skipped[reason] = skipped.get(reason, 0) + 1
                     continue
-                rows.append(row)
+                pendings.append(pending)
+        ctx["sid_verdicts"] = probe_all(
+            [sid for pending in pendings for sid in pending.sids()])
+        rows.extend(pending.finish() for pending in pendings)
     rows.sort(key=lambda r: (KIND_ORDER.get(r["kind"], 9), r["vault"], r["name"]))
     cache = ctx["cache"]
     if cache is not None:
@@ -1134,6 +1288,9 @@ def main(argv=None):
                         help="mtime page cache file (default: %(default)s)")
     parser.add_argument("--no-cache", action="store_true",
                         help="parse every page; neither read nor write the page cache")
+    parser.add_argument("--no-wait", action="store_true",
+                        help="treat no session as parked; skip the declared-wait read "
+                             "(fixtures, so a test never touches the live log)")
     args = parser.parse_args(argv)
 
     rows, skipped, fallbacks, normalised, cache_stats = collect(args)

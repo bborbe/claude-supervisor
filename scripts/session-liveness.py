@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Is this session id live? One instrument, one answer, for the whole plugin.
 
-Liveness is answered by the attention store's **session-heartbeat endpoint** and by nothing
-else. Every session that can be asked about stamps that store — an interactive tab, a headless
-in-process worker, a cluster pod — so one channel answers for all of them, and the verdict is
-the store's own `live` boolean (its age against its window), never a recomputation here.
+Liveness is answered primarily by the attention store's **session-heartbeat endpoint**, which
+holds every population in one store — an interactive tab, a headless in-process worker, a
+cluster pod — so one channel answers for all of them, and the verdict is the store's own `live`
+boolean (its age against its window), never a recomputation here. When that endpoint cannot be
+read, the two on-disk channels answer instead; see the union paragraph below.
 
   --check <session-id>   LIVE (exit 0) / ABSENT (exit 1) / UNKNOWN (exit 2) / AMBIGUOUS (exit 3)
   --check <not-an-id>    MALFORMED (exit 4) — the argument is not a single session id at all
@@ -29,13 +30,23 @@ Same rule as `live-workers.py`.
 
 ⚠️ **ABSENT is licensed only by a READABLE endpoint that positively reports the id as not
 live** — a 200 carrying `live: false`, or a 404 from the store, or a readable list with no
-matching id. Nothing else may reach it.
+matching id. ⚠️ **When the endpoint is UNREADABLE the licence narrows rather than widens:** the
+only source that may then reach ABSENT is a registry entry the registry HOLDS and computes
+`alive: False`, with no live headless stamp contradicting it. A missing entry never does — see
+the union paragraph below. Nothing else may reach ABSENT either way.
 
 ⚠️ **A session with NO identity-registry entry is ABSENT only on a stale heartbeat record.**
 Claude Code deletes the registry entry on exit, so an exited session has none; a session spawned
 moments ago has none YET. The endpoint's record tells them apart: a `live: false` row with a
 measured `age_seconds` (older than the endpoint's own window) is ABSENT, while no record at all
 (the per-id 404) keeps UNKNOWN. See `_absent_licensed`.
+
+⚠️ **A session with no registry entry AND no heartbeat row is ABSENT only on an idle transcript.**
+The endpoint keeps heartbeat rows for a limited time, so a session quiet for days has neither
+source left, and the stale-row rule above can never fire for it. Its transcript
+(`<config dir>/projects/*/<sid>.jsonl`, newest match) disproves "spawned moments ago" when it
+has been idle past `TRANSCRIPT_IDLE_SECONDS`. No transcript, a fresh one, or an unreadable
+endpoint keeps UNKNOWN.
 
 ⚠️ **ABSENT is licensed only while the endpoint's coverage of live sessions is COMPLETE, and
 that is a precondition this file cannot establish for itself — it is established PER ID on the
@@ -78,14 +89,50 @@ cadence and the ledger's terminal vocabulary are audited in `bborbe/claude-wrapp
 way would be a guess. Exit 3 names it and prints the candidates, so the caller can pass the
 full id.
 
-⚠️ **Why the endpoint and not the registry.** Until 2026-10-08 this file composed two sources
-— the session registry and the heartbeat store — with an asymmetric rule between them (a
-positive from either was an answer; a negative needed both readable). The reason was
-structural: the registry is pid-keyed and local-only, so it sees every session holding a
-socket and is blind to a session with no process of its own, while the heartbeat store covers
-those. The session-heartbeat endpoint already holds BOTH populations in one store — it serves
-`source: cluster` and `source: mcp-timer` rows beside local ones — so the composition
-disappears into the store and this file reads one channel.
+⚠️ **THE ENDPOINT IS THE PRIMARY CHANNEL AND THE ON-DISK CHANNELS ARE THE FALLBACK — a
+union, never a priority flip.** The endpoint holds every population in one store (it serves
+`source: cluster` and `source: mcp-timer` rows beside local ones), so while it is readable this
+file reads it alone and nothing below changes. When it is NOT readable the fleet must not go
+blind, because two channels still answer from disk:
+
+  * the **identity registry**, `~/.claude/sessions/*.json` — pid-keyed, local-only: every
+    session holding a socket. Blind to a session with no process of its own.
+  * the **headless heartbeat store** — a file per in-process SDK worker, which has no pid and
+    no registry entry. Blind to interactive tabs and to anything on another machine.
+
+Measured 2026-11-18: `attention-controller` was down ~70 minutes, `--list --json` exited 2
+with `ECONNREFUSED`, `--check` answered UNKNOWN for every id, 15 of 25 flagged rows read
+`degraded` and nothing could be opened — while the registry sat readable on disk the whole
+time. That is the outage this fallback removes.
+
+⚠️ **The verdict table, and the rule each cell rests on.**
+
+  | endpoint | registry | verdict | why |
+  |---|---|---|---|
+  | readable, row for id | (not consulted) | per `_verdict_for` | the store is the superset channel |
+  | readable, no row | (read) | per `_absent_licensed` | unchanged since 2026-10-12 |
+  | **unreadable** | `alive is True` | **LIVE** | the pid is occupied by the recorded process |
+  | **unreadable** | `alive is None` | **UNKNOWN** | pid occupied, identity unprovable |
+  | **unreadable** | `alive is False` | **ABSENT** | the registry HOLDS an entry and computes death |
+  | **unreadable** | no entry | **UNKNOWN**, unless the headless store is live → LIVE | see below |
+
+⚠️ **`ABSENT` is never licensed from a MISSING registry entry while the endpoint is down.**
+The registry deletes an entry on exit, so "no entry" covers a session that died, a session
+spawned moments ago, and — with the endpoint down — every cluster and a2a session, which has no
+local entry by construction. Nothing distinguishes them without the endpoint, and `ABSENT` is
+the one verdict that authorises a resume, so the answer is UNKNOWN. This is the same rule the
+2026-11-17 startup-shape fix already applies on the endpoint-readable path, carried to the
+fallback rather than relaxed there.
+
+⚠️ **The predicate is `alive is not False`, the SAME one `_absent_licensed`, `coverage()` and
+`unstamped()` use**, so the fallback and the primary path cannot disagree about what death is.
+
+⚠️ **`--list` degrades instead of refusing, and its consumer must degrade with it.** With the
+endpoint unreadable the list is built from the two on-disk channels, every row carrying
+`degraded: true`, and it exits 0 — a refusal blanks every caller, which is the outage. But a
+registry-built list structurally OMITS cluster and a2a sessions, so `commands/open.md` Step 2C
+must treat any `degraded` row as "cannot tell" and stop rather than fall through to its spawn
+branch: a no-match there would otherwise spawn a duplicate onto a live cluster manager.
 
 ⚠️ **The registry read did not disappear; it moved.** The registry answers a different
 question — identity, not liveness: the name a session holds, the names it used to hold, the
@@ -97,6 +144,7 @@ disagreeing about what an id argument means.
 """
 import argparse
 import errno
+import glob
 import importlib.util
 import json
 import os
@@ -128,6 +176,44 @@ CAUSES = (CAUSE_NOT_REGISTERED, CAUSE_EXPIRED, CAUSE_KEY_MISMATCH)
 # A full session id is a UUID, so its hyphens sit at these offsets and nowhere else.
 _UUID_SEPARATORS = frozenset((8, 13, 18, 23))
 _ID_MAX = 36
+
+# How long a session's transcript must have been idle before "spawned moments ago" is disproved.
+# ⚠️ **A fresh transcript keeps UNKNOWN.** A session that is writing its transcript is live, so
+# only a transcript idle past this threshold is evidence the process is gone. 15 minutes sits
+# well past any tool call a live session sits inside without writing a record.
+TRANSCRIPT_IDLE_SECONDS = 15 * 60
+
+
+def _projects_dir(projects_dir=None):
+    """Where transcripts live: `<config dir>/projects`, config dir = `$CLAUDE_CONFIG_DIR` or `~/.claude`."""
+    if projects_dir is not None:
+        return projects_dir
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(config, "projects")
+
+
+def _transcript_idle_seconds(sid, projects_dir=None, now=None):
+    """Seconds since the newest `<projects>/*/<sid>.jsonl` was written, or `None` when none exists.
+
+    `sid` may be a prefix, so it is matched as a file-name prefix; glob metacharacters and path
+    separators in it are refused, so a hostile id cannot widen the match. Several matches (one id
+    resumed from two cwds, or a prefix shared by two sessions) use the NEWEST mtime: any recent
+    write is a live writer, so the ambiguity can only keep UNKNOWN.
+    """
+    if not sid or any(c in sid for c in "*?[]/\\"):
+        return None
+    pattern = os.path.join(glob.escape(_projects_dir(projects_dir)), "*", sid + "*.jsonl")
+    newest = None
+    for path in glob.glob(pattern):
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None else max(newest, mtime)
+    if newest is None:
+        return None
+    return max(0.0, (time.time() if now is None else now) - newest)
+
 
 # The attention store, resolved exactly as the rest of the plugin resolves it: the same
 # variable and default `who-needs-me.py`, `attention-board.py` and `attention-ask.py` carry,
@@ -396,7 +482,7 @@ def _get_json_with_retry(url, timeout=_HTTP_TIMEOUT):
                 raise
 
 
-def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
+def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, projects_dir=None):
     """`(verdict, message, row)` for one id argument — `_check` guarded so it never crashes.
 
     ⚠️ **An exception escaping here would exit 1, which is this file's ABSENT code, so no
@@ -414,7 +500,7 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     about a live session still pays no identity probe.
     """
     try:
-        return _check(session_id, endpoint, timeout, registry_dir)
+        return _check(session_id, endpoint, timeout, registry_dir, projects_dir)
     except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
         return UNKNOWN, "session-liveness could not complete the check for %r: %s: %s" % (
             (session_id or "").strip(),
@@ -439,8 +525,18 @@ def _stale_heartbeat_row(row):
     return isinstance(age, (int, float)) and not isinstance(age, bool) and age > 0
 
 
+def _empty_heartbeat_row(row):
+    """True when a 200 per-id row carries neither a `live` flag nor an `age_seconds`.
+
+    The store keeps heartbeat rows for a limited time; an expired one can answer 200 with every
+    field null. That is "the endpoint holds no usable record", the same fact as a 404.
+    """
+    return isinstance(row, dict) and row.get("live") is None and row.get("age_seconds") is None
+
+
 def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it",
-                     cause=CAUSE_NOT_REGISTERED, row=None):
+                     cause=CAUSE_NOT_REGISTERED, row=None, no_heartbeat_row=False,
+                     projects_dir=None):
     """`(verdict, message, None)` for an id the endpoint holds NO row for — the ABSENT licence.
 
     ⚠️ **The three-tuple is `_check`'s contract, and the `None` row is part of it.** `_check`
@@ -515,6 +611,18 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
             # The exited shape: Claude Code deleted the registry entry on exit, and the endpoint
             # still holds a record it calls not live. Nothing here is "spawned moments ago".
             return ABSENT, "no session id matches %s" % sid, None
+        # ⚠️ **The expired-row shape.** No registry entry and the endpoint's row has expired
+        # (404 or all-null), so neither source tells "exited long ago" from "spawned moments
+        # ago". The session's own transcript does: one idle past the threshold disproves the
+        # "moments ago" caveat. No transcript, or a fresh one, keeps UNKNOWN. A false ABSENT puts
+        # two processes on one session, which is why every condition is required.
+        if no_heartbeat_row:
+            idle = _transcript_idle_seconds(sid, projects_dir)
+            if idle is not None and idle > TRANSCRIPT_IDLE_SECONDS:
+                return ABSENT, (
+                    "no session id matches %s (licensed by: no identity registry entry, no "
+                    "heartbeat row, transcript idle for %d minutes)" % (sid, int(idle // 60))
+                ), None
         # ⚠️ **The startup shape, and the whole point of this branch.** A session spawned
         # moments ago is absent from the registry until it is written; an id that no entry
         # matches is therefore a measurement this probe cannot make, not a session it can call
@@ -538,6 +646,115 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
             "incomplete, so ABSENT cannot be licensed (cause: %s)" % (non_dead[0], endpoint_state, cause)
         ), None
     return ABSENT, "no session id matches %s" % sid, None
+
+
+def _headless_live_ids():
+    """`{session_id}` the headless heartbeat store calls live, or `None` when it cannot be read.
+
+    ⚠️ **`None` and `set()` are different answers** — the same rule `read_live` carries. An
+    unreadable store must not read as "no headless worker is live", because that is the
+    resume-authorising direction. `live-workers.py` already owns the resolution (which
+    directory, what TTL, what a stale cluster stamp means), so this delegates rather than
+    re-deriving a second reader over the same files.
+    """
+    try:
+        lw = _live_workers()
+        stamps = lw.read_live(lw.heartbeat_dir())
+        if stamps is None:
+            return None
+        # ⚠️ **The comprehension is INSIDE the guard, and the `isinstance` check is on the id.**
+        # A stamp whose `session_id` is a list or a dict is unhashable, so the set build would
+        # raise `TypeError` — and on the `--list` path that escape is a traceback with exit 1,
+        # this file's ABSENT code. `--check` is saved by `check()`'s blanket guard; `--list` is
+        # not. The same rule `coverage()` applies to a malformed endpoint row.
+        return {
+            s["session_id"]
+            for s in stamps
+            if isinstance(s, dict)
+            and s.get("state") == "live"
+            and isinstance(s.get("session_id"), str)
+            and s["session_id"]
+        }
+    except Exception:  # noqa: BLE001 — an unreadable store is UNKNOWN, never a confident empty
+        return None
+
+
+def _local_verdict(sid, registry_dir=None, why=""):
+    """`(verdict, message, row)` from the on-disk channels, for when the endpoint cannot be read.
+
+    ⚠️ **This is the fallback half of the union and it may never license `ABSENT` from a
+    missing registry entry.** The registry deletes an entry on exit, so "no entry" covers a
+    session that died, one spawned moments ago, and — with the endpoint down — every cluster
+    and a2a session, which has no local entry by construction. Nothing distinguishes them
+    without the endpoint, and `ABSENT` authorises a resume, so that cell is UNKNOWN.
+
+    The registry's three-state `alive` maps exactly as `_absent_licensed` maps it, on the same
+    `alive is not False` predicate, so the two paths cannot disagree: `True` → LIVE, `None` →
+    UNKNOWN, `False` → ABSENT (the registry HOLDS an entry and computes death).
+
+    The `row` returned is `None` on every branch: there is no heartbeat row to carry, and
+    `_check`'s callers unpack three values.
+    """
+    identity = _identity().read_registry(registry_dir)
+    if identity is None:
+        return UNKNOWN, (
+            "%s — and the identity registry could not be read either (%s), so liveness cannot "
+            "be measured for %s" % (why, registry_dir or "default path", sid)
+        ), None
+    keys = list(identity)
+    exact = next((k for k in keys if k.lower() == sid), None)
+    matched = [exact] if exact is not None else [k for k in keys if k.lower().startswith(sid)]
+    # ⚠️ **Both channels are matched BEFORE any verdict is returned.** The headless store is the
+    # endpoint-down substitute for a heartbeat row, so consulting it only after a registry miss
+    # would let a dead registry row answer ABSENT while a live headless stamp for the same id
+    # sat unread — the resume-authorising direction this fallback exists to keep shut. The
+    # union also means a prefix that names one dead registry entry and one live headless id is
+    # AMBIGUOUS rather than a guess.
+    headless = _headless_live_ids()
+    hits = sorted(
+        h for h in (headless or ())
+        if isinstance(h, str) and (h.lower() == sid or h.lower().startswith(sid))
+    )
+    all_matches = sorted(set(matched) | set(hits))
+    if len(all_matches) > 1:
+        return AMBIGUOUS, "%d session ids match %s — pass a longer id: %s" % (
+            len(all_matches), sid, ", ".join(m[:12] for m in all_matches)
+        ), None
+    if hits:
+        # A live headless stamp is a POSITIVE answer, and it outranks a dead registry row for
+        # the same id: the store's stamp is refreshed while the turn runs, the registry row can
+        # lag or be stale. A positive from any channel is an answer.
+        return LIVE, "%s (live headless stamp)" % why, None
+    if matched:
+        rec = identity.get(matched[0]) or {}
+        alive = rec.get("alive")
+        if alive is True:
+            return LIVE, "%s (identity registry reports pid %s alive)" % (
+                why, rec.get("pid")
+            ), None
+        if alive is None:
+            return UNKNOWN, (
+                "%s — %s holds a pid the identity registry cannot prove, so liveness cannot be "
+                "decided from disk" % (why, matched[0])
+            ), None
+        # `alive is False`: the registry HOLDS the entry and computes death — but that only
+        # licenses ABSENT when the OTHER channel could be read. ⚠️ **An unreadable headless
+        # store is `None`, not an empty set**, and collapsing the two would let a dead registry
+        # row answer ABSENT while a live headless stamp sat unread — the resume-authorising
+        # direction this whole fallback exists to keep shut, and the union rule stated above.
+        if headless is None:
+            return UNKNOWN, (
+                "%s — %s computes dead, but the headless heartbeat store could not be read, so "
+                "ABSENT cannot be licensed" % (why, matched[0])
+            ), None
+        return ABSENT, "%s (identity registry reports the pid gone for %s)" % (
+            why, matched[0]
+        ), None
+    return UNKNOWN, (
+        "%s — and no identity registry entry and no live headless stamp exist for %s; a session "
+        "spawned moments ago and a cluster session look identical here, so ABSENT cannot be "
+        "licensed" % (why, sid)
+    ), None
 
 
 def is_session_id(value):
@@ -576,8 +793,8 @@ def is_session_id(value):
     return True
 
 
-def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
-    """`(verdict, message, row)` for one id argument, from the endpoint alone.
+def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, projects_dir=None):
+    """`(verdict, message, row)` for one id argument, from the endpoint with a disk fallback.
 
     ⚠️ **The list route is fetched FIRST, and that is a cost fix, not a taste.** The per-id
     route is an EXACT lookup and 404s on a prefix (measured 2026-10-08:
@@ -615,23 +832,36 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     try:
         status, rows = _get_json_with_retry(base + HEARTBEAT_PATH, timeout)
     except (OSError, ValueError) as exc:
-        return UNKNOWN, "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
-            base,
-            int(round((time.monotonic() - started) * 1000)),
-            _describe_read_failure(exc),
-        ), None
+        # ⚠️ **The fallback, not a bare UNKNOWN.** An unreachable endpoint used to answer
+        # UNKNOWN for every id, which blanked the fleet whenever one local process restarted
+        # (measured 2026-11-18). The on-disk channels still answer, and `_local_verdict` may
+        # only ever return LIVE from a positive — it can never license ABSENT without an entry.
+        return _local_verdict(
+            sid,
+            registry_dir,
+            "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
+                base,
+                int(round((time.monotonic() - started) * 1000)),
+                _describe_read_failure(exc),
+            ),
+        )
     if status != 200 or not isinstance(rows, list):
         # ⚠️ **Not ABSENT.** A 5xx, a 403, a body that is not JSON — none of them is the store
         # saying "this session is gone", and reading one as ABSENT is the resume-onto-a-live-
-        # conversation this file exists to prevent.
+        # conversation this file exists to prevent. A store that is up but broken is still a
+        # store this probe cannot read, so it takes the same fallback.
         #
         # The elapsed time is reported here too: a slow store that answered with a wrong shape is
         # a different fact from one that answered instantly, and the difference is what tells a
         # loaded host from a misrouted endpoint.
-        return UNKNOWN, "session-heartbeat endpoint returned HTTP %s after %d ms" % (
-            status,
-            int(round((time.monotonic() - started) * 1000)),
-        ), None
+        return _local_verdict(
+            sid,
+            registry_dir,
+            "session-heartbeat endpoint returned HTTP %s after %d ms" % (
+                status,
+                int(round((time.monotonic() - started) * 1000)),
+            ),
+        )
 
     # The list carries every session the store has ever seen, live or stale — a stale row is
     # matched too, exactly as the registry's own keys were: the argument identifies a session,
@@ -671,7 +901,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # The exact-match fast path: a full id is one dict lookup, and the prefix scan is skipped.
     exact = next((k for k in by_id if k.lower() == sid), None)
     if exact is not None:
-        return _verdict_for(by_id[exact], sid, registry_dir)
+        return _verdict_for(by_id[exact], sid, registry_dir, projects_dir)
     matches = sorted(sid_ for sid_ in by_id if sid_.lower().startswith(sid))
     if len(matches) > 1:
         # 12 chars, not 8: the caller already passed a prefix long enough to collide, so
@@ -682,7 +912,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             ", ".join(m[:12] for m in matches),
         ), None
     if len(matches) == 1:
-        return _verdict_for(by_id[matches[0]], sid, registry_dir)
+        return _verdict_for(by_id[matches[0]], sid, registry_dir, projects_dir)
 
     # The list was readable and matched nothing. Confirm against the per-id route before
     # licensing ABSENT — the one verdict a caller acts on by starting a second writer.
@@ -699,15 +929,19 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             "%s%s/%s" % (base, HEARTBEAT_PATH, urllib.parse.quote(sid, safe="")), timeout
         )
     except (OSError, ValueError) as exc:
-        return UNKNOWN, "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
-            base,
-            int(round((time.monotonic() - started) * 1000)),
-            _describe_read_failure(exc),
-        ), None
+        return _local_verdict(
+            sid,
+            registry_dir,
+            "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
+                base,
+                int(round((time.monotonic() - started) * 1000)),
+                _describe_read_failure(exc),
+            ),
+        )
     if status == 200 and isinstance(row, dict):
-        return _verdict_for(row, sid, registry_dir)
+        return _verdict_for(row, sid, registry_dir, projects_dir)
     if status == 404:
-        return _absent_licensed(sid, registry_dir)
+        return _absent_licensed(sid, registry_dir, no_heartbeat_row=True, projects_dir=projects_dir)
     return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s after %d ms" % (
         status,
         sid,
@@ -715,7 +949,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     ), None
 
 
-def _verdict_for(row, sid, registry_dir=None):
+def _verdict_for(row, sid, registry_dir=None, projects_dir=None):
     """`(verdict, message, row)` for a single heartbeat row. UNKNOWN when `live` is unusable.
 
     ⚠️ **A not-live CLUSTER row is UNKNOWN while the local reachability marker is stale.** The
@@ -753,6 +987,13 @@ def _verdict_for(row, sid, registry_dir=None):
                 ), row
         verdict, why, _ = _absent_licensed(
             full, registry_dir, "serves a stale `live: false` row for it", CAUSE_EXPIRED, row
+        )
+        return verdict, why, row
+    if _empty_heartbeat_row(row):
+        # An expired row served with every field null: the same fact as a 404 — the endpoint
+        # holds no usable record. See `_empty_heartbeat_row`.
+        verdict, why, _ = _absent_licensed(
+            full, registry_dir, no_heartbeat_row=True, projects_dir=projects_dir
         )
         return verdict, why, row
     return UNKNOWN, (
@@ -1049,8 +1290,10 @@ def main(argv=None):
     parser.add_argument(
         "--heartbeat-dir",
         default=None,
-        help="accepted for backward compatibility; the heartbeat store is no longer read here "
-        "(the session-heartbeat endpoint replaces it)",
+        help="accepted for backward compatibility and NOT honoured. The session-heartbeat "
+        "endpoint computes freshness itself, and when that endpoint is unreadable the "
+        "fallback reads the headless store at ITS default location — never the directory "
+        "passed here. A caller relying on this flag is reading a store it did not choose.",
     )
     parser.add_argument(
         "--ttl",
@@ -1083,8 +1326,9 @@ def main(argv=None):
     # is the failure shape this repo treats as worse than a refusal. So: accept, warn, continue.
     if args.heartbeat_dir is not None or args.ttl is not None:
         print(
-            "WARNING — --heartbeat-dir and --ttl are ignored: the session-heartbeat endpoint "
-            "computes freshness itself",
+            "WARNING — --heartbeat-dir and --ttl are NOT honoured: the session-heartbeat "
+            "endpoint computes freshness itself, and the unreadable-endpoint fallback reads "
+            "the headless store at its own default location, not the one passed here",
             file=sys.stderr,
         )
 
@@ -1137,10 +1381,17 @@ def main(argv=None):
             return MALFORMED
         verdict, message, row = check(args.check, args.endpoint, registry_dir=args.dir)
         if verdict == LIVE:
-            print(
-                "LIVE — %s  heartbeat age %ss  source %s"
-                % (message, row.get("age_seconds"), row.get("source") or "heartbeat")
-            )
+            # ⚠️ **`row` is None on the fallback path.** The identity registry and the headless
+            # store answer without a heartbeat row, so the age/source suffix is omitted rather
+            # than dereferenced — an unconditional `row.get` crashed the LIVE verdict the moment
+            # the endpoint was unreachable, which is the one case the fallback exists for.
+            if row is None:
+                print("LIVE — %s" % message)
+            else:
+                print(
+                    "LIVE — %s  heartbeat age %ss  source %s"
+                    % (message, row.get("age_seconds"), row.get("source") or "heartbeat")
+                )
         elif verdict == ABSENT:
             print("ABSENT — %s" % message, file=sys.stderr)
         elif verdict == AMBIGUOUS:
@@ -1156,55 +1407,120 @@ def main(argv=None):
     # `/supervisor:open`'s topic→manager join match nothing and spawn a SECOND manager onto a
     # live topic (observed 2026-09-18), which is the dangerous direction.
     rows = read_endpoint(args.endpoint)
-    if rows is None:
+    degraded_mode = rows is None
+
+    if degraded_mode:
+        # ⚠️ **The fallback, and it DEGRADES rather than refuses.** Until 2026-11-18 an
+        # unreadable endpoint made this whole command exit 2, so a single local process
+        # restarting blanked every caller: measured that day, `--list --json` exited 2 with
+        # `ECONNREFUSED` for ~70 minutes and 15 of 25 flagged rows could not be opened, while
+        # the identity registry sat readable on disk the whole time. A refusal is not a safe
+        # answer here — it is the outage.
+        #
+        # ⚠️ **Every row is `degraded: true`, and that is load-bearing.** `_list_payload` with
+        # an empty `live_rows` marks every registry row degraded, and the headless-only rows
+        # below are marked explicitly. A registry-built list structurally OMITS cluster and a2a
+        # sessions (no local pid, no entry), so `commands/open.md` Step 2C must stop on a
+        # degraded row instead of falling through to its spawn branch — a no-match there would
+        # spawn a duplicate onto a live cluster manager. That guard is the price of exiting 0.
+        identity = _identity().read_registry(args.dir)
+        if identity is None:
+            print(
+                "UNKNOWN — the session-heartbeat endpoint at %s is unreadable and the identity "
+                "registry (%s) could not be read either, so no channel answers"
+                % (endpoint_base(args.endpoint), args.dir or "default path"),
+                file=sys.stderr,
+            )
+            return UNKNOWN
         print(
-            "UNKNOWN — cannot read the session-heartbeat endpoint at %s"
+            "WARNING — the session-heartbeat endpoint at %s is unreadable; this list is built "
+            "from the identity registry and the headless heartbeat store. Every row is "
+            "degraded, and cluster/a2a sessions are absent from it."
             % endpoint_base(args.endpoint),
             file=sys.stderr,
         )
-        return UNKNOWN
+        payload, registry_live, _ = _list_payload(identity, [])
+        known = {rec["sessionId"] for rec in payload}
+        for sid in sorted(_headless_live_ids() or ()):
+            if sid in known:
+                continue
+            payload.append(
+                {
+                    "sessionId": sid,
+                    "pid": None,
+                    "status": "",
+                    "name": "",
+                    "formerNames": [],
+                    "cwd": "",
+                    "nameSource": "",
+                    "alive": True,
+                    "source": "headless",
+                    "state": "live",
+                    "age_seconds": None,
+                    "degraded": True,
+                }
+            )
+        degraded = len(payload)
+        # ⚠️ **An EMPTY degraded list must not read as an empty fleet.** `[]` with exit 0 is the
+        # one shape that carries no `degraded` row for `commands/open.md` Step 2B/2C to key on,
+        # so it would be read as "none is running now" and fall through to a spawn — the
+        # duplicate-spawn hazard this whole guard exists to close, on a restarted machine where
+        # the registry has not been written yet. "I could not measure" is UNKNOWN, never a
+        # confident zero.
+        if not payload:
+            print(
+                "UNKNOWN — the session-heartbeat endpoint at %s is unreadable and the on-disk "
+                "channels hold no live session, so an empty list here is a measurement this "
+                "probe could not take, not an empty fleet"
+                % endpoint_base(args.endpoint),
+                file=sys.stderr,
+            )
+            return UNKNOWN
+    else:
+        # Only a live row is listed — the store keeps a row for a session long after it dies, and
+        # a `--list` that echoed them would count a dead fleet as a live one.
+        live_rows = [
+            row for row in rows
+            if isinstance(row, dict) and row.get("session_id") and row.get("live") is True
+        ]
+        # ⚠️ **An empty list is a POSITIVE claim about the whole fleet, so it still pays the
+        # coverage precondition — but the precondition DEGRADES, it no longer REFUSES.** "No
+        # live rows" reads as "no session is live anywhere", which is the ABSENT shape: during a
+        # partial rollout the endpoint holds no live row while the identity registry still lists
+        # live sessions, and `commands/open.md` Step 2C reads THIS call to decide whether to
+        # open a session — so a confident empty fleet there spawns a second session onto a live
+        # topic (the 2026-09-18 failure the names rule below guards against).
+        #
+        # ⚠️ **Until 2026-10-18 both `--list` paths refused the WHOLE list on `ABSENT`, and that
+        # is the defect this change removes.** Measured live: `--list --json` exited 2 with
+        # `unstamped=12 ledger_workers=23 registry_live=43`, so a fleet carrying twelve
+        # stale-plugin sessions could not be listed AT ALL — and `plugin-version-census.py`,
+        # whose entire job is naming those stale sessions, was blocked by the same exit 2 and
+        # could not name them. The twelve are interactive sessions running a supervisor older
+        # than v0.171.1; they recur at EVERY plugin release, so a guard that fails the whole
+        # list on them is not a precondition but an outage. The finding now rides ON the row
+        # (`degraded: true`), so a caller sees which rows it cannot trust instead of losing
+        # every row it could.
+        #
+        # ⚠️ **UNKNOWN still refuses here.** "Could not measure" is neither "measured complete"
+        # nor "degraded": a store that answered but could not be measured must never read as a
+        # listed fleet. The unreadable-store case took the fallback above, where the registry
+        # itself is the measurement.
+        verdict, line = safe_unstamped(args.endpoint, args.dir)
+        if verdict == UNKNOWN:
+            print(
+                "UNKNOWN — the stamp-coverage measurement could not be taken (%s), so this list "
+                "cannot be presented as the whole live fleet" % line,
+                file=sys.stderr,
+            )
+            return UNKNOWN
 
-    # Only a live row is listed — the store keeps a row for a session long after it dies, and a
-    # `--list` that echoed them would count a dead fleet as a live one.
-    live_rows = [
-        row for row in rows
-        if isinstance(row, dict) and row.get("session_id") and row.get("live") is True
-    ]
-    # ⚠️ **An empty list is a POSITIVE claim about the whole fleet, so it still pays the coverage
-    # precondition — but the precondition DEGRADES, it no longer REFUSES.** "No live rows" reads
-    # as "no session is live anywhere", which is the ABSENT shape: during a partial rollout the
-    # endpoint holds no live row while the identity registry still lists live sessions, and
-    # `commands/open.md` Step 2C reads THIS call to decide whether to open a session — so a
-    # confident empty fleet there spawns a second session onto a live topic (the 2026-09-18
-    # failure the names rule below guards against).
-    #
-    # ⚠️ **Until 2026-10-18 both `--list` paths refused the WHOLE list on `ABSENT`, and that is
-    # the defect this change removes.** Measured live: `--list --json` exited 2 with
-    # `unstamped=12 ledger_workers=23 registry_live=43`, so a fleet carrying twelve
-    # stale-plugin sessions could not be listed AT ALL — and `plugin-version-census.py`, whose
-    # entire job is naming those stale sessions, was blocked by the same exit 2 and could not
-    # name them. The twelve are interactive sessions running a supervisor older than v0.171.1;
-    # they recur at EVERY plugin release, so a guard that fails the whole list on them is not a
-    # precondition but an outage. The finding now rides ON the row (`degraded: true`), so a
-    # caller sees which rows it cannot trust instead of losing every row it could.
-    #
-    # ⚠️ **UNKNOWN still refuses.** "Could not measure" is neither "measured complete" nor
-    # "degraded": a store that could not be reached must never read as a listed fleet.
-    verdict, line = safe_unstamped(args.endpoint, args.dir)
-    if verdict == UNKNOWN:
-        print(
-            "UNKNOWN — the stamp-coverage measurement could not be taken (%s), so this list "
-            "cannot be presented as the whole live fleet" % line,
-            file=sys.stderr,
-        )
-        return UNKNOWN
+        identity = _identity().read_registry(args.dir)
+        if identity is None:
+            print("UNKNOWN — cannot read the identity registry (%s)" % (args.dir or "default path"), file=sys.stderr)
+            return UNKNOWN
 
-    identity = _identity().read_registry(args.dir)
-    if identity is None:
-        print("UNKNOWN — cannot read the identity registry (%s)" % (args.dir or "default path"), file=sys.stderr)
-        return UNKNOWN
-
-    payload, registry_live, degraded = _list_payload(identity, live_rows)
+        payload, registry_live, degraded = _list_payload(identity, live_rows)
     print(
         "rows=%d registry_live=%d degraded=%d" % (len(payload), registry_live, degraded),
         file=sys.stderr,

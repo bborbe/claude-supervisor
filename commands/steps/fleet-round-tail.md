@@ -122,3 +122,11 @@ esac
 ⚠️ **Two arms per round halve the ring's round history.** `ARMS_KEEP = 12` (`:200`) covers six rounds instead of twelve, so `observed_period()`'s p90 runs over five head gaps rather than eleven. That still clears the ≥4-head / ≥3-span floor (`:498–503`), so the period keeps resolving — a consequence to know, not a defect to fix.
 
 ⚠️ **This beat does not shorten a round.** A round longer than the limit still reads `STALE` for its duration; what the tail fixes is the reading **after** it, and the wait that follows, because the clock restarts at the round's end. A mid-round beat would shorten the gap instead — that is a different change and is not made here.
+
+- **Close the round: stamp its end, so the round is measurable.** After the `--check` verdict, run:
+
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --finish --subject "Fleet Manager" --branch fleet
+  ```
+
+  ⚠️ **Without this the round has no end, and every consumer infers one.** A receipt carrying only `round_started_at` forces a measurement to bound the round by the next fire or the first closer, and each charges unrelated work to it: measured 2026-11-18 on one transcript, **75.4 KB** by the next fire, **8.3 KB** by the first closer, **233.1 KB** after the delegate under the same closer rule — three answers from one dataset, none of them the round. `round_started_at → round_ended_at` is the only window that is the round. ⚠️ **It runs last, after every leg and the `--check`**, because it closes the window the measurement reads; stamping it earlier would exclude the round's own tail.

@@ -2241,6 +2241,31 @@ class SpendReadout(unittest.TestCase):
         second = self.receipt()
         self.assertEqual(second["previous_round_started_at"], first["round_started_at"])
 
+    def test_start_carries_the_previous_round_ended_at(self):
+        # `--start` builds the receipt FRESH, so the end `--finish` writes survives only
+        # because the next `--start` carries it. Untested, a regression here would leave
+        # `round_ended_at` unreadable on every inspection while nothing else failed —
+        # measured 2026-11-18, the round stayed unmeasurable with the fix deployed.
+        self.cli("--start", "--topic", self.topic)
+        self.cli("--finish", "--topic", self.topic)
+        finished = self.receipt()
+        self.assertIn("round_ended_at", finished)
+        self.cli("--start", "--topic", self.topic)
+        second = self.receipt()
+        self.assertEqual(second["previous_round_ended_at"], finished["round_ended_at"])
+        self.assertEqual(second["previous_round_started_at"], finished["round_started_at"])
+
+    def test_an_abandoned_round_keeps_the_last_completed_window(self):
+        # start -> finish -> start -> start: the second start replaces a receipt that has
+        # no `round_ended_at` but DOES hold the completed pair; that pair must survive.
+        self.cli("--start", "--topic", self.topic)
+        self.cli("--finish", "--topic", self.topic)
+        finished = self.receipt()
+        self.cli("--start", "--topic", self.topic)   # round that never finishes
+        self.cli("--start", "--topic", self.topic)   # abandoned, started again
+        third = self.receipt()
+        self.assertEqual(third["previous_round_ended_at"], finished["round_ended_at"])
+
     def test_tokens_without_a_round_refuses(self):
         rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
         self.assertEqual(rc, 2)
