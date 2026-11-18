@@ -43,6 +43,23 @@ delegate rule's carve-out).
      counts only the rows that produced a **new worker**; a resumed row re-enters an existing
      conversation and a jumped row only activated a live session
      (`agents/fleet-open-actor.md` § 3 owns the mapping).
+
+     ⚠️ **Then run the all-refused guard on that same payload — a round that refused every row must
+     not render as a quiet `opened 0`:**
+
+     ```
+     python3 "$P/check-open-leg-opened.py" "<render>"
+     ```
+
+     `0` = rows reached live sessions (or nothing was selected), `1` = **every** selected row was
+     refused, `2` = not a verdict (a mid-write payload, or an older one whose refusals are only
+     partly persisted). **On `1`, print the check's own line — `❌ open leg: EVERY selected row was
+     refused — …` — as the round's own line, not as a per-row `refused:` note**, and carry it into
+     the round's verdict so the round is visibly broken rather than merely unproductive. On `2`,
+     print the check's line too and treat the leg as `unknown` — an inconclusive payload is never a
+     clean one. Measured 2026-11-18: round `1795012825` refused all 7 selected rows with
+     `SESSION UNREADABLE` and rendered `opened 0`, which reads exactly like a round that found
+     nothing to open.
    - **`status=unknown`** → print `open leg: unknown` and **open nothing this tick.** The agent has
      already opened nothing; do not retry the leg. ⚠️ **`unknown` is a third answer, never `0`** —
      *"no free slots"* and *"I could not count"* must not render the same, and a leg that opened
