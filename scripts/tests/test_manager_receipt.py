@@ -49,6 +49,13 @@ READINGS_OK = json.dumps({
 def load(receipt_dir, liveness_dir):
     os.environ["MANAGER_RECEIPT_STATE_DIR"] = receipt_dir
     os.environ["MANAGER_LIVENESS_STATE_DIR"] = liveness_dir
+    # The round's hand-back store, kept inside the receipt tree so no test can read (or
+    # write) the operator's real `~/.claude/state/fleet-handback/`. `--start` refuses on
+    # an open round with no hand-back, so a test that shares the real store would be
+    # judged against files it never wrote.
+    handback_dir = os.path.join(receipt_dir, "handback")
+    os.environ["MANAGER_HANDBACK_STATE_DIR"] = handback_dir
+    os.makedirs(handback_dir, exist_ok=True)
     spec = importlib.util.spec_from_file_location(
         "manager_receipt", os.path.join(os.path.dirname(_HERE), "manager-receipt.py")
     )
@@ -2357,6 +2364,302 @@ class SpendReadout(unittest.TestCase):
         self.assertTrue(goal.endswith(self.slug + ".table"), goal)
         topic = self.m.payload_file(self.topic, "topic")
         self.assertTrue(topic.endswith(self.slug + ".sweep"), topic)
+
+
+class RoundInFlight(unittest.TestCase):
+    """The round head and tail refuse while the round's delegate is still running.
+
+    The defect measured 2026-11-18 on the Fleet Manager: `--check` reported the live
+    round as `INCOMPLETE` (it was over its window), the manager ran `--finish`, and the
+    successor was dispatched while round 1's delegate ran for another 14 minutes — so
+    the receipt recorded a window 15 minutes shorter than the round. Two gates close it,
+    and each is tested in BOTH directions because each one on its own would be satisfied
+    by a gate that always refuses:
+
+    - `--start` absorbs the firing (exit 13 + the pinned line) when the previous receipt
+      is open and its hand-back is absent, and proceeds normally when it is closed.
+    - `--finish` refuses (exit 13) with no hand-back and stamps the end when there is one.
+
+    The positive controls are `test_start_proceeds_when_the_previous_round_is_closed`
+    and `test_finish_closes_a_round_that_handed_back`: an always-absorb head and an
+    always-refusing tail both fail them.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+        self.topic = "Fleet Manager"
+        self.slug = "fleet--fleet-manager"
+
+    def tearDown(self):
+        for t in (self.tmp, self.live):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+        os.environ.pop("MANAGER_HANDBACK_STATE_DIR", None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def fleet(self, *argv):
+        return self.cli(*argv, "--subject", self.topic, "--branch", "fleet")
+
+    def start(self):
+        return self.fleet("--start")
+
+    def receipt(self):
+        with open(os.path.join(self.tmp.name, self.slug + ".json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def hand_back(self, started):
+        """The delegate's return: the producer `agents/fleet-round.md` must write."""
+        p = self.m.handback_path(started)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(f"fleet round {self.m.handback_stem(started)} — handed back\n")
+        return p
+
+    # --- the head gate ---------------------------------------------------------
+
+    def test_start_refuses_an_open_round_with_no_handback(self):
+        self.start()
+        opened = self.receipt()
+        rc, out, _ = self.start()
+        self.assertEqual(rc, self.m.EXIT_IN_FLIGHT)
+        # The pinned shape, byte for byte: the middle field names the leg, so a reader
+        # can tell an absorbed firing from a quiet tick.
+        self.assertEqual(out.strip(),
+                         f"ABSORBED  {self.topic}  in flight: sweep reader  re-armed 900s")
+        # And it did NOT open a new round: the refused firing leaves the live receipt
+        # exactly as it was, so the round it absorbed keeps its own window.
+        self.assertEqual(self.receipt()["round_started_at"], opened["round_started_at"])
+
+    def test_start_names_the_drive_leg_once_the_sweep_payload_exists(self):
+        # The digest path is READ from the receipt, never recomputed from the round
+        # stamp (`commands/steps/confirm-candidates.md` states the rule). A fixture that
+        # fabricates the guessed path would pass while production never does — the
+        # pinned discriminator could only ever say `sweep reader`.
+        self.start()
+        p = os.path.join(self.tmp.name, "digest-payload.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("the sweep reader's render\n")
+        self.assertEqual(self.fleet("--record", "--step", "digest", "--path", p)[0], 0)
+        rc, out, _ = self.start()
+        self.assertEqual(rc, self.m.EXIT_IN_FLIGHT)
+        self.assertIn("in flight: drive leg", out)
+
+    def test_a_non_numeric_round_start_reads_as_no_round(self):
+        # A receipt from an older or hand-edited writer can carry a string. Formatting it
+        # with `:.6f` raises, and the same value feeds the head, the tail AND the
+        # delegate's completion signal — so one bad receipt would take out all three.
+        with open(os.path.join(self.tmp.name, self.slug + ".json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"topic": self.topic,
+                       "round_started_at": "2026-11-18T14:56:01Z"}, fh)
+        rc, out, err = self.fleet("--finish")
+        self.assertEqual(rc, 2)
+        self.assertIn("no round in progress", err)
+        # The producer takes its id from the caller, so it still works on a receipt the
+        # gate cannot read — which is the point: it must never traceback.
+        rc, out, err = self.fleet("--handback", "--round", "1795010135.451426",
+                                  "--text", "x")
+        self.assertEqual(rc, 0)
+        # And the head opens a fresh round instead of refusing on an unjudgeable one.
+        self.assertEqual(self.start()[0], 0)
+
+    def test_a_lapsed_open_round_does_not_instruct_an_unconditional_force_close(self):
+        # Age alone does NOT mean the delegate is gone — the incident's own round ran
+        # 1 586 s against a 450 s limit with its delegate ALIVE. A line that said
+        # "close it" would reproduce the overlap this gate exists to prevent.
+        self.start()
+        rec = self.receipt()
+        rec["round_started_at"] = time.time() - 4000
+        with open(os.path.join(self.tmp.name, self.slug + ".json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        rc, out, _ = self.start()
+        self.assertEqual(rc, self.m.EXIT_IN_FLIGHT)
+        self.assertIn("ABSORBED", out)
+        self.assertIn("LAPSED", out)
+        self.assertIn("if the delegate's turn is GONE", out)
+        self.assertIn("keep absorbing", out)
+
+    def test_an_open_round_that_handed_back_carries_its_handback_end(self):
+        # Its delegate returned, the tail never ran: the hand-back's mtime IS the end,
+        # and dropping it would leave the round unmeasurable — the defect `--finish`
+        # exists to prevent.
+        self.start()
+        p = self.hand_back(self.receipt()["round_started_at"])
+        self.start()
+        self.assertAlmostEqual(self.receipt()["previous_round_ended_at"],
+                               os.path.getmtime(p), places=3)
+
+    def test_start_proceeds_when_the_previous_round_is_closed(self):
+        # POSITIVE CONTROL for the head: an always-absorb gate fails here.
+        self.start()
+        self.hand_back(self.receipt()["round_started_at"])
+        self.assertEqual(self.fleet("--finish")[0], 0)
+        rc, out, _ = self.start()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ABSORBED", out)
+
+    def test_start_proceeds_when_the_open_round_handed_back(self):
+        # Open receipt + hand-back = the delegate returned but nobody closed the round.
+        # That is a tail defect, not an in-flight round; refusing here would wedge the
+        # loop on a round whose work is done.
+        self.start()
+        self.hand_back(self.receipt()["round_started_at"])
+        rc, out, _ = self.start()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ABSORBED", out)
+
+    # --- the tail gate ---------------------------------------------------------
+
+    def test_finish_refuses_while_the_delegate_is_unreturned(self):
+        self.start()
+        started = self.receipt()["round_started_at"]
+        rc, out, err = self.fleet("--finish")
+        self.assertEqual(rc, self.m.EXIT_IN_FLIGHT)
+        self.assertEqual(out, "")
+        self.assertIn("refused: hand-back", err)
+        self.assertIn(self.m.handback_path(started), err)
+        self.assertNotIn("round_ended_at", self.receipt())
+
+    def test_finish_closes_a_round_that_handed_back(self):
+        # POSITIVE CONTROL for the tail: an always-refusing `--finish` fails here.
+        self.start()
+        self.hand_back(self.receipt()["round_started_at"])
+        rc, out, _ = self.fleet("--finish")
+        self.assertEqual(rc, 0)
+        self.assertIn("round_ended_at", self.receipt())
+
+    # --- the recovery ----------------------------------------------------------
+
+    def test_force_closes_a_dead_delegate_and_records_the_reason(self):
+        # A delegate can be killed with the turn that ran it. Without this the refusal
+        # wedges the loop forever; with it, the close is a statement a reader can audit.
+        self.start()
+        rc, _, err = self.fleet("--finish", "--force", "--reason", "delegate killed with its turn")
+        self.assertEqual(rc, 0)
+        self.assertIn("forced close", err)
+        rec = self.receipt()
+        self.assertIn("round_ended_at", rec)
+        self.assertEqual(rec["forced_finish"]["reason"], "delegate killed with its turn")
+
+    def test_force_without_a_reason_is_refused(self):
+        self.start()
+        rc, _, err = self.fleet("--finish", "--force")
+        self.assertEqual(rc, 2)
+        self.assertIn("--reason", err)
+        self.assertNotIn("round_ended_at", self.receipt())
+
+    def test_reason_without_force_is_a_usage_error(self):
+        self.start()
+        with self.assertRaises(SystemExit) as caught:
+            self.fleet("--finish", "--reason", "no force")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_force_is_fleet_only(self):
+        # A goal/topic receipt has no hand-back, so a forced close there would record a
+        # reason nothing reads — and would be the one way past a gate that only exists
+        # for the fleet round.
+        self.cli("--start", "--topic", "Recurring Operator Gates")
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--finish", "--topic", "Recurring Operator Gates", "--force",
+                     "--reason", "why not")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_force_records_its_reason_even_when_the_round_handed_back(self):
+        # A forced close that looked ordinary would leave nothing to audit; the reason
+        # is recorded whatever the hand-back says.
+        self.start()
+        self.hand_back(self.receipt()["round_started_at"])
+        rc, _, err = self.fleet("--finish", "--force", "--reason", "closed by hand")
+        self.assertEqual(rc, 0)
+        self.assertIn("forced close", err)
+        self.assertEqual(self.receipt()["forced_finish"]["reason"], "closed by hand")
+
+    def test_a_second_finish_is_refused_and_does_not_rewrite_the_record(self):
+        # A re-run would re-stamp `round_ended_at` and overwrite the recorded reason —
+        # rewriting the audit trail of a close that already happened.
+        self.start()
+        self.fleet("--finish", "--force", "--reason", "delegate gone")
+        first = self.receipt()
+        rc, out, err = self.fleet("--finish", "--force", "--reason", "second attempt")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("already closed", err)
+        after = self.receipt()
+        self.assertEqual(after["round_ended_at"], first["round_ended_at"])
+        self.assertEqual(after["forced_finish"]["reason"], "delegate gone")
+
+    def test_force_outside_finish_is_a_usage_error(self):
+        self.start()
+        with self.assertRaises(SystemExit) as caught:
+            self.fleet("--start", "--force")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_forced_close_is_not_in_flight(self):
+        # The recovery has to actually release the head gate, or it is decoration.
+        self.start()
+        self.fleet("--finish", "--force", "--reason", "delegate killed with its turn")
+        rc, out, _ = self.start()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ABSORBED", out)
+
+
+    # --- the producer ----------------------------------------------------------
+
+    def test_handback_writes_the_path_the_gate_reads(self):
+        # The gate reads a file NAMED BY THE ROUND ID the delegate was given, so the
+        # producer must write exactly that stem. A file named from anything else is one
+        # the gate never looks for, and the round then reads as in flight forever.
+        self.start()
+        started = self.receipt()["round_started_at"]
+        rc, out, _ = self.fleet("--handback", "--round", repr(started),
+                                "--text", "fleet round — machine half summary")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), self.m.handback_path(started))
+        self.assertTrue(os.path.exists(self.m.handback_path(started)))
+        # And the gate releases: this is the producer the refusal was waiting on.
+        self.assertEqual(self.fleet("--finish")[0], 0)
+
+    def test_handback_uses_the_delegates_own_round_not_the_current_receipt(self):
+        # A delegate that outlives a forced close must NOT release its successor's gate.
+        # Reading the id from the current receipt would write the successor's hand-back
+        # and let its tail close early, recording a window shorter than the round.
+        self.start()
+        first = self.receipt()["round_started_at"]
+        self.fleet("--finish", "--force", "--reason", "delegate gone")
+        self.start()                                   # the successor round
+        successor = self.receipt()["round_started_at"]
+        rc, out, _ = self.fleet("--handback", "--round", repr(first), "--text", "late")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), self.m.handback_path(first))
+        self.assertFalse(os.path.exists(self.m.handback_path(successor)))
+        self.assertEqual(self.fleet("--finish")[0], self.m.EXIT_IN_FLIGHT)
+
+    def test_handback_without_a_round_is_refused(self):
+        self.start()
+        rc, out, err = self.fleet("--handback", "--text", "nothing to end")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("--round", err)
+
+    def test_handback_is_fleet_only(self):
+        self.cli("--start", "--topic", "Recurring Operator Gates")
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--handback", "--topic", "Recurring Operator Gates", "--text", "x")
+        self.assertEqual(caught.exception.code, 2)
 
 
 if __name__ == "__main__":

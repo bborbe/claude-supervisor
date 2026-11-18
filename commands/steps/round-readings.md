@@ -21,6 +21,8 @@ When: every tick, **before** the sweep dispatch
 
 1. **Open the round's receipt — first, before any read.** `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py --start --topic "<subject>"`. This step is the first to run after the subject resolves, so this is the round's head and the only place its window opens. ⚠️ **`--start` clears the fields**, so a round is judged only on artifacts it produced itself, never on a previous round's. ⚠️ **The readings agent never runs `--start`** — a second call would clear what this round has already recorded. Rule, the record calls and the tail check: `commands/steps/round-tail.md` step 8.
 
+   ⚠️ **The in-flight gate is NOT read here — this call passes no `--branch`, so it can never refuse.** A goal/topic `--start` is unchanged. The fleet round's head is `commands/steps/re-arm.md` (router row 1), and that file carries the exit-13 branch, the pinned `ABSORBED …` line and the `LAPSED …` recovery. This note exists so a reader of the ABSORBED rule does not go looking for the refusal in the wrong file.
+
 **1b.** ⚠️ **Then print the PREVIOUS round's spend-per-change line — at the head, before the sweep's snapshot.** `--tokens` windows `previous_round_started_at` → `round_started_at`, so it measures the round that just completed (a same-instant window cannot see the current turn's own transcript). `--count` diffs the sweep payload against the `.prev` the previous round's sweep head took. **Both must run before this round's snapshot overwrites `.prev`** — if the order slips by one step, the numerator and denominator describe different rounds, and the ratio is meaningless while still looking plausible.
 
 ```bash
