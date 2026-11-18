@@ -177,7 +177,7 @@ def task_gate(task, today, session_id=None, cwd=None, lookup_error=None):
                 "evidence is not evidence of a parked task",
             )
         _refusal, detail = close_worker.resolution_refusal(session_id, cwd)
-        if "not among them" in detail or not close_worker.task_dirs_for(cwd):
+        if "not among them" in detail or not close_worker.fleet_task_dirs(cwd):
             return (
                 "task-unresolved",
                 "no task page carries this session id as claude_session_id, and the "

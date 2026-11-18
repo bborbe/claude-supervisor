@@ -144,7 +144,7 @@ class TestTaskGate(unittest.TestCase):
             "resolution_refusal",
             return_value=("task-unresolved", detail),
         ), mock.patch.object(
-            close_idle_tab.close_worker, "task_dirs_for", return_value=dirs
+            close_idle_tab.close_worker, "fleet_task_dirs", return_value=dirs
         ):
             return close_idle_tab.task_gate(None, self.today, SID, "/tmp/worktree")
 

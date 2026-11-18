@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.dirname(_HERE)
@@ -1102,6 +1103,39 @@ class TestGrepTask(unittest.TestCase):
         self.assertIsNone(own)
         self.assertIsNone(handed)
         self.assertIsNotNone(error, "no match plus a failed search is not an absence")
+
+
+class TestFleetTaskDirs(unittest.TestCase):
+    """⚠️ An absence proof must be as WIDE as the population it quantifies over.
+
+    `task_dirs_for` answers from `vault-cli` config, so a vault missing from that config
+    contributes nothing and its sessions look unanchored — while the fleet sweep, which
+    decides what may be closed, probes every vault under the Obsidian root. A close taken
+    over the narrower set kills a live anchored tab.
+    """
+
+    def test_includes_an_unconfigured_vault_under_the_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = os.path.join(root, "unconfigured-vault", "25 Tasks")
+            os.makedirs(vault)
+            with mock.patch.object(cw, "_vault_config", return_value={}):
+                dirs = cw.fleet_task_dirs("/tmp/nowhere", root)
+        self.assertIn(vault, dirs)
+
+    def test_find_task_checked_finds_a_task_in_an_unconfigured_vault(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = os.path.join(root, "unconfigured-vault", "25 Tasks")
+            os.makedirs(vault)
+            path = os.path.join(vault, "A Task.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("---\nclaude_session_id: abc-123\nstatus: completed\n---\n")
+            with mock.patch.object(cw, "_vault_config", return_value={}):
+                task, error = cw.find_task_checked("abc-123", "/tmp/nowhere", root)
+        self.assertIsNotNone(
+            task, "an unconfigured vault's task must not read as absent"
+        )
+        self.assertEqual(task[0], path)
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

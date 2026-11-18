@@ -343,6 +343,29 @@ def task_dirs_for(cwd, vault_root=None, names=None):
     return dirs
 
 
+#: Task-folder names probed for a vault that `vault-cli` config does not list — the same
+#: tuple `fleet-sessions.py:108` uses. An absence proof must cover every vault the fleet
+#: sweep searches, not only the configured ones.
+FLEET_PROBE_DIRS = ("25 Tasks", "24 Tasks", "24 Goals", "23 Goals", "tasks")
+
+
+def fleet_task_dirs(cwd, vault_root=None):
+    """Every task directory the FLEET resolves anchors in — the union, never a subset.
+
+    `task_dirs_for(cwd)` alone answers from `vault-cli` config, so a vault missing from
+    that config contributes nothing and its sessions look unanchored. The sweep that
+    decides what may be closed probes every vault under the Obsidian root, falling back to
+    `FLEET_PROBE_DIRS` for unconfigured ones, so an absence proof taken over the narrower
+    configured set would kill a live anchored tab. Union both: the root-wide probe and the
+    configured scan, which also reaches a configured vault living outside the root.
+    """
+    dirs = list(task_dirs_for(cwd, vault_root, FLEET_PROBE_DIRS))
+    for d in task_dirs_for(cwd, vault_root):
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
 def _vault_for_cwd(cwd):
     """The configured vault whose path is `cwd` or one of its ancestors, else `None`."""
     if not cwd:
@@ -509,10 +532,15 @@ def find_task_checked(session_id, cwd, vault_root=None):
     unproven absence kills a live anchored session, the unreadable-vs-absent collapse this
     module forbids everywhere else. `find_task` keeps its old signature for the callers
     whose next step is a refusal, where collapsing to `None` fails closed.
+
+    ⚠️ **The search covers `fleet_task_dirs`, not `task_dirs_for`.** A vault missing from
+    `vault-cli` config contributes no `tasks_dir`, so an absence proven over the configured
+    set alone would declare a session in an unconfigured vault unanchored and close a live
+    anchored tab — an absence proof must be as wide as the population it quantifies over.
     """
     if not session_id:
         return None, None
-    dirs = task_dirs_for(cwd, vault_root)
+    dirs = fleet_task_dirs(cwd, vault_root)
     if not dirs:
         return None, None
     local = local_task_dirs(cwd)
