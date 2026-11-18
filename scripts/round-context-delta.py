@@ -129,7 +129,14 @@ def segment(records: list[dict], prefix: str) -> list[dict]:
 
 
 def record_epoch(record: dict) -> float | None:
-    """The record's timestamp as an epoch, or None when it carries no usable clock."""
+    """The record's timestamp as an epoch, or None when it carries no usable clock.
+
+    ⚠️ **Deliberately mirrors `manager-receipt.py::_record_epoch`** rather than importing
+    it: both scripts are invoked standalone by the plugin (no shared package, no
+    `sys.path` setup), and the two agree on every input that matters — a non-ISO or
+    absent stamp yields None in both, since the sibling's `str()` coercion of a numeric
+    epoch then fails `fromisoformat` and lands on the same None.
+    """
     stamp = record.get("timestamp")
     if not isinstance(stamp, str):
         return None
@@ -151,9 +158,11 @@ def window_bytes(records: list[dict], start: float, end: float) -> int:
     clock is not evidence that the record was *inside* the window either, and the
     untimestamped population is session-wide harness state rather than round content:
     measured 2026-11-18 on the live Fleet Manager, 320 `api-request-blob` records
-    carried **726.7 KB**, and counting them charged that constant to every window. The
-    readings then sat ~727 KB high — 758.7 KB for a round whose true cost was 155.8 KB
-    — which read as a 10.8× failure of a criterion the round actually met.
+    carried **726.7 KB**, and counting them charged that constant to every window.
+    Each reading sat 726.7 KB high: a round that truly cost **155.8 KB** read
+    **882.5 KB**, and the newest round on `0.345.0` read **774.1 KB** against a true
+    **47.4 KB**, under the 70 KB bound. The median reported at the time, 758.7 KB
+    against that bound, read as a 10.8× failure of a criterion the newest round met.
     `unattributed_bytes` reports what was skipped, so the omission is never silent.
     """
     total = 0
@@ -168,11 +177,15 @@ def window_bytes(records: list[dict], start: float, end: float) -> int:
 
 
 def unattributed_bytes(records: list[dict]) -> int:
-    """Main-thread bytes this tool cannot place in any round — no parsable timestamp.
+    """Main-thread bytes the WINDOW mode cannot place in a round — no parsable timestamp.
 
     Reported so a window reading is never silently short. A large value is the signal
     that the transcript carries session-wide harness state rather than round content;
     see `window_bytes` for the measurement that made this the default.
+
+    ⚠️ Scoped to windows, deliberately: `segment` never reads a timestamp, so in the
+    fire-to-fire mode an untimestamped record is still charged positionally to the
+    round that follows it. This helper describes the receipt mode only.
     """
     return sum(
         record_bytes(record) for record in records
