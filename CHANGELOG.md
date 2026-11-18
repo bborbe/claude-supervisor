@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the goal-status step reads the who-needs-me endpoint, and the read fails loudly.** `commands/goal-status.md` now `curl`s `GET /api/1.0/who-needs-me` and formats the answer itself, so the per-round feed verdict costs no interpreter spawn. ⚠️ **The `if` and `-f` are the point, not style:** a bare `curl … | jq …` reports **jq's** status, so an unreachable store printed nothing and exited 0 — measured 2026-11-18 against a dead port, **exit 0 with no output** — which recorded `clear` where the truth is `unread`. ⚠️ The `CAP = 20` / *"N more — pass --all"* truncation hazard this bullet used to guard is gone: the endpoint has no row cap, so every open gate is in the answer. Net **−41 bytes**, so `check-budget --tighten` moved the baseline 47 038 → 46 997. Change set: `commands/goal-status.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
+
 ## v0.344.0
 
 - feat: `scripts/flagged-rows.py` emits a new `parked` branch for a row whose last closer declares an external wait (`⏰ Ends:`), read once per run through `declared-wait.py` so there is one definition of "waiting" — the branch sits after every LIVE branch and before `resume`/`create`, so an open session is never counted as waiting and a parked row is never counted absent
