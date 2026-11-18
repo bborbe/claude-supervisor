@@ -58,10 +58,19 @@ a provenance act this leg must not take.
 </constraints>
 
 <inputs>
-The caller passes: **the round id** (the receipt's `round_started_at`, or the digest's round
-stamp) · **this session's id** (`$CLAUDE_CODE_SESSION_ID`) · **the vault name** · **the
-absolute tasks directory**. The manager read the receipt and armed before dispatching you, so
-the window is already open.
+The caller passes: **the round id** — the receipt's numeric `round_started_at`
+(`1795010135.451426`), which is also the `<round>` stem your hand-back must carry ·
+**this session's id** (`$CLAUDE_CODE_SESSION_ID`) · **the vault name** · **the absolute
+tasks directory**. The manager read the receipt and armed before dispatching you, so the
+window is already open.
+
+⚠️ **Copy the id VERBATIM from the receipt — the full float, not a `date +%s` epoch.** The
+hand-back's filename is built with `f"{float(x):.6f}"`, so an integer epoch writes
+`1795010135.000000.round` while the receipt's `1795010135.451426` yields
+`1795010135.451426.round` — `--finish` then never finds the hand-back and the loop absorbs
+forever. A digest stamp (`2026-10-11T18:09:40Z`) is rejected outright. If the id you were
+given is not the receipt's exact float, say so in the hand-back and stop that row rather than
+guessing one.
 
 ⚠️ **You derive this round's digest path; the caller does not pass it.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, under
@@ -103,6 +112,21 @@ once, reading its step file yourself:
 skipped — re-read it once the sweep hand-back exists, honouring every row whose `When` has
 newly become decidable **and that has not run this round**. Never re-run a leg: each
 `every tick` row is once-per-round, and a second sweep or drive leg duplicates sends.
+
+⚠️ **The budget is a CALL, not a rule you remember.** Before dispatching each leg, and again
+before waiting on one that has not returned, run:
+
+```bash
+python3 "$P/manager-receipt.py" --budget --subject "Fleet Manager" --branch fleet
+```
+
+**Exit 0** prints the time left — dispatch the next leg. **Exit 14** means the round's own
+bound (`period + SLACK`, the same limit the manager's `--check` uses) is spent: **dispatch no
+further leg, hand back now, and mark every leg not yet returned `not-run` with its reason on
+the payload.** This exists because the prose alone did not hold — this file already said "a
+leg still in flight is `not-run`", and the delegate still waited five minutes and then five
+more, which is what pushed round `1795010135` past its limit and produced the 14-minute
+overlap. A rule you can re-read and override is not a bound; a non-zero exit is.
 
 ## 2. The rows you leave alone
 
@@ -148,6 +172,34 @@ The full material — the digest, the leg blocks, the drive audit, the open bloc
 to the payload paths the step files name. You hand back **only** the verdict summary in
 `<output_format>`; never inline a table, a row list or a rule.
 
+## 5. Leave the hand-back file — the round's end signal
+
+**Before your turn ends, and after the payloads are written**, write the round's hand-back:
+
+```bash
+python3 "$P/manager-receipt.py" --handback --subject "Fleet Manager" --branch fleet \
+  --round "<the round id from <inputs>>" \
+  --text "fleet round <round id> — machine half summary"
+```
+
+⚠️ **`--round` is the NUMERIC id you were DISPATCHED with — the receipt's
+`round_started_at`, e.g. `1795010135.451426` — never the current receipt's, and never a
+digest stamp.** The command refuses anything else, and that is deliberate: a delegate that
+outlives a forced close would otherwise write its *successor's* hand-back, and the
+successor's tail would find one and close early — recording a window far shorter than the
+round it names. Your round is the one in `<inputs>`; a receipt that has moved on is
+somebody else's round.
+
+⚠️ **This file is not decoration — it is what lets the round close.** `manager-receipt.py
+--finish` refuses with exit 13 while it is absent, and the next firing's `--start` treats the
+round as IN FLIGHT and absorbs itself. A delegate that ends without writing it leaves the
+loop wedged until someone closes it by hand, with a recorded reason.
+
+⚠️ **Write it on EVERY ending, including the bad ones** — a full round, a round whose legs
+all came back `not-run`, and the `not-run`-because-a-leg-is-still-running case in
+`<error_handling>`. The presence of the file says *this delegate returned*; what it returned
+is the verdict's business. Its body is a one-line summary; nothing reads it.
+
 </process>
 
 <error_handling>
@@ -163,6 +215,8 @@ to the payload paths the step files name. You hand back **only** the verdict sum
   ⚠️ **`not-run` is for a leg still in flight, never for one that returned nothing usable.**
   A delegation that completed empty takes its step file's own fallback — `commands/steps/sweep.md`
   requires you to run the reads yourself and carry real counts, not a `not-run`.
+  ⚠️ **The wait itself is bounded by `--budget`** (exit 14), not by your judgement of how long
+  is reasonable: re-run it before each further wait, and when it refuses, hand back.
 - **A leg's script exits 2** → its count is `not-run` with the reason on stderr, and every
   later row that depended on it is also `not-run`. Never a `0`.
 - **A leg's hand-back is over 1 KB** → that is the leg's defect, not yours to trim: report it

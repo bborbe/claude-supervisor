@@ -54,6 +54,25 @@ class TextBytesTest(unittest.TestCase):
         self.assertEqual(rcd.text_bytes(7), 0)
 
 
+class RecordEpochTest(unittest.TestCase):
+    """A record's clock, or None when it carries none — the input to the window skip."""
+
+    def test_an_iso_stamp_parses(self):
+        rec = {"timestamp": "2026-11-18T10:00:00Z"}
+        self.assertIsNotNone(rcd.record_epoch(rec))
+
+    def test_an_unparsable_stamp_is_none(self):
+        self.assertIsNone(rcd.record_epoch({"timestamp": "not-a-date"}))
+
+    def test_absent_and_null_stamps_are_none(self):
+        self.assertIsNone(rcd.record_epoch({}))
+        self.assertIsNone(rcd.record_epoch({"timestamp": None}))
+
+    def test_a_numeric_stamp_is_none_not_coerced(self):
+        """A numeric epoch is not an ISO stamp; coercing it would silently invent a time."""
+        self.assertIsNone(rcd.record_epoch({"timestamp": 1794996000}))
+
+
 class SegmentTest(unittest.TestCase):
     def test_segments_at_markers_and_sums_bytes(self):
         records = [fire(ts="t1"), assistant("aaaa"), assistant("bb"),
@@ -202,12 +221,30 @@ class ReceiptWindowTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3072 B", result.stdout)   # 2048 + 1024, not 500 or 4000
 
+    def test_an_untimestamped_record_is_not_charged_to_the_window(self):
+        """Measured 2026-11-18 on the live Fleet Manager: 726.7 KB of untimestamped
+        `api-request-blob` records were charged to EVERY window, so a round whose true
+        cost was 47.4 KB read as 774.1 KB, and the median reported at the time read as
+        a 10.8× failure of a criterion the round met. An untimestamped record cannot be
+        placed in a round, so it is skipped — and reported, so the omission is visible
+        rather than silent."""
+        base = self.transcript().read_text(encoding="utf-8")
+        blob = json.dumps({"type": "api-request-blob",
+                           "message": {"role": "user",
+                                       "content": [{"type": "text", "text": "q" * 9000}]}})
+        transcript = self.write("t-blob.jsonl", base + "\n" + blob)
+        result = self.run_cli(transcript, self.receipt(end=True))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3072 B", result.stdout)      # the blob is NOT in the window
+        self.assertIn("9000 B", result.stderr)      # and the skip is reported
+
     def test_json_shape(self):
         result = self.run_cli(self.transcript(), self.receipt(end=True), "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["mode"], "receipt")
         self.assertEqual(payload["bytes"], 3072)
+        self.assertEqual(payload["unattributed_bytes"], 0)
 
     def test_the_carried_previous_pair_is_preferred(self):
         """A round head carries the previous round's start AND end; that pair survives."""
