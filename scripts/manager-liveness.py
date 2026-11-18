@@ -1575,7 +1575,7 @@ def registry_holds(session_id):
 
 
 def classify(s: str, now: float, defer_date=None) -> tuple:
-    """(state, detail) for one subject: OK, WORKING, LAPSED, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
+    """(state, detail) for one subject: OK, WORKING, LAPSED, IDLE, STALE, STOPPED, SLEEPING, UNARMED, INVALID, EXITED or WRONG-BRANCH.
 
     `OK` means a round ran inside the limit, and only that. Past the limit a moving
     transcript reads `WORKING` and an armed manager that produced nothing reads `IDLE`;
@@ -1752,6 +1752,11 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
     # The same predicate the IDLE branch uses, so the two cannot disagree about what "watched"
     # means.
     session_id = read_session_marker(s)
+    # ⚠️ **Computed ONCE and reused by the IDLE branch below.** `gate_watched` does an
+    # `os.listdir` plus a `getmtime` per subject, and a fleet-wide `--check` sweep would
+    # otherwise pay it twice for every stale goal subject — once here and once in the IDLE
+    # branch, which used to call it again.
+    gate_subject_age = gate_loop_alive = None
     gate_held = False
     if s.startswith("goal--"):
         gate_subject_age, gate_loop_alive = gate_watched(s, now)
@@ -1799,7 +1804,8 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
         # means the manager is watched; without it, STALE stands. An EXPIRED sleep marker
         # is the exception (see above): it stays STALE so `topic-keepalive.py` recovers it.
         if s.startswith("goal--") and not sleep_pending:
-            subject_age, loop_alive = gate_watched(s, now)
+            # Reused from the hoist above, not re-probed — see the note there.
+            subject_age, loop_alive = gate_subject_age, gate_loop_alive
             if loop_alive and subject_age is not None and subject_age <= GATE_SUBJECT_FRESH:
                 # ⚠️ IDLE, never OK. A gate tick proves the TIMER works and that this
                 # manager will be woken; it proves nothing about whether the manager has

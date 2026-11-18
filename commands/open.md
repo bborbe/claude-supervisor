@@ -509,7 +509,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
    ⚠️ **A non-zero exit from `--list --json` is "cannot tell", never "no manager" — do not spawn on it.** **Only exit 0 with no match means "none is running now".** A non-zero exit from that call, or unparseable JSON, means the question could not be answered: report it and stop; never fall through to item 4. ⚠️ **This scopes to `--list --json` alone** — the `--check` verdicts below exit non-zero by design (`UNKNOWN` 2, `AMBIGUOUS` 3) and item 4 maps exactly those to a spawn.
 
-   ⚠️ **Any `degraded: true` row is "cannot tell" too, even on exit 0** — report and STOP; never reach item 4 (Step 2C step 1).
+   ⚠️ **The endpoint-down FALLBACK is "cannot tell", even on exit 0** — key on the `WARNING — the session-heartbeat endpoint … is unreadable` stderr line, never on a `degraded: true` row (Step 2C step 1).
 
    Then match `<goal> Manager` case-insensitively against `name` and against every entry in `formerNames`.
 
@@ -587,7 +587,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
 ⚠️ **A non-zero exit is "cannot tell", never "no manager" — do not spawn on it.** **Only exit 0 with no match means "none is running now".** A non-zero exit, or unparseable JSON, means the question could not be answered: report it and stop; never fall through to step 3.
 
-⚠️ **Any `degraded: true` row is "cannot tell" too, even on exit 0** — the list is then built from the registry alone and omits cluster/a2a sessions, so a no-match does not license step 3. Report `open-status=unknown — liveness list degraded (<n> rows)` and STOP. Rule: `docs/fleet-surface.md` § Which manager owns a subject.
+⚠️ **The endpoint-down FALLBACK is "cannot tell", even on exit 0 — and a `degraded: true` row is NOT that signal.** When the session-heartbeat endpoint is unreadable, `--list --json` exits 0 and prints `WARNING — the session-heartbeat endpoint at … is unreadable` to stderr; that list is built from the registry alone and omits cluster/a2a sessions, so a no-match does not license step 3. On that warning: report `open-status=unknown — liveness list is the registry fallback` and STOP. ⚠️ **Key the stop on the warning, never on a degraded row.** `_list_payload` marks a row `degraded: true` for every registry-live session with no heartbeat row — the ordinary stale-plugin population that recurs at every release — so stopping on that would refuse to open managers in NORMAL operation. Rule: `docs/fleet-surface.md` § Which manager owns a subject.
 
 ⚠️ **The precondition covers the spawn ledger's workers, NOT every live session** — the guard is `registry_live ∩ spawn ledger`: **a topic manager started by hand holds no ledger record**, so a live manager whose row is missing does not withhold the list; the `formerNames` match above covers that. If this step matches nothing while the operator believes a manager runs, re-read that manager's endpoint directly with `session-liveness.py --check <id>` before spawning.
 

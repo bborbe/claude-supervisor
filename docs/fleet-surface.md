@@ -1160,6 +1160,8 @@ is a fallback for the other. And a missing `managed_by` is **not** an error: the
 `goals:` are the documented default, tried in order, which is why a single-goal task never
 needs the field.
 
+⚠️ **A degraded liveness list is "cannot tell" — but only in the endpoint-down FALLBACK, and the signal is the WARNING, not a degraded row.** `session-liveness.py --list --json` exits 0 and prints `WARNING — the session-heartbeat endpoint at … is unreadable` when the endpoint is down; that list is built from the registry alone and omits cluster/a2a sessions, so a no-match in it does **not** mean "none is running now" and `commands/open.md` Steps 2B/2C stop on it. ⚠️ **The per-row `degraded: true` flag is NOT this signal and must never be used as one.** `_list_payload` sets it for every registry-live session the endpoint holds no `live: true` row for — the ordinary stale-plugin population that recurs at every plugin release — so a consumer stopping on any degraded row refuses to open managers in normal operation, which is the regression the 2026-10-18 per-row degrade was introduced to avoid.
+
 ## Approval provenance
 
 **Which surface reads `flag_set_by`, and which does not.** What `flag` *means* has its single

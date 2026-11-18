@@ -129,8 +129,12 @@ POST_TIMEOUT = 60
 # `WORKING` (no round, but the transcript moved) is not a lapse either, and neither is
 # `LAPSED` — past the hard cap the arm file is dead while the transcript still moves. LAPSED
 # names that state so the keep-alive leg can count it; it is not in any restart set.
+#: `EXITED` (2026-11-18) is a FRESH arm record naming a session that is gone. It is here so a
+#: positive identification is not folded into `PROBE_FAILED` — "this manager exited" and "the
+#: probe could not answer" are different facts. Not in any restart set, for the same reason as
+#: `WORKING`/`LAPSED`: an exited session cannot be restarted, only resumed.
 CADENCE_STATES = ("OK", "WORKING", "LAPSED", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED",
-                  "INVALID", "WRONG-BRANCH")
+                  "INVALID", "WRONG-BRANCH", "EXITED")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
