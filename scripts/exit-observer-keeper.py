@@ -151,7 +151,12 @@ def sweep(now):
         print(f"exit-observer-keeper: sweep output is not JSON: {out.stdout[:200]!r}", file=sys.stderr)
         return None
     panes = {}
-    for row in list(doc.get("unrecorded", [])) + list(doc.get("unknown", [])):
+    # ⚠️ `recorded` is in this union on purpose. Building the watch set from `unrecorded` and
+    # `unknown` alone watches only the panes ALREADY broken, so the first death of a healthy
+    # writer is invisible until the next full sweep — up to `REFRESH_SECONDS`. Measured
+    # 2026-11-18: the watch set was empty while eight manager panes carried live writers.
+    for row in (list(doc.get("unrecorded", [])) + list(doc.get("unknown", []))
+                + list(doc.get("recorded", []))):
         pane = row.get("pane")
         if not pane:
             continue

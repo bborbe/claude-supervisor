@@ -109,6 +109,22 @@ class Sweep(_Base):
             json.dumps({"unrecorded": [], "unknown": [{"name": "x"}]}))
         self.assertEqual(k.sweep(NOW), ({}, 1))
 
+    def test_a_recorded_row_lands_in_the_watch_set(self):
+        """A COVERED pane must be watched — it is the one that can newly fail.
+
+        Building the watch set from `unrecorded` + `unknown` alone watches only the
+        panes already broken, so the first death of a healthy writer stays invisible
+        until the next full sweep (up to `REFRESH_SECONDS`). Measured 2026-11-18: the
+        watch set was empty while twelve manager panes carried live writers.
+        """
+        self.write_log()
+        k.subprocess.run = lambda argv, **kw: _Done(json.dumps(
+            {"unrecorded": [], "unknown": [],
+             "recorded": [{"pane": "7", "session_id": "sess", "name": "Fleet Manager"}]}))
+        panes, unknown = k.sweep(NOW)
+        self.assertIn("7", panes)
+        self.assertEqual(unknown, 0)
+
     def test_unrunnable_sweep_is_none(self):
         k.subprocess.run = lambda argv, **kw: _Done("", returncode=1)
         self.assertIsNone(k.sweep(NOW))
