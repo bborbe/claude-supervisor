@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.348.2
 
 - fix: **`round-context-delta.py --receipt` no longer charges untimestamped records to every round.** `window_bytes` counted any record whose `timestamp` was absent or unparsable — *"an unreadable clock is not evidence that the record was outside the window"* — but the untimestamped population is session-wide harness state, not round content: measured 2026-11-18 on the live Fleet Manager, 320 `api-request-blob` records carried **726.7 KB**, and that constant was added to **every** window. Three rounds whose true costs were **228.4 / 184.7 / 155.8 KB** read as **955.1 / 911.4 / 882.5 KB**, and the newest round on `0.345.0` read 774.1 KB against a true **47.4 KB**, under the bound. The median reported at the time, 758.7 KB against the 70 KB bound, was an apparent 10.8× failure of a criterion the newest round met. A record that cannot be placed in a window is now skipped, and `unattributed_bytes` reports the excluded total on stderr (and as `unattributed_bytes` in `--json`) so the omission is visible rather than silent. Change set: `scripts/round-context-delta.py`, `scripts/tests/test_round_context_delta.py`, `CHANGELOG.md`.
 
