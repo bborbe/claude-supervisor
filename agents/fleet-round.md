@@ -58,10 +58,17 @@ a provenance act this leg must not take.
 </constraints>
 
 <inputs>
-The caller passes: **the round id** (the receipt's `round_started_at`, or the digest's round
-stamp) · **this session's id** (`$CLAUDE_CODE_SESSION_ID`) · **the vault name** · **the
-absolute tasks directory**. The manager read the receipt and armed before dispatching you, so
-the window is already open.
+The caller passes: **the round id** — the receipt's numeric `round_started_at`
+(`1795010135.451426`), which is also the `<round>` stem your hand-back must carry ·
+**this session's id** (`$CLAUDE_CODE_SESSION_ID`) · **the vault name** · **the absolute
+tasks directory**. The manager read the receipt and armed before dispatching you, so the
+window is already open.
+
+⚠️ **The round id is numeric, and the digest's stamp is not a substitute.** `--handback
+--round` rejects anything but the receipt float, so a caller that hands you
+`2026-10-11T18:09:40Z` (the sweep reader's own stamp format) leaves you unable to write the
+hand-back — and a round with no hand-back can never be closed. If the id you were given is
+not numeric, say so in the hand-back and stop that row rather than guessing one.
 
 ⚠️ **You derive this round's digest path; the caller does not pass it.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, under
