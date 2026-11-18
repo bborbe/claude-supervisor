@@ -134,6 +134,13 @@ Exit codes (same three the loop gate uses)
       digest to the tree's current one on a FROZEN verdict — authorised by that verdict,
       since a frozen tree renders the same table it last rendered.
 
+      ⚠️ And the settle reads the tree ONCE, through `gate_snapshot`: the digest it stores
+      is the digest of the very snapshot the FROZEN verdict was decided on. A settle that
+      re-read the tracked set after the verdict would bake a content change landing in
+      that window into the stored digest; the next `--print` would then compare equal and
+      never dispatch it — the same suppression this clause exists to remove, restored by
+      its own fix.
+
       ⚠️ The parked-set clause is a THIRD reason of the same shape, and it is the one that
       keeps the replay honest. `digest_of` hashes a DEATH-only liveness term, so a worker
       opening or closing a gate moves no digest input — while its row's Status cell really
@@ -849,13 +856,55 @@ def open_asked_of_you(session_id: str = "") -> list[dict]:
     ]
 
 
+def gate_snapshot(vault: str, subject: str, now: float | None = None) -> dict:
+    """Resolve every input the verdict and a settled digest share, ONCE.
+
+    ⚠️ **The single-instant rule is a fail-closed fix, not tidiness.** `--predicate
+    --persist` used to decide FROZEN from one read of the tracked set and then re-read
+    the set to compute the digest it stored. A content change landing between those two
+    reads was baked into the stored digest, so the next `--print` compared equal and
+    never dispatched it — the exact suppression this gate exists to remove, reintroduced
+    by the fix for the stale-digest deadlock. Reading the tracked set, the registry, the
+    feed and the record once and deriving both answers from that one snapshot leaves no
+    such window: anything that moves afterwards is visible to the next reader, whose
+    fresh digest then differs and answers CHANGE.
+    """
+    now = time.time() if now is None else now
+    branch, members = resolve_subject(vault, subject)
+    tracked = resolve_tracked(vault, members)
+    prev = load_state(subject)
+    prev_busy = prev.get("busy_since") or {}
+    registry = read_registry()
+    enrich_liveness(tracked, registry, read_feed())
+    # The SAME enrichment `evaluate` applies before `digest_of`; without it the liveness
+    # term defaults to the death value for every row carrying a session id, and the
+    # settled digest could never match the one the next `--print` computes. The returned
+    # busy map is deliberately discarded: `--save` owns that clock (see `settle_digest`).
+    apply_stuck(tracked, registry, prev_busy, now)
+    return {
+        "branch": branch,
+        "tracked": tracked,
+        "prev": prev,
+        "prev_busy": prev_busy,
+        "digest": digest_of(tracked),
+        "now": now,
+    }
+
+
 def frozen_tree(vault: str, subject: str, now: float | None = None,
                 interval_seconds: int = CADENCE_INTERVAL_SECONDS,
-                intervals: int = FROZEN_INTERVALS) -> dict:
-    """The frozen-tree predicate's verdict, both conjuncts evaluated."""
+                intervals: int = FROZEN_INTERVALS,
+                snapshot: dict | None = None) -> dict:
+    """The frozen-tree predicate's verdict, both conjuncts evaluated.
+
+    `snapshot` is `gate_snapshot`'s result. ⚠️ A caller that also settles the digest MUST
+    pass the snapshot its verdict was decided on — that is what keeps the two answers
+    describing a single instant. Omitted (a pure read, a test), the set is resolved here.
+    """
     now = time.time() if now is None else now
-    _, members = resolve_subject(vault, subject)
-    tracked = resolve_tracked(vault, members)
+    if snapshot is None:
+        snapshot = gate_snapshot(vault, subject, now=now)
+    tracked = snapshot["tracked"]
     mtimes = [t["mtime"] for t in tracked if t.get("mtime")]
     newest = max(mtimes) if mtimes else None
     window = intervals * interval_seconds
@@ -871,51 +920,49 @@ def frozen_tree(vault: str, subject: str, now: float | None = None,
     }
 
 
-def settle_digest(vault: str, subject: str) -> None:
-    """Rewrite the stored digest to the tree's current one, keeping the stored render.
+def settle_digest(subject: str, snapshot: dict) -> None:
+    """Write the snapshot's digest to the stored record, keeping the stored render.
 
-    Authorised ONLY by a FROZEN verdict: the predicate has already decided that no tracked
-    file's mtime moved and that the tick's content left the machine, so the cached table is
-    still what the sweep would render. Without this, a stale digest makes `--print` answer
-    CHANGE on every tick while the legs gate — and a gated round never reaches `--save`
-    (`commands/steps/goal-sweep.md`: exit 0 dispatches no reader and runs `--render-cached`,
-    not the persist block), so the two answers stay opposed for as long as the tree stays
-    quiet. That is the second deadlock path, distinct from the actionable clause's: the
-    cited measurement prints `CHANGE digest differs`, which is `digest_moved`.
+    Authorised ONLY by a FROZEN verdict on that same snapshot: the predicate has already
+    decided that no tracked file's mtime moved and that the tick's content left the
+    machine, so the cached table is still what the sweep would render. Without this, a
+    stale digest makes `--print` answer CHANGE on every tick while the legs gate — and a
+    gated round never reaches `--save` (`commands/steps/goal-sweep.md`: exit 0 dispatches
+    no reader and runs `--render-cached`, not the persist block), so the two answers stay
+    opposed for as long as the tree stays quiet. That is the second deadlock path,
+    distinct from the actionable clause's: the cited measurement prints `CHANGE digest
+    differs`, which is `digest_moved`.
+
+    ⚠️ **`snapshot` is REQUIRED and carries the digest itself; nothing is re-read here.**
+    A re-read at a later instant is the fail-closed window the reviewer named: a content
+    change landing after the FROZEN verdict would be baked into the stored digest, and
+    the next `--print` would then compare equal and silently never dispatch it. See
+    `gate_snapshot`.
+
+    ⚠️ It writes the PREVIOUS busy-since map, not the snapshot's freshly computed one.
+    The clock belongs to `--save`: settling a frozen tick with a map whose `since` values
+    were just minted would restart a busy worker's stuck clock on every gated tick.
 
     Best-effort and silent on failure: the verdict belongs to the predicate, and a write
     error must not turn FROZEN into NOT-FROZEN. The next gated tick retries.
     """
-    try:
-        branch, members = resolve_subject(vault, subject)
-        tracked = resolve_tracked(vault, members)
-        stored, table, fail_reason = load_stored(subject)
-    except (ValueError, OSError):
-        return
+    stored, table, fail_reason = load_stored(subject)
     if fail_reason is not None or not table:
         # No stored render to keep: nothing to settle, and inventing one would record a
         # table the sweep never produced.
         return
-    prev = load_state(subject)
-    prev_busy = prev.get("busy_since") or {}
-    # The SAME enrichment `evaluate` applies before `digest_of`. Without it the liveness
-    # term defaults to the death value for every row carrying a session id, so the digest
-    # written here would differ from the one the next `--print` computes — and the gate
-    # would settle forever without ever matching.
-    registry = read_registry()
-    enrich_liveness(tracked, registry, read_feed())
-    apply_stuck(tracked, registry, prev_busy, time.time())
-    digest = digest_of(tracked)
+    prev = snapshot["prev"]
+    digest = snapshot["digest"]
     if stored == digest:
         return
     try:
         save_stored(
             subject,
-            branch,
+            snapshot["branch"],
             digest,
             table,
-            tracked,
-            prev_busy,
+            snapshot["tracked"],
+            snapshot["prev_busy"],
             bucket_sets=prev.get("bucket_sets"),
             recorded_at=prev.get("recorded_at"),
         )
@@ -931,11 +978,16 @@ def predicate(vault: str, subject: str, persist: bool = False) -> int:
     short-circuited never reaches `--save`. Settling the stored digest here is what stops
     `--print` answering CHANGE against a gate that answered FROZEN. On NOT-FROZEN the legs
     run and the sweep's own `--save` writes the record, so nothing is touched.
+
+    ⚠️ **The verdict and a settled digest share ONE snapshot** (`gate_snapshot`), so a
+    change landing after the read is dispatched by the next `--print` instead of being
+    baked into the digest that would suppress it.
     """
-    v = frozen_tree(vault, subject)
+    snapshot = gate_snapshot(vault, subject)
+    v = frozen_tree(vault, subject, now=snapshot["now"], snapshot=snapshot)
     if v["frozen"]:
         if persist:
-            settle_digest(vault, subject)
+            settle_digest(subject, snapshot)
         print(
             f"FROZEN — newest tracked mtime {v['quiet_seconds']}s ago "
             f"(window {v['window_seconds']}s), 0 open asked-of-you, {v['tracked']} tracked"

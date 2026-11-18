@@ -722,6 +722,73 @@ class TestFrozenSettle(Base):
         rc, out = self.check("ATopic")
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
 
+    def test_a_change_landing_between_the_verdict_and_the_digest_is_still_dispatched(self):
+        """The fail-closed window: the digest must describe the verdict's OWN snapshot.
+
+        A settle that re-reads the tracked set at a later instant than the FROZEN verdict
+        bakes a content change landing in that window into the stored digest, and the
+        next `--print` then compares equal — the change is silently never dispatched, in
+        a gate whose whole purpose is to remove that class of suppression.
+
+        The injection point is the verdict's second conjunct, which runs after the tracked
+        set was read and before the settle writes — in both builds, so the mutation lands
+        exactly in the window rather than in an artefact of the new ordering.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+
+        real = self.m.open_asked_of_you
+        fired = []
+
+        def change_then_ask():
+            if not fired:
+                fired.append(True)
+                self.task(
+                    "AGoalTask", sid="", progress="landed mid-settle", goals="AGoal"
+                )
+                old = time.time() - 3600
+                os.utime(os.path.join(self.vault, "25 Tasks", "AGoalTask.md"), (old, old))
+            return real()
+
+        self.m.open_asked_of_you = change_then_ask
+        try:
+            rc, out = self.predicate("--persist")
+        finally:
+            self.m.open_asked_of_you = real
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        self.assertEqual(fired, [True], "the injection point never ran")
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_settle_reads_the_tracked_set_exactly_once(self):
+        """Mechanism pin for the test above: one read, shared by verdict and digest.
+
+        The behavioural test proves the change is dispatched; this one names why, so a
+        future edit that re-adds a read inside `settle_digest` fails even when it happens
+        to compute the same digest that tick.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+
+        reads = []
+        real = self.m.resolve_tracked
+
+        def counting(vault, members):
+            reads.append(tuple(members))
+            return real(vault, members)
+
+        self.m.resolve_tracked = counting
+        try:
+            rc, out = self.predicate("--persist")
+        finally:
+            self.m.resolve_tracked = real
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(reads), 1, reads)
+
 
 class TestLiveness(Base):
     """Property 2 and its negative control — the pair SC3 is graded on."""
