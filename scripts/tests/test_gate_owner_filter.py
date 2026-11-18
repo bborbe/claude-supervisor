@@ -1254,6 +1254,67 @@ class FeedEmitCarriesTheReplayMark(unittest.TestCase):
         self.assertEqual(result.stdout, "417\n")
 
 
+class DigestCollapsesAMultiPanePoll(unittest.TestCase):
+    """`--digest`: one line per poll, so a busy poll costs ONE watcher wake.
+
+    Every printed line becomes a separate `Monitor` event, so a poll emitting
+    twelve panes woke the manager twelve times — measured 2026-11-18 on a Fleet
+    Manager round: 29–106 notifications per round. The digest is opt-in because
+    the per-pane shape is a contract other consumers read.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
+            os.makedirs(path)
+        _make_me_live(self.registry)
+
+    def emit(self, feed, *extra):
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--feed", "--self", ME,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--endpoint", self.endpoint.url,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"), *extra],
+            input=feed, capture_output=True, text=True,
+        )
+
+    def test_two_panes_collapse_to_one_line_naming_both(self):
+        result = self.emit(
+            "Needs you (2)\n"
+            "  [ 864]  5h49m  ⚙ a gate\n"
+            "  [ 417]     0m  ⚙ another gate\n",
+            "--digest",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn("new: 2", lines[0])
+        self.assertIn("864", lines[0])
+        self.assertIn("417", lines[0])
+
+    def test_a_single_pane_still_renders_bare(self):
+        """A quiet poll is byte-identical to the per-pane shape — the common path."""
+        result = self.emit("Needs you (1)\n  [ 417]     0m  ⚙ a live gate\n", "--digest")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "417\n")
+
+    def test_without_the_flag_two_panes_stay_two_lines(self):
+        """No regression: the default shape is unchanged."""
+        result = self.emit(
+            "Needs you (2)\n"
+            "  [ 864]  5h49m  ⚙ a gate\n"
+            "  [ 417]     0m  ⚙ another gate\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 2, result.stdout)
+
+
 class SummaryLine(unittest.TestCase):
     """The stderr counters, which nothing asserted on before this change.
 

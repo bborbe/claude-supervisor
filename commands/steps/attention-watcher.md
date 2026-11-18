@@ -6,7 +6,7 @@ user-invocable: false
 
 # Attention watchers
 
-When: every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat)
+When: every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat)
 
   - **Attention watcher:** arm ONE `Monitor` over the attention feed, **scoped by pane ownership** — the filter reads the feed itself and re-reads it every interval — from `GET /api/1.0/who-needs-me` by default, so no interpreter is spawned per poll — so the arm survives its own first read:
 

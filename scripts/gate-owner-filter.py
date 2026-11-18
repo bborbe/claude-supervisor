@@ -1520,22 +1520,34 @@ def render(rows, args, new_panes=None):
 
     if args.feed:
         # The watcher's own shape: the panes worth a turn, nothing else.
-        # ⚠️ A replayed row carries the feed's own mark, because this line is
-        # the watcher's entire input: it prints a pane id and nothing else, so
-        # a replayed row was byte-identical to a live one and the watcher woke
-        # on gates already answered. A LIVE row renders exactly as it always
-        # did — the no-regression requirement is that a responsive store's
-        # output is unchanged, and a mark that was always present would fail it
-        # (the same rule `who-needs-me.py`'s own render states).
+        # ⚠️ A replayed row carries the feed's own mark, because this line is the
+        # watcher's entire input: a replayed row was byte-identical to a live one and
+        # the watcher woke on gates already answered. A LIVE row renders exactly as it
+        # always did — the no-regression requirement is that a responsive store's
+        # output is unchanged.
+        # A headless key names the store item but no pane to jump to, so the wake line
+        # also names the session it belongs to — the one handle the manager can act on.
+        lines = []
         for r in rows:
             if r["verdict"] != EMIT:
                 continue
             if new_panes is not None and r["pane"] not in new_panes:
                 continue
-            # A headless key names the store item but no pane to jump to, so the
-            # wake line also names the session it belongs to — the one handle the
-            # manager can act on. A pane row renders exactly as before.
-            print(f"{r['pane']}{headless_suffix(r)}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
+            lines.append(f"{r['pane']}{headless_suffix(r)}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
+        # ⚠️ **Every printed line is a separate `Monitor` event**, so a poll that emits
+        # twelve panes wakes the watcher twelve times — each wake costs the manager a
+        # notification framing plus a deliberation. Measured 2026-11-18 on a Fleet
+        # Manager round: 29–106 such notifications per round, up to 25% of a quiet
+        # round's bytes and the trigger for its thinking.
+        #
+        # `--digest` collapses a multi-pane poll into ONE line. A single pane still
+        # renders bare, so a quiet poll is byte-identical to the old output and a
+        # consumer that expects a pane id keeps working on the common path.
+        if args.digest and len(lines) > 1:
+            print(f"FEED  new: {len(lines)}  " + " | ".join(lines))
+            return
+        for line in lines:
+            print(line)
         return
 
     for r in rows:
@@ -2000,6 +2012,13 @@ def main():
     parser.add_argument("--self", dest="self_id", default=None, help="this watcher's session id")
     parser.add_argument("--pane", action="append", default=[], help="evaluate one pane (repeatable)")
     parser.add_argument("--feed", action="store_true", help="read who-needs-me.py output on stdin")
+    parser.add_argument(
+        "--digest",
+        action="store_true",
+        help="with --feed: print ONE line per poll summarising the new panes, instead of one "
+             "line per pane — each printed line becomes a separate Monitor event, so a busy "
+             "poll costs the watcher a notification per gate",
+    )
     parser.add_argument("--explain", action="store_true", help="print the reason for every verdict")
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument("--endpoint", default=None, help="override the attention store base URL")
