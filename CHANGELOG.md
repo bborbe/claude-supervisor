@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.339.0
 
 - feat: **`scripts/round-context-delta.py` measures a fleet round's context cost from the transcript, so "≤ 3 KB per round" is a reading rather than an estimate.** The 2026-11-17 breakdown was computed once by hand and never reproduced; the task that depends on it could only name "the same breakdown script" and nothing could run it. The script segments a transcript at the scheduler's own markers (`scheduledFireId` / `scheduledTaskId` on a fire whose prompt starts with the round name) and reports each round's byte delta — main-thread text only, with `isSidechain` records excluded because a sub-agent's text lives in its own transcript and reaches the manager as one hand-back message, which *does* count. ⚠️ **Three shapes would make the measurement lie, and each is pinned by a test:** text before the first marker is setup and never charged to round 1; a transcript with no markers exits **2**, never a zero dressed as a clean reading; and a fire whose prompt names something else (`/supervisor:goal-drive`) is not a round boundary. Measured on the predecessor `fbad5082`: **7 rounds, median 40.0 KB, max 531.5 KB** — the baseline the ≤ 3 KB target is set against. Change set: `scripts/round-context-delta.py`, `scripts/tests/test_round_context_delta.py`, `CHANGELOG.md`.
 
