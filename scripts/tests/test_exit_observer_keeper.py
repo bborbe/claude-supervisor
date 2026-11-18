@@ -113,6 +113,31 @@ class Sweep(_Base):
         k.subprocess.run = lambda argv, **kw: _Done("", returncode=1)
         self.assertIsNone(k.sweep(NOW))
 
+    def test_a_nonzero_exit_names_the_code_and_stderr(self):
+        """The reason must reach the log: four theories about this failure were wrong without it."""
+        import io as _io
+        from contextlib import redirect_stderr
+        done = _Done("", returncode=2)
+        done.stderr = "boom: registry unreadable"
+        k.subprocess.run = lambda argv, **kw: done
+        err = _io.StringIO()
+        with redirect_stderr(err):
+            self.assertIsNone(k.sweep(NOW))
+        self.assertIn("exited 2", err.getvalue())
+        self.assertIn("registry unreadable", err.getvalue())
+
+    def test_undecodable_output_names_the_failure(self):
+        import io as _io
+        from contextlib import redirect_stderr
+
+        def boom(argv, **kw):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        k.subprocess.run = boom
+        err = _io.StringIO()
+        with redirect_stderr(err):
+            self.assertIsNone(k.sweep(NOW))
+        self.assertIn("could not be decoded", err.getvalue())
+
 
 class Liveness(_Base):
     def test_every_pass_writes_the_heartbeat(self):
