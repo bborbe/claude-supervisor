@@ -287,7 +287,7 @@ and never on the duration merely dropping. Leaving the bucket, leaving the fleet
 `watching_since` re-arms it.
 
 ⚠️ **A manager-tier session is never a candidate** — the script reports `<k> manager-skipped`.
-Do not filter `NUDGE` by tier.
+Nor is a busy or unanchored one: never filter `NUDGE`.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
 (`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live · <k> manager-skipped`)

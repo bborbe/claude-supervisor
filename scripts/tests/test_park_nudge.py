@@ -24,6 +24,7 @@ fixtures pin *discrimination*, not parsing:
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -48,9 +49,28 @@ def reading(sessions):
     return dict(window_min=15, live=len(sessions), sessions=sessions)
 
 
+# A session no task claims. Every other sid the fixtures use is anchored by
+# `_NudgeBase.setUp`, so this one is the only unanchored row unless a test says otherwise.
+UNANCHORED = "99999999-0000-4000-8000-000000000001"
+
+
+def all_fixture_sids():
+    sids = {OVER, WITHIN}
+    for block in FIXTURE.values():
+        if isinstance(block, dict):
+            sids.update(s["sid"] for s in block.get("sessions", []))
+    return sids
+
+
 def row(sid=OVER, bucket="watching", quiet=31, watching=None, since=None,
-        name="Synthetic"):
-    return dict(sid=sid, name=name, status="shell", bucket=bucket,
+        name="Synthetic", status=None):
+    # The registry status the producer pairs with each bucket by construction:
+    # `watching` requires a running shell, `gated` a waiting registry; an `idle`
+    # row defaults to an idle registry, and a test that wants the pusher shape
+    # (`idle` bucket, `busy` registry) says so.
+    if status is None:
+        status = {"watching": "shell", "idle": "idle", "gated": "waiting"}.get(bucket, "busy")
+    return dict(sid=sid, name=name, status=status, bucket=bucket,
                 calls=0, out_tok=0, quiet_min=quiet,
                 watching_min=quiet if watching is None else watching,
                 watching_since=since,
@@ -69,11 +89,30 @@ class _NudgeBase(unittest.TestCase):
         # pass or fail on whatever managers happened to be armed on this host.
         self.mgr_state = self.tmp / "sweep-gate"
         self.mgr_state.mkdir(parents=True)
+        # The anchor lookup, isolated per test: `close-worker.py::find_task_checked`
+        # reads `SUPERVISOR_VAULTS_ROOT` and `SUPERVISOR_VAULT_CONFIG`, so a test that
+        # inherited the live ones would pass or fail on whatever tasks this host has.
+        self.vaults = self.tmp / "vaults"
+        self.tasks = self.vaults / "v" / "25 Tasks"
+        self.tasks.mkdir(parents=True)
+        self.vault_config = self.tmp / "vault-config.json"
+        self.vault_config.write_text("[]")
+        for sid in all_fixture_sids():
+            self.anchor(sid)
+
+    def anchor(self, sid, title=None):
+        """A task page claiming `sid` through `claude_session_id`."""
+        title = title or f"Task {sid[:8]}"
+        (self.tasks / f"{title}.md").write_text(
+            f"---\nclaude_session_id: {sid}\nstatus: in_progress\n---\n")
+        return title
 
     def run_script(self, data, *args, extra_env=None):
         env = dict(os.environ)
         env.pop("PARK_NUDGE_STATE", None)
         env["MANAGER_LIVENESS_STATE_DIR"] = str(self.mgr_state)
+        env["SUPERVISOR_VAULTS_ROOT"] = str(self.vaults)
+        env["SUPERVISOR_VAULT_CONFIG"] = str(self.vault_config)
         env.update(extra_env or {})
         payload = data if isinstance(data, str) else json.dumps(data)
         return subprocess.run(
@@ -159,9 +198,12 @@ class ParkNudgeTest(_NudgeBase):
         fake = self.tmp / "vcs"
         fake.mkdir()
         (fake / "session-self-exit.py").write_text("")
-        p = self.run_script(FIXTURE["threshold"], extra_env={"VAULT_CLI_SCRIPTS": str(fake)})
+        home = self.tmp / "home"
+        p = self.run_script(FIXTURE["threshold"],
+                            extra_env={"VAULT_CLI_SCRIPTS": str(fake), "HOME": str(home)})
         msg = self.nudges(p)[0].split(" :: ", 1)[1]
-        self.assertIn(str(SCRIPT.parent / "park-event.py") + " register --task", msg)
+        park_event = home / ".claude/plugins/marketplaces/claude-supervisor/scripts/park-event.py"
+        self.assertIn(f"{park_event} register --task \"Task {OVER[:8]}\"", msg)
         self.assertIn("--recheck", msg)
         self.assertIn("`defer_date`", msg)
         self.assertIn("ISO-8601 with offset", msg)
@@ -169,15 +211,38 @@ class ParkNudgeTest(_NudgeBase):
         self.assertIn(f"python3 {fake / 'session-self-exit.py'}", msg)
 
     def test_self_exit_falls_back_to_vault_cli_not_this_plugin(self):
+        """The self-exit script ships in vault-cli, so the fallback names vault-cli's
+        marketplace clone — never this plugin's own scripts dir."""
         home = self.tmp / "home"
-        for ver in ("0.9.0", "0.10.0"):
-            d = home / ".claude/plugins/cache/vault-cli/vault-cli" / ver / "scripts"
-            d.mkdir(parents=True)
-            (d / "session-self-exit.py").write_text("")
         env = {"HOME": str(home), "VAULT_CLI_SCRIPTS": ""}
         msg = self.nudges(self.run_script(FIXTURE["threshold"], extra_env=env))[0]
-        self.assertIn("vault-cli/vault-cli/0.10.0/scripts/session-self-exit.py", msg)
+        self.assertIn(
+            f"python3 {home}/.claude/plugins/marketplaces/vault-cli/scripts/session-self-exit.py", msg)
         self.assertNotIn(str(SCRIPT.parent / "session-self-exit.py"), msg)
+
+    def test_handover_paths_carry_no_version_segment(self):
+        """Defect 1: a handed-over path pinned to a cache version is the SENDER's
+        load, and goes stale for every recipient on another version. Two cache
+        versions are installed so a newest-installed resolver has something to pick;
+        the emitted paths must be the unversioned marketplace clones, exactly —
+        string equality, so a bare or arbitrary unversioned path fails."""
+        home = self.tmp / "home"
+        for plugin in ("claude-supervisor/supervisor", "vault-cli/vault-cli"):
+            for ver in ("0.348.0", "0.348.2"):
+                d = home / ".claude/plugins/cache" / plugin / ver / "scripts"
+                d.mkdir(parents=True)
+                (d / "park-event.py").write_text("")
+                (d / "session-self-exit.py").write_text("")
+        env = {"HOME": str(home), "VAULT_CLI_SCRIPTS": ""}
+        msg = self.nudges(self.run_script(FIXTURE["threshold"], extra_env=env))[0].split(" :: ", 1)[1]
+        park_event = f"{home}/.claude/plugins/marketplaces/claude-supervisor/scripts/park-event.py"
+        self_exit = f"{home}/.claude/plugins/marketplaces/vault-cli/scripts/session-self-exit.py"
+        self.assertIn(f"`python3 {park_event} register", msg)
+        self.assertIn(f"`python3 {self_exit}`", msg)
+        handed = re.findall(r"python3 (\S+\.py)", msg)
+        self.assertEqual(sorted(handed), sorted([park_event, self_exit]), msg)
+        for path in handed:
+            self.assertIsNone(re.search(r"/\d+\.\d+\.\d+/", path), path)
 
     # --- SC3: the duration is the gate, not the bucket ----------------------
 
@@ -347,6 +412,120 @@ class ManagerTierTest(_NudgeBase):
         self.assertEqual(data["manager"], 1)
         self.assertEqual(data["manager_rows"][0]["sid"], MANAGER)
         self.assertIn("armed as goal--", data["manager_rows"][0]["why"])
+
+
+BUSY = "77777777-0000-4000-8000-000000000029"
+IDLE = "88888888-0000-4000-8000-000000000029"
+
+
+class RegistryStatusTest(_NudgeBase):
+    """An `idle` bucket is not a parked session — the registry `status` says which.
+
+    `session-activity.py::bucket_for` lets a `status: busy` row with no tool calls in
+    its window fall through to `idle`. A pusher is exactly that between rounds, and it
+    received six `PARK NOW` orders while its registry read `busy`. Its `watching_min`
+    then went 29 → 17 between two sends, because it restarts per `🟡 WAITING` episode.
+    A role exclusion would only move the bug onto the next role that does not fit; the
+    registry status is the reading that says whether a session is actually idle.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.anchor(BUSY)
+        self.anchor(IDLE)
+
+    def test_an_idle_bucket_nudges_only_when_the_registry_reads_idle(self):
+        """SC1: both rows are pinned to `bucket: idle`, both past the threshold. Only
+        the registry status differs, so only the status read can separate them."""
+        p = self.run_script(reading([
+            row(sid=BUSY, bucket="idle", status="busy", quiet=29),
+            row(sid=IDLE, bucket="idle", status="idle", quiet=29),
+        ]))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = self.nudges(p)
+        self.assertEqual(len(lines), 1, p.stdout)
+        self.assertIn(IDLE, lines[0])
+        self.assertNotIn(BUSY, "".join(lines))
+
+    def test_the_pusher_shape_is_never_ordered_to_park(self):
+        """SC2: the measured shape — `idle` bucket, `busy` registry, `watching_min` 29,
+        an open episode — beside a genuinely idle row of the same duration. The busy
+        row is absent from the PARK NOW set while the idle one is present, and the
+        skip is counted so a silent round can be told from a round that skipped."""
+        since = "2026-11-18T19:40:00Z"
+        p = self.run_script(reading([
+            row(sid=BUSY, name="Fleet Pusher", bucket="idle", status="busy",
+                quiet=29, since=since),
+            row(sid=IDLE, name="Parked Worker", bucket="idle", status="idle",
+                quiet=29, since=since),
+        ]), "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        sids = [n["sid"] for n in data["nudges"]]
+        self.assertEqual(sids, [IDLE], p.stdout)
+        self.assertEqual(data["status_skipped"], 1)
+        self.assertIn("1 status-skipped", data["summary"])
+
+    def test_a_watching_row_is_unaffected_by_the_status_gate(self):
+        """The gate is on the `idle` bucket only: a `watching` row requires a running
+        shell (`status: shell`) by construction, and stays a candidate."""
+        p = self.run_script(reading([row(sid=OVER, bucket="watching", quiet=31)]))
+        self.assertEqual(len(self.nudges(p)), 1, p.stdout)
+        self.assertIn("0 status-skipped", p.stdout)
+
+
+class AnchorTest(_NudgeBase):
+    """Defect 2: the park order told a session with no anchored task to run
+    `register --task "<your anchored task>"` and `vault-cli task set` on the same
+    placeholder. The park binds a wait to an ANCHORED TASK, so for an unanchored
+    session it is inapplicable — the same reasoning as the manager-tier skip."""
+
+    def test_an_unanchored_row_is_skipped_while_an_anchored_one_is_nudged(self):
+        """SC3, with its positive control: same bucket, same status, same duration.
+        Deleting the nudge entirely would pass the first half and fail the second."""
+        p = self.run_script(reading([
+            row(sid=UNANCHORED, bucket="idle", quiet=31),
+            row(sid=OVER, bucket="idle", quiet=31),
+        ]), "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual([n["sid"] for n in data["nudges"]], [OVER], p.stdout)
+        msg = data["nudges"][0]["message"]
+        self.assertIn(f'--task "Task {OVER[:8]}"', msg)
+        self.assertIn(f'vault-cli task get "Task {OVER[:8]}" defer_date', msg)
+        self.assertNotIn("<your anchored task>", msg)
+        self.assertEqual(data["unanchored"], 1)
+        self.assertEqual(data["anchor_unknown"], 0)
+        self.assertIn("1 unanchored-skipped", data["summary"])
+
+    def test_a_failed_anchor_search_is_unknown_not_unanchored(self):
+        """A search that errored proves nothing about absence. The row is not nudged
+        — a nudge would carry no task — and it is counted apart from `unanchored`, so
+        an unreadable vault never reads as a fleet of unanchored sessions."""
+        locked_dir = self.tasks / "locked"
+        locked_dir.mkdir()
+        (locked_dir / "x.md").write_text("x")
+        locked_dir.chmod(0)
+        self.addCleanup(locked_dir.chmod, 0o755)
+        p = self.run_script(reading([row(sid=UNANCHORED, bucket="idle", quiet=31)]), "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["nudges"], [], p.stdout)
+        self.assertEqual(data["anchor_unknown"], 1, p.stdout)
+        self.assertEqual(data["unanchored"], 0, p.stdout)
+
+    def test_a_session_handed_off_by_its_task_is_still_anchored(self):
+        """`find_task_checked` also answers through `metrics_sessions` when the task's
+        `claude_session_id` has moved on. That session's task is real, so it is
+        anchored, not skipped."""
+        (self.tasks / "Handed Off.md").write_text(
+            "---\nclaude_session_id: 11111111-0000-4000-8000-000000000000\n"
+            "metrics_sessions:\n    - session_id: " + UNANCHORED + "\n"
+            "      started_at: \"2026-11-18T20:00:00+01:00\"\n---\n")
+        p = self.run_script(reading([row(sid=UNANCHORED, bucket="idle", quiet=31)]))
+        lines = self.nudges(p)
+        self.assertEqual(len(lines), 1, p.stdout)
+        self.assertIn('--task "Handed Off"', lines[0])
 
 
 if __name__ == "__main__":
