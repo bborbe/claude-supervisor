@@ -57,7 +57,7 @@ fails when it disagrees with the forms the fixture exercises.
 | `irreversible-delete` | `rm` outside `/tmp/`, `git reset --hard`, `git clean`, `stash drop`, `find -delete`, `gh repo delete` |
 | `cluster-mutation` | `delete`, `apply` without `--dry-run`, `create`, `patch`, `edit`, `exec`, `port-forward`, `cp` on a dev wrapper |
 | `cluster-unknown-env` | bare `kubectl` or an unknown wrapper — the environment cannot be read from the command |
-| `secret` | a credential path (`.ssh/`, `.netrc`, `.aws/`, `.env`, …), a secret CLI (`teamvault-cli`, `security find-*`), `kubectl get secret`, any `kubectl get -o yaml/json` |
+| `secret` | a credential path in any token or `file_path` (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.config/gh`, `~/Library/Keychains`, `.netrc`, `.credentials.json`, `.teamvault.json`, `.git-credentials`, `.npmrc`, `.pypirc`, `id_*` keys, `*.pem`, `*.key`, any `.env*`, any `.claude.json`, `~/.claude` named as a directory), a whole-tree read of a broad directory (`grep -r`/`ls -R`/`find`/`du`/`tree`/`rg`, or a glob read, over `/`, `/Users`, `~`, or `~/.claude`/`~/.config`/`~/Library`), a secret CLI (`teamvault-cli`, `security find-*`), `kubectl get secret`, any `kubectl get -o yaml/json` |
 | `permission-grant` | writing `~/.claude/settings*.json`, `git config --global` |
 | `publish` | email/chat send, `gh release`, a tag push, `gh pr comment`/`review`, `gh api` writes, `curl` writes to a non-localhost URL, `docker push`, `npm publish` |
 | `remote-host` | `ssh`, `scp`, `rsync` |
