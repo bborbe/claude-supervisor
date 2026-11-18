@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.dirname(_HERE)
@@ -1018,10 +1019,11 @@ class TestGrepTask(unittest.TestCase):
             path = os.path.join(d, "A Task.md")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("---\nclaude_session_id: abc-123\nstatus: completed\n---\n")
-            own, handed = cw._grep_task("abc-123", [d])
+            own, handed, error = cw._grep_task("abc-123", [d])
             self.assertIsNotNone(own, "the matcher missed a task that is plainly there")
             self.assertEqual(own[0], path)
             self.assertIsNone(handed)
+            self.assertIsNone(error, "a successful search reports no error")
 
     def test_prefers_ripgrep_when_it_is_installed(self):
         seen = {}
@@ -1062,6 +1064,78 @@ class TestGrepTask(unittest.TestCase):
         finally:
             cw.shutil.which, cw.subprocess.run = orig_which, orig_run
         self.assertEqual(seen["argv"][0], "grep", seen["argv"])
+
+    def test_a_partial_read_that_found_the_task_still_finds_it(self):
+        # ⚠️ `grep -rl` can exit ≥ 2 AND have printed every match it found before the
+        # error. Discarding that stdout would lose a task that is plainly there — the
+        # very failure the exit-code check exists to prevent, reached from the other side.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "A Task.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("---\nclaude_session_id: abc-123\nstatus: completed\n---\n")
+
+            class _Done:
+                stdout = path + "\n"
+                returncode = 2
+
+            orig_run = cw.subprocess.run
+            cw.subprocess.run = lambda argv, **kw: _Done()
+            try:
+                own, handed, error = cw._grep_task("abc-123", [d])
+            finally:
+                cw.subprocess.run = orig_run
+        self.assertIsNotNone(own, "a partial read that carries the match is still a match")
+        self.assertEqual(own[0], path)
+        self.assertIsNone(handed)
+        self.assertIsNone(error, "a found task outranks the search's exit code")
+
+    def test_a_failed_search_with_no_match_reports_an_error(self):
+        class _Done:
+            stdout = ""
+            returncode = 2
+
+        orig_run = cw.subprocess.run
+        cw.subprocess.run = lambda argv, **kw: _Done()
+        try:
+            own, handed, error = cw._grep_task("abc-123", ["/tmp"])
+        finally:
+            cw.subprocess.run = orig_run
+        self.assertIsNone(own)
+        self.assertIsNone(handed)
+        self.assertIsNotNone(error, "no match plus a failed search is not an absence")
+
+
+class TestFleetTaskDirs(unittest.TestCase):
+    """⚠️ An absence proof must be as WIDE as the population it quantifies over.
+
+    `task_dirs_for` answers from `vault-cli` config, so a vault missing from that config
+    contributes nothing and its sessions look unanchored — while the fleet sweep, which
+    decides what may be closed, probes every vault under the Obsidian root. A close taken
+    over the narrower set kills a live anchored tab.
+    """
+
+    def test_includes_an_unconfigured_vault_under_the_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = os.path.join(root, "unconfigured-vault", "25 Tasks")
+            os.makedirs(vault)
+            with mock.patch.object(cw, "_vault_config", return_value={}):
+                dirs = cw.fleet_task_dirs("/tmp/nowhere", root)
+        self.assertIn(vault, dirs)
+
+    def test_find_task_checked_finds_a_task_in_an_unconfigured_vault(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = os.path.join(root, "unconfigured-vault", "25 Tasks")
+            os.makedirs(vault)
+            path = os.path.join(vault, "A Task.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("---\nclaude_session_id: abc-123\nstatus: completed\n---\n")
+            with mock.patch.object(cw, "_vault_config", return_value={}):
+                task, error = cw.find_task_checked("abc-123", "/tmp/nowhere", root)
+        self.assertIsNotNone(
+            task, "an unconfigured vault's task must not read as absent"
+        )
+        self.assertEqual(task[0], path)
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":
