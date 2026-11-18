@@ -1909,5 +1909,128 @@ class FreshPromptTaskRefusal(unittest.TestCase):
         self.assertIn("/vault-cli:work-on-task A Task", out.stdout)
 
 
+class RegisteredVaultShapes(unittest.TestCase):
+    """`--absent` resolves a registration's `vault` value to a configured vault.
+
+    Measured 2026-11-18: 42 of 198 live registrations carried a value that was not a
+    configured vault name — 6 paths and 36 stale or renamed names — and the exact-name
+    lookup refused every one of them, so the supported resume path was unusable for
+    exactly the sessions it exists to recover.
+
+    Both directions are asserted: every resolvable shape must resume into the RIGHT vault
+    (a wrong-but-plausible guess resumes a manager in the wrong vault), and a value with
+    no configured target must refuse naming what it compared against — never claiming a
+    missing directory, because no directory was named.
+    """
+
+    SID = "eeee0000-0000-0000-0000-000000000006"
+    NAMES = ("private-personal", "seibert-brogrammers", "seibert-personal")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.reg = os.path.join(self.dir, "sessions")
+        self.mgr = os.path.join(self.dir, "worker-manager")
+        self.bin = os.path.join(self.dir, "bin")
+        for d in (self.reg, self.mgr, self.bin):
+            os.makedirs(d)
+        self.launcher = os.path.join(self.dir, "cc-manager")
+        self.vault_script = os.path.join(self.dir, "cc-vault")
+        for path in (self.launcher, self.vault_script):
+            with open(path, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+        self.vaults = {}
+        entries = []
+        for name in self.NAMES:
+            path = os.path.join(self.dir, "vaults", name)
+            os.makedirs(path)
+            self.vaults[name] = path
+            entries.append({"name": name, "path": path, "claude_script": self.vault_script,
+                            "manager_launcher": self.launcher, "worker_launcher": "/no/worker",
+                            "tasks_dir": "25 Tasks"})
+        self.cfg = os.path.join(self.dir, "vaults.json")
+        with open(self.cfg, "w") as fh:
+            json.dump(entries, fh)
+        self.exits = os.path.join(self.dir, "session-exit")
+        os.makedirs(self.exits)
+        self.holds = os.path.join(self.dir, "holds.json")
+        with open(self.holds, "w") as fh:
+            fh.write('{"version": 1, "holds": {}}')
+        fake = os.path.join(self.bin, "wezterm")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\necho 999\n")
+        os.chmod(fake, 0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def register(self, vault):
+        rec = {"subject": "Fleet Manager", "branch": "fleet", "vault": vault,
+               "resolved_at": "2026-11-18T09:00:00+00:00"}
+        with open(os.path.join(self.mgr, f"{self.SID}.json"), "w") as fh:
+            json.dump(rec, fh)
+
+    def run_absent(self):
+        env = dict(os.environ)
+        for key in ("SUPERVISOR_LAUNCHER", "SUPERVISOR_WEZTERM"):
+            env.pop(key, None)
+        env["SUPERVISOR_VAULT_CONFIG"] = self.cfg
+        env["SUPERVISOR_WORKER_MANAGER_DIR"] = self.mgr
+        env["SUPERVISOR_SESSION_HOLDS"] = self.holds
+        env["SUPERVISOR_SESSION_EXIT_DIR"] = self.exits
+        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        argv = [sys.executable, SCRIPT, self.SID, "--absent", "--sessions-dir", self.reg,
+                "--dry-run"]
+        out = subprocess.run(argv, capture_output=True, text=True, env=env)
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def assert_resumes_into(self, vault_value, expected):
+        """`--absent --dry-run` exits 0 and resolves `cwd` to `expected`'s configured path."""
+        self.register(vault_value)
+        code, lines = self.run_absent()
+        text = "\n".join(lines)
+        self.assertEqual(code, 0, text)
+        self.assertIn(f"would resume into {self.vaults[expected]}", text)
+
+    def test_an_exact_configured_name_resumes(self):
+        self.assert_resumes_into("seibert-personal", "seibert-personal")
+
+    def test_a_lowercase_path_resolves_to_its_vault(self):
+        """The 4 live records that carry a lowercased absolute path."""
+        self.assert_resumes_into(self.vaults["private-personal"].lower(), "private-personal")
+
+    def test_the_exact_case_path_also_resolves(self):
+        self.assert_resumes_into(self.vaults["private-personal"], "private-personal")
+
+    def test_a_legacy_alias_resumes(self):
+        """`personal` (19 live records) is the pre-rename name of `private-personal`."""
+        self.assert_resumes_into("personal", "private-personal")
+
+    def test_a_display_case_alias_resumes(self):
+        """`Personal` (9) and `Brogrammers` (3) were written before 2026-09-23."""
+        self.assert_resumes_into("Personal", "private-personal")
+        self.assert_resumes_into("Brogrammers", "seibert-brogrammers")
+        self.assert_resumes_into("brogrammers", "seibert-brogrammers")
+
+    def test_a_case_variant_of_a_configured_name_resumes(self):
+        """The case-insensitive step, which the alias rows do not exercise: `Private-Personal`
+        is not in the alias table, so only the case-folded name match can resolve it."""
+        self.assert_resumes_into("Private-Personal", "private-personal")
+
+    def test_an_unknown_value_refuses_naming_what_it_compared_against(self):
+        """SC2: the message names the real condition, not a missing directory."""
+        for value in ("Obsidian", "25 Tasks"):
+            with self.subTest(value=value):
+                self.register(value)
+                code, lines = self.run_absent()
+                text = "\n".join(lines)
+                self.assertEqual(code, 1, text)
+                self.assertIn("matches no configured vault", text)
+                self.assertIn(repr(value), text)
+                self.assertIn("private-personal", text)
+                self.assertNotIn("resolves to no existing directory", text)
+
+
 if __name__ == "__main__":
     unittest.main()

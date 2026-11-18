@@ -230,6 +230,22 @@ death: the vault gives the `cwd`, and the launcher is resolved with an explicit
 it falls to the **worker** launcher rule — still the case on the normal path, recorded as a
 known gap.
 
+**The registration's `vault` value is resolved, never matched exactly.** Three writers produce
+it and none validates against the configured names: `fleet-register.py` defaults `--vault` to
+the cwd's basename, `docs/subject-resolution.md` § Recording lowercases whatever it is handed,
+and records written before 2026-09-23 may carry a display-case name. Measured 2026-11-18: **42
+of 198 live registrations** carried a value that was not a configured name — 6 paths and 36
+stale or renamed names — and an exact-name lookup refused every one of them, making the
+supported resume path unusable for exactly the sessions it exists to recover.
+
+Resolution is first-match-wins: exact configured name → a path-shaped value whose directory is
+a configured vault's path (compared by `samefile`, so a case-only difference resolves on this
+host's APFS) → a case-insensitive name match → the legacy alias table (`personal`/`Personal` →
+`private-personal`, `Brogrammers`/`brogrammers` → `seibert-brogrammers`). A value matching none
+of these is **refused rather than guessed** — resuming a manager into the wrong vault is worse
+than refusing it — and the refusal names the value and the configured names it was compared
+against. It does not claim a directory is missing, because no directory was named.
+
 Its refusals — first-line token, exit 1, all before the spawn — are its own vocabulary and
 leave the eight above unchanged:
 
