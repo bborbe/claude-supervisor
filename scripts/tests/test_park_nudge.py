@@ -221,7 +221,7 @@ class ParkNudgeTest(_NudgeBase):
         self.assertNotIn(str(SCRIPT.parent / "session-self-exit.py"), msg)
 
     def test_handover_paths_carry_no_version_segment(self):
-        """Defect 1: a handed-over path pinned to a cache version is the SENDER's
+        """A handed-over path pinned to a cache version is the SENDER's
         load, and goes stale for every recipient on another version. Two cache
         versions are installed so a newest-installed resolver has something to pick;
         the emitted paths must be the unversioned marketplace clones, exactly —
@@ -435,7 +435,7 @@ class RegistryStatusTest(_NudgeBase):
         self.anchor(IDLE)
 
     def test_an_idle_bucket_nudges_only_when_the_registry_reads_idle(self):
-        """SC1: both rows are pinned to `bucket: idle`, both past the threshold. Only
+        """Both rows are pinned to `bucket: idle`, both past the threshold. Only
         the registry status differs, so only the status read can separate them."""
         p = self.run_script(reading([
             row(sid=BUSY, bucket="idle", status="busy", quiet=29),
@@ -448,7 +448,7 @@ class RegistryStatusTest(_NudgeBase):
         self.assertNotIn(BUSY, "".join(lines))
 
     def test_the_pusher_shape_is_never_ordered_to_park(self):
-        """SC2: the measured shape — `idle` bucket, `busy` registry, `watching_min` 29,
+        """The measured shape — `idle` bucket, `busy` registry, `watching_min` 29,
         an open episode — beside a genuinely idle row of the same duration. The busy
         row is absent from the PARK NOW set while the idle one is present, and the
         skip is counted so a silent round can be told from a round that skipped."""
@@ -475,13 +475,13 @@ class RegistryStatusTest(_NudgeBase):
 
 
 class AnchorTest(_NudgeBase):
-    """Defect 2: the park order told a session with no anchored task to run
+    """The park order used to tell a session with no anchored task to run
     `register --task "<your anchored task>"` and `vault-cli task set` on the same
     placeholder. The park binds a wait to an ANCHORED TASK, so for an unanchored
     session it is inapplicable — the same reasoning as the manager-tier skip."""
 
     def test_an_unanchored_row_is_skipped_while_an_anchored_one_is_nudged(self):
-        """SC3, with its positive control: same bucket, same status, same duration.
+        """With its positive control: same bucket, same status, same duration.
         Deleting the nudge entirely would pass the first half and fail the second."""
         p = self.run_script(reading([
             row(sid=UNANCHORED, bucket="idle", quiet=31),

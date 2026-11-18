@@ -26,7 +26,7 @@ a clock or a `defer_date` with no shell reads `idle` — yet it still holds a sp
 slot and an open `🟡 WAITING` episode, and its `watching_min` keeps growing. Those
 are exactly the rows that used to sit for hours while the bucket gate skipped
 them, so an `idle` row is a candidate whenever its `watching_min` is measurable
-(its episode is open). A `watching` row is always a candidate, measured or not,
+(its episode is open) and its registry `status` reads `idle` (see below). A `watching` row is always a candidate, measured or not,
 because the summary's `watching` count reconciles with the reading's own
 `counts.watching`. A `working`, `light`, `gated` or `unclassified` row is never a
 candidate however long it has waited: `gated` waits on the operator, `working` /
