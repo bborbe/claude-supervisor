@@ -1064,6 +1064,45 @@ class TestGrepTask(unittest.TestCase):
             cw.shutil.which, cw.subprocess.run = orig_which, orig_run
         self.assertEqual(seen["argv"][0], "grep", seen["argv"])
 
+    def test_a_partial_read_that_found_the_task_still_finds_it(self):
+        # ⚠️ `grep -rl` can exit ≥ 2 AND have printed every match it found before the
+        # error. Discarding that stdout would lose a task that is plainly there — the
+        # very failure the exit-code check exists to prevent, reached from the other side.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "A Task.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("---\nclaude_session_id: abc-123\nstatus: completed\n---\n")
+
+            class _Done:
+                stdout = path + "\n"
+                returncode = 2
+
+            orig_run = cw.subprocess.run
+            cw.subprocess.run = lambda argv, **kw: _Done()
+            try:
+                own, handed, error = cw._grep_task("abc-123", [d])
+            finally:
+                cw.subprocess.run = orig_run
+        self.assertIsNotNone(own, "a partial read that carries the match is still a match")
+        self.assertEqual(own[0], path)
+        self.assertIsNone(handed)
+        self.assertIsNone(error, "a found task outranks the search's exit code")
+
+    def test_a_failed_search_with_no_match_reports_an_error(self):
+        class _Done:
+            stdout = ""
+            returncode = 2
+
+        orig_run = cw.subprocess.run
+        cw.subprocess.run = lambda argv, **kw: _Done()
+        try:
+            own, handed, error = cw._grep_task("abc-123", ["/tmp"])
+        finally:
+            cw.subprocess.run = orig_run
+        self.assertIsNone(own)
+        self.assertIsNone(handed)
+        self.assertIsNotNone(error, "no match plus a failed search is not an absence")
+
 
 if __name__ == "__main__":
     unittest.main()

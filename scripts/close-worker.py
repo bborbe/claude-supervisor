@@ -559,9 +559,10 @@ def _grep_task(session_id, dirs, timeout=15):
         found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
         return None, None, f"task lookup failed ({exc})"
-    # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
-    if found.returncode not in (0, 1):
-        return None, None, f"task lookup failed (exit {found.returncode})"
+    # ⚠️ **Parse the stdout BEFORE judging the exit code.** `grep -rl` can exit ≥ 2 and
+    # still have printed every match it found before the error — discarding that output
+    # would lose a task that is plainly there, which is the failure the exit-code check is
+    # meant to prevent, arrived at from the other side.
     handed_off = None
     for path in sorted((found.stdout or "").splitlines()):
         fm = frontmatter(path)
@@ -569,7 +570,13 @@ def _grep_task(session_id, dirs, timeout=15):
             return (path, fm, False), None, None
         if handed_off is None and session_id in metrics_session_ids(path):
             handed_off = (path, fm, True)
-    return None, handed_off, None
+    if handed_off is not None:
+        return None, handed_off, None
+    # No match AND a failed search is the one combination that must not read as absence:
+    # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
+    if found.returncode not in (0, 1):
+        return None, None, f"task lookup failed (exit {found.returncode})"
+    return None, None, None
 
 
 def is_future(value, today):
