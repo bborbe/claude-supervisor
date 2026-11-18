@@ -158,11 +158,13 @@ python3 "$P/manager-receipt.py" --handback --subject "Fleet Manager" --branch fl
   --text "fleet round <round id> — machine half summary"
 ```
 
-⚠️ **`--round` is the id you were DISPATCHED with, never the current receipt's.** The
-command refuses without it, and that is deliberate: a delegate that outlives a forced close
-would otherwise write its *successor's* hand-back, and the successor's tail would find one
-and close early — recording a window far shorter than the round it names. Your round is the
-one in `<inputs>`; a receipt that has moved on is somebody else's round.
+⚠️ **`--round` is the NUMERIC id you were DISPATCHED with — the receipt's
+`round_started_at`, e.g. `1795010135.451426` — never the current receipt's, and never a
+digest stamp.** The command refuses anything else, and that is deliberate: a delegate that
+outlives a forced close would otherwise write its *successor's* hand-back, and the
+successor's tail would find one and close early — recording a window far shorter than the
+round it names. Your round is the one in `<inputs>`; a receipt that has moved on is
+somebody else's round.
 
 ⚠️ **This file is not decoration — it is what lets the round close.** `manager-receipt.py
 --finish` refuses with exit 13 while it is absent, and the next firing's `--start` treats the

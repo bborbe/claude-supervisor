@@ -135,5 +135,7 @@ esac
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --finish --subject "Fleet Manager" --branch fleet --force --reason "<why the delegate is gone>"
   ```
 
+  ⚠️ **`--subject` is not optional here** — `--finish` refuses without it (argparse), so a recovery command copied without it exits 2 and closes nothing.
+
   ⚠️ **`--force` is a statement, never a shortcut.** It is the only way past the refusal, it prints `INCOMPLETE ROUND — forced close: <reason>` on stderr, and the reason lands in the receipt's `forced_finish` — so a reader can always tell a round that ended from one that was declared over.
   ⚠️ **Without this the round has no end, and every consumer infers one.** A receipt carrying only `round_started_at` forces a measurement to bound the round by the next fire or the first closer, and each charges unrelated work to it: measured 2026-11-18 on one transcript, **75.4 KB** by the next fire, **8.3 KB** by the first closer, **233.1 KB** after the delegate under the same closer rule — three answers from one dataset, none of them the round. `round_started_at → round_ended_at` is the only window that is the round. ⚠️ **It runs last, after every leg and the `--check`**, because it closes the window the measurement reads; stamping it earlier would exclude the round's own tail.

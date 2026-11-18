@@ -1229,13 +1229,14 @@ def start(topic: str, branch: str = "") -> int:
             # the judgement to the caller, who can check whether the turn is gone.
             print(f"LAPSED  {topic}  round open {int(time.time() - started)}s, past its "
                   f"limit, no hand-back — if the delegate's turn is GONE close it with "
-                  f"--finish --branch fleet --force --reason \"<why>\"; if it may still "
-                  f"be running, keep absorbing and raise it to the operator")
+                  f"--finish --subject \"{topic}\" --branch fleet --force --reason "
+                  f"\"<why>\"; if it may still be running, keep absorbing and raise it "
+                  f"to the operator")
         return EXIT_IN_FLIGHT
     d = {"topic": topic, "round_started_at": time.time(), "fields": {}}
-    if previous.get("round_ended_at"):
+    if previous.get("round_ended_at") and started is not None:
         # the round that just finished is the window to carry
-        d["previous_round_started_at"] = previous["round_started_at"]
+        d["previous_round_started_at"] = started
         d["previous_round_ended_at"] = previous["round_ended_at"]
     elif started is not None and branch == "fleet" and handback_present(started):
         # ⚠️ **An open round that DID hand back is over, and its end is the hand-back's
@@ -1252,8 +1253,8 @@ def start(topic: str, branch: str = "") -> int:
         # `start → finish → start → start` would lose the window this carry exists to keep.
         d["previous_round_started_at"] = previous["previous_round_started_at"]
         d["previous_round_ended_at"] = previous["previous_round_ended_at"]
-    elif previous.get("round_started_at"):
-        d["previous_round_started_at"] = previous["round_started_at"]
+    elif started is not None:
+        d["previous_round_started_at"] = started
     write_atomic(path(s), json.dumps(d) + "\n")
     print(f"started {s}")
     return 0
@@ -1291,6 +1292,14 @@ def finish(topic: str, branch: str = "", force: bool = False, reason: str = "") 
     started = round_started(d)
     if started is None:
         print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    # ⚠️ **A round is closed ONCE.** A second `--finish` would re-stamp `round_ended_at`
+    # and, on the forced path, overwrite the recorded reason — rewriting the audit trail
+    # of a close that already happened. Refused rather than idempotent, because the
+    # second call's reason is not the one that closed the round.
+    if d.get("round_ended_at"):
+        print(f"round already closed for {s} — round_ended_at is set; a close is "
+              f"recorded once. Run --start to open the next round.", file=sys.stderr)
         return 2
     # ⚠️ **`force` is validated and recorded WHATEVER the hand-back says.** Leaving it
     # inside the absent-hand-back branch silently discarded both the reason and the
@@ -1962,9 +1971,9 @@ def main() -> int:
                            "<round>.round hand-back)")
     mode.add_argument("--record", action="store_true", help="record a step's artifact")
     mode.add_argument("--handback", action="store_true",
-                      help="fleet only: write the round's `<round>.round` hand-back file "
-                           "(the delegate's completion signal) and print its path; the "
-                           "round id comes from the receipt, never from the caller")
+                      help="fleet only: write a round's `<round>.round` hand-back file "
+                           "(the delegate's completion signal) and print its path; needs "
+                           "--round, the id the delegate was dispatched with")
     mode.add_argument("--check", action="store_true", help="validate the round (manager, tail)")
     mode.add_argument("--debt", action="store_true",
                       help="print the open debt; exits 12 while any step is unpaid, 0 when clear")
@@ -2057,6 +2066,10 @@ def main() -> int:
         ap.error("--topic or --subject is required with every mode")
     if a.only and not a.debt:
         ap.error("--only scopes the --debt gate and means nothing with any other mode")
+    # A flag that changes nothing is refused, not ignored: a caller that passes --force
+    # believes it is forcing something.
+    if (a.force or a.reason) and not a.finish:
+        ap.error("--force/--reason belong to --finish")
     if a.check:
         return check(subject, a.branch, tier=a.tier)
     if a.render_cached:

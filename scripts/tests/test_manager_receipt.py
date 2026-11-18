@@ -2561,6 +2561,26 @@ class RoundInFlight(unittest.TestCase):
         self.assertIn("forced close", err)
         self.assertEqual(self.receipt()["forced_finish"]["reason"], "closed by hand")
 
+    def test_a_second_finish_is_refused_and_does_not_rewrite_the_record(self):
+        # A re-run would re-stamp `round_ended_at` and overwrite the recorded reason —
+        # rewriting the audit trail of a close that already happened.
+        self.start()
+        self.fleet("--finish", "--force", "--reason", "delegate gone")
+        first = self.receipt()
+        rc, out, err = self.fleet("--finish", "--force", "--reason", "second attempt")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("already closed", err)
+        after = self.receipt()
+        self.assertEqual(after["round_ended_at"], first["round_ended_at"])
+        self.assertEqual(after["forced_finish"]["reason"], "delegate gone")
+
+    def test_force_outside_finish_is_a_usage_error(self):
+        self.start()
+        with self.assertRaises(SystemExit) as caught:
+            self.fleet("--start", "--force")
+        self.assertEqual(caught.exception.code, 2)
+
     def test_a_forced_close_is_not_in_flight(self):
         # The recovery has to actually release the head gate, or it is decoration.
         self.start()
