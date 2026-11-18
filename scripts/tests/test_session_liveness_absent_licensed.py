@@ -181,10 +181,10 @@ class LocalVerdictTranscriptRecency(unittest.TestCase):
     """The SECOND ABSENT licence — `_local_verdict`, the endpoint-down disk fallback.
 
     ⚠️ **A separate population, not a second spelling of the suite above.** `_local_verdict`
-    was added by PR #977 while this task's fix was in flight, and it licensed ABSENT on
-    `alive is False` with no transcript check — this task's defect on an arm that did not
-    exist when the task was filed. The five cases above drive `_absent_licensed` through the
-    per-id 404 path and never reach this function, so they cannot fail if this arm regresses.
+    is the endpoint-down disk fallback, and it licenses ABSENT on `alive is False` — an arm
+    the five cases above never reach, because they drive `_absent_licensed` through the
+    per-id 404 path. So those cases cannot fail if this arm regresses, and this class cannot
+    fail if theirs does.
 
     Every case here forces the fallback (an unreachable endpoint), patches the registry to a
     record it HOLDS and computes dead, and patches the headless store to a readable, empty
