@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the covered-subject invariant runs the daemon's Go gate instead of the retired vault script.** `sweep-gate.py` was ported into `bborbe/claude-wrapper` and deleted from the vault on 2026-11-18, so `commands/steps/covered-subject-invariant.md` now invokes `claude-wrapper -sweep-gate-mode invariant -sweep-gate-topic '<subject>' -sweep-gate-vault '<vault>'`. The exit contract is unchanged — the port's `Invariant` returns `0` on every path and prints a payload only when it fires — so the existing `0` / `3` / unavailable arms still hold; a non-zero exit now means the binary is missing rather than the script. Change set: `commands/steps/covered-subject-invariant.md`, `CHANGELOG.md`.
+
 ## v0.344.2
 
 - fix: **the `fleet-round` delegate must never end a turn without its hand-back — a leg that has not returned is `not-run`, not a reason to wait.** Measured 2026-11-18: delegate `agent-a6499e16a04a576f1` dispatched `supervisor:fleet-sweep-reader`, found it still running, said *"The sweep is still running. Waiting for its hand-back before the drive leg can be gated."* and **terminated with `finished: True` and no hand-back at all**. The manager then had no verdict, could not render, never reached its tail, and the round never closed — **two rounds hung exactly this way** (09:57 and 13:33), both leaving `round_ended_at` unset. ⚠️ **Waiting is not a verdict**: an unreturned leg's counts are `not-run` with the reason, every row depending on it is `not-run` too, the rest of the round proceeds on what it has, and the hand-back says so. Change set: `agents/fleet-round.md`, `CHANGELOG.md`.
