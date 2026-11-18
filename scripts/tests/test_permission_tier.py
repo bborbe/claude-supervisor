@@ -151,6 +151,14 @@ class QuotedBraces(unittest.TestCase):
         for seg in ("echo 'abc", 'echo "abc', "echo abc\\"):
             self.assertTrue(tier._unquoted_brace_expansion(seg), seg)
 
+    def test_parameter_expansion_cannot_end_a_brace_list_early(self):
+        for cmd in ("cat ~/{${x}.netrc,y}", "cat ~/.{${x}netrc,y}", "cat ~/{${x:-.netrc},y}", "cat ~/{${x},.netrc}"):
+            self.assertEqual(self._got(cmd).get("form"), "unverifiable", cmd)
+
+    def test_plain_parameter_expansion_is_not_a_brace_list(self):
+        for cmd in ("cat ${HOME}/x", "echo ${x:-{a,b}}"):
+            self.assertNotEqual(self._got(cmd).get("form"), "unverifiable", cmd)
+
     def test_ansi_c_quote_stays_fail_closed(self):
         # `$'…'` is rejected as unverifiable elsewhere (shlex does not model it); not loosened here.
         self.assertEqual(self._got("echo $'{a,b}'").get("form"), "unverifiable")

@@ -298,6 +298,14 @@ def _unquoted_brace_expansion(segment):
                 return True
             out.append("x" * (k - i))
             i = k
+        elif segment.startswith("${", i):
+            # Bash does not brace-expand inside `${…}`; mask it so its `}` cannot end a list early.
+            try:
+                _, k = _read_balanced(segment, i + 2, "{", "}")
+            except Unverifiable:
+                return True
+            out.append("x" * (k - i))
+            i = k
         else:
             out.append(c)
             i += 1
