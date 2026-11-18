@@ -270,6 +270,48 @@ def words(segment):
     return env, toks
 
 
+def _unquoted_brace_expansion(segment):
+    """True when `segment` has a `{a,b}` bash would brace-expand — i.e. one OUTSIDE quotes.
+
+    Quoted (`'…'`, `"…"`) and backslash-escaped characters are masked before the match, so
+    `--jq '{a: .x, b: .y}'` and `echo \\{a,b\\}` are literal. Fail-closed: an unterminated quote
+    or trailing backslash cannot be masked reliably, so it reports True (unverifiable)."""
+    out, i, n = [], 0, len(segment)
+    while i < n:
+        c = segment[i]
+        if c == "\\":
+            if i + 1 >= n:
+                return True
+            out.append("xx")
+            i += 2
+        elif c == "'":
+            k = segment.find("'", i + 1)
+            if k < 0:
+                return True
+            out.append("x" * (k + 1 - i))
+            i = k + 1
+        elif c == '"':
+            # The lexer's own span: `$(…)` and backticks inside double quotes start a new command.
+            try:
+                k = _skip_double(segment, i + 1)
+            except Unverifiable:
+                return True
+            out.append("x" * (k - i))
+            i = k
+        elif segment.startswith("${", i):
+            # Bash does not brace-expand inside `${…}`; mask it so its `}` cannot end a list early.
+            try:
+                _, k = _read_balanced(segment, i + 2, "{", "}")
+            except Unverifiable:
+                return True
+            out.append("x" * (k - i))
+            i = k
+        else:
+            out.append(c)
+            i += 1
+    return bool(re.search(r"\{[^}]*,[^}]*\}|\{[^}]*\.\.[^}]*\}", "".join(out)))
+
+
 def segment_words(segment):
     """(env, argv, writes) for one segment — `writes` are output-redirect targets."""
     try:
@@ -734,7 +776,7 @@ def classify_bash(cmd, depth=0):
             if any(v in ("prod",) for k, v in env.items() if k == "BRANCH"):
                 return "prod"
             continue
-        if any(re.search(r"\{[^}]*,[^}]*\}", a) for a in argv):
+        if _unquoted_brace_expansion(seg):
             raise Unverifiable("brace expansion hides the real argument")  # cat ~/{.netrc,x}
         head = argv[0]
         if head in _NOOP_HEADS:  # `for f in ~/.netrc` — the operands still feed the loop body
