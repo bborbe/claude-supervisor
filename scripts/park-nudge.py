@@ -131,6 +131,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import shlex
 import sys
 import tempfile
 import time
@@ -299,7 +300,14 @@ def anchor_resolver():
 
 def nudge_text(row: dict, minutes: int, limit_min: int, exit_script: str, task_name: str) -> str:
     waits = row.get("waits_on") or "the machine event your panel names"
-    task = json.dumps(task_name, ensure_ascii=False)
+    # ⚠️ **SHELL quoting, not JSON quoting.** The name is vault-derived and is
+    # interpolated into commands the RECIPIENT runs. `json.dumps` produces
+    # `"Cost $5 cleanup"`, and inside double quotes bash still expands `$`,
+    # `$(…)` and backticks — so a real title either silently corrupts the
+    # command (`$5` becomes an empty positional) or executes as command
+    # substitution in their shell. `shlex.quote` is the repo's convention for
+    # exactly this (`scripts/goal-condition.py`).
+    task = shlex.quote(task_name)
     return (
         f"PARK NOW: you have sat `watching` {minutes} min (limit {limit_min} min) on: {waits}. "
         f"A machine wait over {limit_min} min parks and exits; it never holds a slot. "
@@ -359,12 +367,22 @@ def same_episode(prev: dict, row: dict, quiet: int) -> bool:
 
 def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str,
              tier=None, anchor=None):
-    """Pure decision over one reading. Returns (nudges, next_ledger, stats).
+    """The decision over one reading. Returns (nudges, next_ledger, stats).
+
+    ⚠️ **Not pure once `anchor` is supplied** — that resolver shells out to
+    `close-worker.py::find_task_checked`, a fleet-wide `rg`, and the CLI calls this
+    inside `locked(state)`, so an over-threshold round holds the ledger lock for the
+    duration of its lookups. The lookup runs only for rows that survived the bucket,
+    status, threshold and suppression gates, so a healthy round pays it zero times
+    and a typical one a handful. A single batched search for all candidate sids
+    would remove the lock exposure entirely and is the obvious next step if rounds
+    ever carry many candidates; it is not worth a second reader of the join today.
 
     The next ledger carries ONLY sessions seen in the candidate population
     (`watching` or `idle`) in this reading, so a session that left the population
     or the fleet loses its entry, and that loss is what lets a later re-entry be
-    nudged again.
+    nudged again. A row the status or anchor gate withheld IS still in that
+    population, so its entry is carried rather than dropped — see the gates below.
 
     `tier` is `(liveness, sessions_by_sid, known_slugs, now)` — the manager-tier
     test. `None` disables it, which is only correct for a caller that has already
@@ -397,9 +415,6 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str,
         # construction — its watcher is the target — so the gate is on `idle` only.
         # Not a role exclusion: the rows carry no role, and an exclusion list would
         # move the bug onto the next role that does not fit.
-        if bucket == "idle" and row.get("status") != "idle":
-            stats["status_skipped"] += 1
-            continue
         # The summary's `watching` count reconciles with the reading's own
         # `counts.watching`, so it counts the watching bucket only — an admitted
         # `idle` row is not a `watching` row.
@@ -409,6 +424,19 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str,
         if not sid:
             continue
         prev = ledger.get(sid) or {}
+        # ⚠️ The gate sits AFTER `prev` is read so the entry can be carried, and
+        # BEFORE the duration check so a busy row never counts as a candidate.
+        # Dropping the entry would break the one-nudge-per-episode invariant: the
+        # ledger is replaced wholesale, so a session nudged earlier in this episode
+        # whose registry now reads `busy` would lose its record, and the next
+        # `idle` reading of the SAME `watching_since` would find `prev == {}`,
+        # return False from `same_episode`, and nudge a second time. A status-skipped
+        # idle row is still in the candidate population, so its entry stays.
+        if bucket == "idle" and row.get("status") != "idle":
+            stats["status_skipped"] += 1
+            if prev:
+                nxt[sid] = prev
+            continue
         quiet = row.get("watching_min")
         if not isinstance(quiet, int) or isinstance(quiet, bool):
             # Not measurable this round. Carry the episode's ledger entry rather
@@ -465,7 +493,11 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str,
                     if prev:
                         nxt[sid] = prev
                 else:
+                    # Same carry, same reason: the session may re-anchor inside
+                    # this episode, and dropping the entry would re-nudge it.
                     stats["unanchored"] += 1
+                    if prev:
+                        nxt[sid] = prev
                 continue
         nudges.append(dict(sid=sid, name=row.get("name") or "-", quiet_min=quiet,
                            message=nudge_text(row, quiet, limit_min, exit_script, task_name)))

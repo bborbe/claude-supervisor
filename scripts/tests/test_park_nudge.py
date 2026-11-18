@@ -203,7 +203,7 @@ class ParkNudgeTest(_NudgeBase):
                             extra_env={"VAULT_CLI_SCRIPTS": str(fake), "HOME": str(home)})
         msg = self.nudges(p)[0].split(" :: ", 1)[1]
         park_event = home / ".claude/plugins/marketplaces/claude-supervisor/scripts/park-event.py"
-        self.assertIn(f"{park_event} register --task \"Task {OVER[:8]}\"", msg)
+        self.assertIn(f"{park_event} register --task 'Task {OVER[:8]}'", msg)
         self.assertIn("--recheck", msg)
         self.assertIn("`defer_date`", msg)
         self.assertIn("ISO-8601 with offset", msg)
@@ -233,10 +233,20 @@ class ParkNudgeTest(_NudgeBase):
                 d.mkdir(parents=True)
                 (d / "park-event.py").write_text("")
                 (d / "session-self-exit.py").write_text("")
+        # The marketplace clones are created too, so the test asserts the handed-over
+        # path RESOLVES for the recipient — a path string alone proves nothing about
+        # whether the recipient can run it.
+        for clone, script in (("claude-supervisor", "park-event.py"),
+                              ("vault-cli", "session-self-exit.py")):
+            d = home / ".claude/plugins/marketplaces" / clone / "scripts"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / script).write_text("")
         env = {"HOME": str(home), "VAULT_CLI_SCRIPTS": ""}
         msg = self.nudges(self.run_script(FIXTURE["threshold"], extra_env=env))[0].split(" :: ", 1)[1]
         park_event = f"{home}/.claude/plugins/marketplaces/claude-supervisor/scripts/park-event.py"
         self_exit = f"{home}/.claude/plugins/marketplaces/vault-cli/scripts/session-self-exit.py"
+        self.assertTrue(pathlib.Path(park_event).is_file(), "the park-event path must resolve")
+        self.assertTrue(pathlib.Path(self_exit).is_file(), "the self-exit path must resolve")
         self.assertIn(f"`python3 {park_event} register", msg)
         self.assertIn(f"`python3 {self_exit}`", msg)
         handed = re.findall(r"python3 (\S+\.py)", msg)
@@ -491,8 +501,8 @@ class AnchorTest(_NudgeBase):
         data = json.loads(p.stdout)
         self.assertEqual([n["sid"] for n in data["nudges"]], [OVER], p.stdout)
         msg = data["nudges"][0]["message"]
-        self.assertIn(f'--task "Task {OVER[:8]}"', msg)
-        self.assertIn(f'vault-cli task get "Task {OVER[:8]}" defer_date', msg)
+        self.assertIn(f"--task 'Task {OVER[:8]}'", msg)
+        self.assertIn(f"vault-cli task get 'Task {OVER[:8]}' defer_date", msg)
         self.assertNotIn("<your anchored task>", msg)
         self.assertEqual(data["unanchored"], 1)
         self.assertEqual(data["anchor_unknown"], 0)
@@ -501,18 +511,51 @@ class AnchorTest(_NudgeBase):
     def test_a_failed_anchor_search_is_unknown_not_unanchored(self):
         """A search that errored proves nothing about absence. The row is not nudged
         — a nudge would carry no task — and it is counted apart from `unanchored`, so
-        an unreadable vault never reads as a fleet of unanchored sessions."""
-        locked_dir = self.tasks / "locked"
-        locked_dir.mkdir()
-        (locked_dir / "x.md").write_text("x")
-        locked_dir.chmod(0)
-        self.addCleanup(locked_dir.chmod, 0o755)
-        p = self.run_script(reading([row(sid=UNANCHORED, bucket="idle", quiet=31)]), "--json")
+        an unreadable vault never reads as a fleet of unanchored sessions.
+
+        The failure is injected through PATH, not permissions: `chmod 0` produces a
+        read error only for a non-root user, so under uid 0 the same test asserted
+        the opposite of what it claims. A shim `rg` that exits 2 is uid-independent
+        and is the exact shape `_grep_task` reads as an error."""
+        shim = self.tmp / "shim"
+        shim.mkdir()
+        (shim / "rg").write_text("#!/bin/sh\nexit 2\n")
+        (shim / "rg").chmod(0o755)
+        p = self.run_script(reading([row(sid=UNANCHORED, bucket="idle", quiet=31)]), "--json",
+                            extra_env={"PATH": f"{shim}:{os.environ['PATH']}"})
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(p.stdout)
         self.assertEqual(data["nudges"], [], p.stdout)
         self.assertEqual(data["anchor_unknown"], 1, p.stdout)
         self.assertEqual(data["unanchored"], 0, p.stdout)
+
+    def test_a_row_with_no_status_key_is_skipped_and_counted(self):
+        """A producer that stops emitting `status` must not silently disable the
+        nudge for the whole fleet — every `idle` row would read `status-skipped`.
+        The count is what makes that visible rather than silent, so a row with the
+        key absent is asserted to land in it."""
+        bare = row(sid=OVER, bucket="idle", quiet=31)
+        bare.pop("status")
+        p = self.run_script(reading([bare]), "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["nudges"], [], p.stdout)
+        self.assertEqual(data["status_skipped"], 1, p.stdout)
+
+    def test_an_unanchored_manager_row_is_manager_skipped_not_unanchored(self):
+        """The tier gate runs first, so the two skips never double-count one row.
+        An unanchored manager must read `manager-skipped`: that is the gate that
+        decided, and reporting it as `unanchored` would hide a tier regression."""
+        self.arm_manager(f"goal--{MANAGER_BASE}")
+        (self.mgr_state / f"goal--{MANAGER_BASE}.session").write_text(f"{MANAGER}\n")
+        p = self.run_script(reading([
+            row(sid=MANAGER, name=MANAGER_NAME, bucket="idle", quiet=31),
+            row(sid=UNANCHORED, bucket="idle", quiet=31),
+        ]), "--json")
+        data = json.loads(p.stdout)
+        self.assertEqual(data["manager"], 1, p.stdout)
+        self.assertEqual(data["unanchored"], 1, p.stdout)
+        self.assertEqual(data["nudges"], [], p.stdout)
 
     def test_a_session_handed_off_by_its_task_is_still_anchored(self):
         """`find_task_checked` also answers through `metrics_sessions` when the task's
@@ -525,7 +568,7 @@ class AnchorTest(_NudgeBase):
         p = self.run_script(reading([row(sid=UNANCHORED, bucket="idle", quiet=31)]))
         lines = self.nudges(p)
         self.assertEqual(len(lines), 1, p.stdout)
-        self.assertIn('--task "Handed Off"', lines[0])
+        self.assertIn("--task 'Handed Off'", lines[0])
 
 
 if __name__ == "__main__":
