@@ -92,6 +92,14 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     ticks at ~900; a bare floor would hide its lapse).
                                     A re-arm after a stand-down resets the history,
                                     so an outage gap never counts as cadence.
+                                    A STOPPED subject (a `.stopped` marker) is reported
+                                    once its marker is older than 2 x its own observed
+                                    period, as `STOPPED <slug> ... age=<s>`, and
+                                    re-emitted with `retry=1` until delivered — so a
+                                    deliberate stand-down is visible to the notification
+                                    path, not only to `--state`. A stand-down is not a
+                                    lapse: it keeps its own token and is never counted
+                                    as one.
                                     Prints one line per subject that TURNED stale (or
                                     recovered) since the last check; exits 10 if any
                                     turned stale, else 0.
@@ -168,12 +176,13 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     `SLEEPING` is a fifth state: a future `.sleeping`
                                     instant, which suppresses the STALE report a frozen
                                     cadence file would otherwise produce.
-                                    `--check` structurally cannot answer this: it prints
-                                    only the subjects that TURNED stale, so STOPPED -- the
-                                    state a deliberate stand-down produces -- is invisible
-                                    to it by construction. A reader that must tell a
-                                    stood-down manager from a lapsed one asks about the
-                                    subject directly, which is what this verb is for.
+                                    `--check` now reports a stood-down subject too (past
+                                    two of its own observed periods), but `--state`
+                                    remains the verb that answers a stand-down ON DEMAND:
+                                    it returns STOPPED immediately, without waiting for
+                                    the bound. A reader that must tell a stood-down
+                                    manager from a lapsed one asks about the subject
+                                    directly, which is what this verb is for.
                                     Exits 0 for every state: the state IS the answer,
                                     and a non-zero exit would make a stood-down manager
                                     read as a failure to every `if` that wraps it.
@@ -1062,6 +1071,13 @@ def read_pending() -> dict:
             "attempts": attempts,
             "last_error": v.get("last_error"),
             "emits": emits,
+            # ⚠️ `kind` separates a LAPSE episode from a STAND-DOWN episode. Both live in
+            # this one store keyed by slug, and a resume that ends a stand-down must be
+            # dropped rather than re-emitted as `RECOVERED-PENDING` — a deliberate stop
+            # that ends is not a lapse anyone recovered from. Carried through every
+            # rewrite like the producer identity fields, or the distinction is lost on
+            # the first normalising read.
+            "kind": v.get("kind"),
             # Producer identity, carried through every rewrite: a normalising reader
             # that dropped these would make the record indistinguishable from one
             # written by hand, which is the property they exist to give it.
@@ -1533,8 +1549,49 @@ def work_age(s: str, now: float):
         return None
 
 
+def read_session_marker(s: str):
+    """The session id this subject's arm record names, or `None` when there is none.
+
+    The same marker `work_age` reads, split out so the EXITED check and the work signal
+    cannot disagree about which id the subject claims.
+    """
+    marker, _legacy = resolve(s, "session")
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            sid = fh.read().strip()
+    except OSError:
+        return None
+    if not sid or not SESSION_ID_SHAPE.fullmatch(sid):
+        return None
+    return sid
+
+
+def registry_holds(session_id):
+    """`True`/`False`/`None` — does the identity registry still hold this id as non-dead?
+
+    ⚠️ **`None` is "could not tell" and must never be read as death.** It is the same
+    three-state `session-identity.read_registry` returns (`alive` is `True` / `False` /
+    `None`), and the same rule `session-liveness.py` applies: only `False` is death.
+
+    ⚠️ **`False` is not death either, on its own** — Claude Code deletes the registry row on
+    exit, so an absent row covers a session that died AND one spawned moments ago. `classify`
+    requires a second signal (an idle transcript) before it says EXITED, exactly as
+    `_absent_licensed` does on the liveness path.
+    """
+    try:
+        identity = _load_sibling("session-identity.py").read_registry()
+    except Exception:  # noqa: BLE001 — an unreadable registry is UNKNOWN, never a death verdict
+        return None
+    if identity is None:
+        return None
+    keys = [k for k in identity if k.lower() == session_id.lower()]
+    if not keys:
+        return False
+    return any((identity.get(k) or {}).get("alive") is not False for k in keys)
+
+
 def classify(s: str, now: float, defer_date=None) -> tuple:
-    """(state, detail) for one subject: OK, WORKING, LAPSED, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
+    """(state, detail) for one subject: OK, WORKING, LAPSED, IDLE, STALE, STOPPED, SLEEPING, UNARMED, INVALID, EXITED or WRONG-BRANCH.
 
     `OK` means a round ran inside the limit, and only that. Past the limit a moving
     transcript reads `WORKING` and an armed manager that produced nothing reads `IDLE`;
@@ -1683,6 +1740,59 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
     work = work_age(s, now)
     work_field = f" work={work}s" if work is not None else " work=none"
     detail = f"age={age}s limit={int(limit)}s {basis}{work_field}"
+    # ⚠️ **EXITED covers the FRESH-cadence case only, and `age <= limit` is load-bearing.**
+    # A `.cadence` file is written by `--arm` and nothing deletes it when the session exits, so
+    # a manager that died minutes ago keeps a FRESH record and read `OK` — that masking is the
+    # defect. Measured 2026-11-18: five flagged managers had exited while `--state` reported
+    # `OK`, so the board showed them closed and the fleet showed them healthy.
+    #
+    # ⚠️ **A STALE cadence must keep reading STALE.** Every consumer acts on STALE / INVALID
+    # only — the `--check` sweep, `topic-keepalive.py`'s restart and `crashed-managers.py` —
+    # so claiming this population for EXITED would drop the very managers that need
+    # restarting out of both the alert set and the restart set. EXITED is therefore the
+    # narrow answer for a record that still looks healthy.
+    #
+    # ⚠️ **Agreement, not a single negative channel.** A missing registry row is not death:
+    # Claude Code deletes the row on exit, so "no entry" also covers a session spawned moments
+    # ago, and `docs/fleet-surface.md` records a live session whose row was removed. EXITED
+    # therefore requires BOTH — no non-dead registry entry for the recorded id, AND a
+    # transcript that has not moved for longer than the subject's own limit. A subject with no
+    # `.session` marker, an unreadable registry, or a moving transcript is never EXITED.
+    #
+    # ⚠️ **A gate-watched goal manager is never EXITED, and this guard is not optional.** The
+    # goal tier's liveness is its detached sweep gate, not a live model session: the gate holds
+    # the subject between wakes, so an unregistered `.session` id and a still transcript are the
+    # NORMAL state, not death. Without this, every gate-driven goal manager reads EXITED and the
+    # IDLE branch below can never be reached — measured as a regression on the suite's own
+    # `test_an_armed_but_unworking_goal_reads_idle_not_ok` the first time this branch was added.
+    # The same predicate the IDLE branch uses, so the two cannot disagree about what "watched"
+    # means.
+    session_id = read_session_marker(s)
+    if (
+        age <= limit
+        and session_id is not None
+        and work is not None
+        and work > limit
+    ):
+        # ⚠️ **`gate_watched` is called LAZILY, only for a subject that could otherwise be
+        # EXITED.** It costs an `os.listdir` plus a `getmtime` per subject, and hoisting it
+        # above the age test would pay that for every FRESH goal subject — the larger
+        # population — to answer a question only the `age <= limit` branch asks. The IDLE
+        # branch below keeps its own call; the two branches are disjoint age ranges, so a
+        # single subject never pays twice.
+        gate_subject_age, gate_loop_alive = (
+            gate_watched(s, now) if s.startswith("goal--") else (None, None)
+        )
+        gate_held = bool(
+            gate_loop_alive
+            and gate_subject_age is not None
+            and gate_subject_age <= GATE_SUBJECT_FRESH
+        )
+        if not gate_held and registry_holds(session_id) is False:
+            return "EXITED", detail + (
+                f" exited (fresh cadence, no NON-DEAD registry entry for "
+                f"{session_id[:8]}; transcript idle {work}s)"
+            )
     if age > limit:
         # A ROUND did not happen inside the limit — but a round is not the only thing a
         # manager does. `work` is the manager's transcript age, refreshed by ANY turn, so
@@ -1741,18 +1851,34 @@ def emit_lapse(state: str, subject: str, detail: str, entry: dict) -> None:
     episode instead of one per poll, which is the whole difference between a failure
     rate and a poll count.
 
-    ⚠️ `retry=1` is a TRAILING token, never a prefix. The sender matches
-    `^(STALE|INVALID|RECOVERED-PENDING) ` on line start and reads the subject from
-    field 2 (`manager-liveness-notify-tick.sh:61-62`); a `RETRY STALE …` spelling
-    would satisfy every test here and silently drop every retry from delivery.
+    ⚠️ `retry=1` is a TRAILING token, never a prefix. The sender matches the kind in
+    field 1 (`isLapseKind` in `bborbe/claude-wrapper/pkg/manager_liveness.go`, which
+    admits STALE / INVALID / RECOVERED-PENDING / STOPPED) and reads the subject from
+    field 2; a `RETRY STALE …` spelling would satisfy every test here and silently drop
+    every retry from delivery.
 
-    One home for both call sites: the STALE branch and the RECOVERED-PENDING branch
-    print the same line shape, and a marker added to only one of them would leave the
-    other inflating the count it exists to fix.
+    One home for all three call sites: the STALE branch, the RECOVERED-PENDING branch
+    and the STOPPED branch print the same line shape, and a marker added to only one of
+    them would leave the others inflating the count it exists to fix.
     """
     entry["emits"] = int(entry.get("emits", 0)) + 1
     retry = " retry=1" if entry["emits"] > 1 else ""
     print(f"{state} {subject} {detail} crossing={iso(entry['detected_at'])}{retry}")
+
+
+def stood_down_age(s: str, now: float):
+    """Seconds since this subject's `.stopped` marker was written, or None.
+
+    The marker's mtime is the stand-down instant: `--stop` writes the file, and only
+    `--arm --resume` / `--clear-standdown` remove it, so its age is how long the
+    operator's deliberate stop has stood. `None` means the marker vanished between
+    `classify()` and here (a resume raced the poll), which is not evidence of an age.
+    """
+    marker, _legacy = resolve(s, "stopped")
+    try:
+        return int(now - os.path.getmtime(marker))
+    except OSError:
+        return None
 
 
 def check(now: float = None) -> int:
@@ -1801,12 +1927,78 @@ def check(now: float = None) -> int:
                 # single failed send used to mark the lapse reported for ever.
                 emit_lapse(state, s, detail, pending[s])
                 turned_stale = True
+        elif state == "STOPPED":
+            # ⚠️ **A deliberate stand-down IS reported, but only past two of its own
+            # periods.** `classify()` returns STOPPED for a subject carrying a `.stopped`
+            # marker, and until this branch existed `check()` acted only on STALE /
+            # INVALID — so a stood-down manager was observable through `--state` and
+            # invisible to the notification path, which is why every forced-lapse probe
+            # was voided: nothing pushed the condition, so nothing acted on it.
+            #
+            # ⚠️ **The threshold is what keeps a stand-down from reading as a failure.**
+            # `--stop` is a deliberate act, so the subject is stood down the instant the
+            # marker is written; reporting it at once would fire on every ordinary
+            # stand-down. Two observed periods is the grace that lets the operator's own
+            # decision stand before the fleet is told it is still standing.
+            #
+            # ⚠️ **A stand-down is NOT a lapse, and must never be counted as one.** The
+            # line carries the `STOPPED` token, never `STALE`; the pending entry carries
+            # `kind="stopped"` so a resume that ends the episode is dropped rather than
+            # re-emitted as `RECOVERED-PENDING`. The `retry=1` discipline is shared with
+            # `emit_lapse()`: the first poll of a crossing is the firing, every later one
+            # is a retry.
+            age = stood_down_age(s, now)
+            period = observed_period(s) or declared_interval(s)
+            threshold = 2 * period if period else None
+            if age is not None and threshold is not None and age > threshold:
+                still.add(s)
+                # ⚠️ **Always NORMALISE to a stopped episode — never reuse an owed LAPSE
+                # entry.** A subject can lapse (its report still owed) and then be stood
+                # down inside the ack window; reusing that entry would print the
+                # stand-down with the lapse's `crossing=` and leave `kind=None`, so the
+                # later resume would emit `RECOVERED-PENDING` — the very "a stand-down is
+                # not a lapse" invariant this branch exists to hold.
+                if s in pending and pending[s].get("kind") != "stopped":
+                    del pending[s]
+                if s not in pending and (s not in notified or notified[s] < last_arm(s)):
+                    pending[s] = {
+                        "detected_at": now,
+                        "detail": detail,
+                        "attempts": 0,
+                        "last_error": None,
+                        "emits": 0,
+                        "kind": "stopped",
+                    }
+                if s in pending:
+                    emit_lapse(
+                        "STOPPED",
+                        s,
+                        f"{detail} age={age}s threshold={int(threshold)}s",
+                        pending[s],
+                    )
+                    turned_stale = True
+            elif (
+                s in pending
+                and pending[s].get("kind") == "stopped"
+                and pending[s].get("emits", 0) == 0
+            ):
+                # Drop only an UN-EMITTED stopped episode that is no longer reportable.
+                # An episode already emitted and still awaiting ack is kept, so a marker
+                # mtime reset (a repeated `--stop` rewrites the file) cannot silence a
+                # delivery that is still owed — it resumes as a `retry=1`, not a new
+                # crossing.
+                del pending[s]
         elif s in pending:
-            # The manager came back before anyone was told. The lapse still happened and
-            # the operator is still owed the report, so it stays owed — but saying STALE
-            # would be a lie, so it is named for what it is.
-            emit_lapse("RECOVERED-PENDING", s, detail, pending[s])
-            turned_stale = True
+            if pending[s].get("kind") == "stopped":
+                # A stand-down that ended is not a recovered lapse: the operator withdrew
+                # a deliberate stop, so there is nothing to recover and nothing owed.
+                del pending[s]
+            else:
+                # The manager came back before anyone was told. The lapse still happened and
+                # the operator is still owed the report, so it stays owed — but saying STALE
+                # would be a lie, so it is named for what it is.
+                emit_lapse("RECOVERED-PENDING", s, detail, pending[s])
+                turned_stale = True
         elif s in notified:
             print(f"RECOVERED {s} {state} {detail}")
             del notified[s]
@@ -1852,8 +2044,10 @@ def main() -> int:
         "--state",
         action="store_true",
         help="print ONE subject's state: OK / WORKING / IDLE / STALE / STOPPED / SLEEPING / "
-             "UNARMED / INVALID / WRONG-BRANCH, with `work=` (the work signal) in the detail; "
-             "WORKING = no round inside the limit but the manager's transcript moved "
+             "UNARMED / INVALID / EXITED / WRONG-BRANCH, with `work=` (the work signal) in the "
+             "detail; EXITED = the arm record names a session the identity registry no longer "
+             "holds AND whose transcript has stopped moving, so a fresh `.cadence` cannot mask "
+             "a manager that died; WORKING = no round inside the limit but the manager's transcript moved "
              "(never restarted); IDLE = armed but no round and no work, gate-watched or "
              "gate-down (never restarted); "
              "exits 3 (stdout empty) for a subject with no record and no page",
