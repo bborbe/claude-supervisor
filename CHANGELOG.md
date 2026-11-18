@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: `commands/fleet-loop.md` § Interval now names the **observed period as the authority** and the declared `--interval` value as the cold-start fallback only. Measured 2026-11-18: the fleet subject declares 900 s but its arm gaps run at a median of 957 s, and `manager-liveness.py` already derives the `STALE` limit from that observation (`p90 + SLACK` = 1147 s), so the declaration was the fiction rather than the limit. The section also records why the declared number is **not** raised to match: the ~56 s overrun's cause is unverified, and a raised declaration would move the target the measurement chases.
+
 ## v0.344.0
 
 - feat: `scripts/flagged-rows.py` emits a new `parked` branch for a row whose last closer declares an external wait (`⏰ Ends:`), read once per run through `declared-wait.py` so there is one definition of "waiting" — the branch sits after every LIVE branch and before `resume`/`create`, so an open session is never counted as waiting and a parked row is never counted absent
