@@ -65,9 +65,10 @@ that settles an irreversible prompt without an operator-supplied decision.
 A `message` answer may carry its CONTENT (`--answer-text TEXT`), and then it routes
 like a permission one: the store holds what was said, the attention-controller's
 carriers deliver it (pane, or a resumed headless turn), so no TARGET is printed and
-the same bounded delivery wait reports whether it landed. `--answerer manager` names
-a manager as the party on the answer marker, so a manager's answer is never counted
-as the operator's.
+the same bounded delivery wait reports whether it landed. ⚠️ It is REFUSED while
+`gate-answer-check.py`'s `PICK_ANSWERING_ENABLED` is false, for the gate answerer's arm,
+and for `--answerer manager` — every carrier renders answer content in the operator's
+voice (see `answer_text_refusal`). `--answerer` has no default and must be stated.
 
 Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
                                   [--answer-text TEXT] [--answerer operator|manager]
@@ -504,7 +505,7 @@ def cmd_next(registry, out=sys.stdout):
 
 
 def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision="",
-               answer_text="", answerer="operator"):
+               answer_text="", answerer=""):
     try:
         item = fetch_item(item_id)
     except urllib.error.HTTPError as err:
@@ -656,7 +657,48 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
     return EXIT_NOT_DELIVERED
 
 
-def cmd_answer_content(item, answered_by, resolved_by, answer_text, answerer, out=sys.stdout):
+#: The arm name `agents/gate-answerer.md` answers under. It must never answer a card in the
+#: operator's voice, so `--answer-text` is refused outright when it is the caller.
+GATE_ANSWERER_ARM = "supervisor:gate-answerer"
+
+
+def picks_enabled():
+    """`gate-answer-check.py`'s `PICK_ANSWERING_ENABLED`, or False when it cannot be read."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "gate_answer_check_flag", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                   "gate-answer-check.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return bool(getattr(mod, "PICK_ANSWERING_ENABLED", False))
+    except Exception:
+        return False
+
+
+def answer_text_refusal(answered_by, answerer, enabled):
+    """Why `--answer-text` must not run, or "" when it may.
+
+    ⚠️ **Every carrier renders a card's answer content in the OPERATOR's voice** — the pane
+    carrier types `Operator answer, via attention board:`, the controller's headless arm opens
+    "The operator answered on the attention board.", and claude-wrapper's `messageAnswer`
+    prefixes `Operator answer, via supervisor:`. So a manager's text would reach the worker as
+    the operator's own answer whatever marker it wrote here: `manager` is refused, the gate
+    answerer is refused under any answerer, and the whole path is off while picks are.
+    """
+    if not enabled:
+        return "--answer-text is disabled while PICK_ANSWERING_ENABLED is false"
+    if answered_by == GATE_ANSWERER_ARM:
+        return "the gate answerer never answers a card's content — every carrier would voice it as the operator"
+    if answerer == "manager":
+        return "a manager answer would be delivered in the operator's voice by every carrier"
+    if answerer != "operator":
+        return "--answer-text needs an explicit --answerer operator"
+    return ""
+
+
+def cmd_answer_content(item, answered_by, resolved_by, answer_text, answerer, out=sys.stdout,
+                       enabled=None):
     """Answer a message item WITH its content, and report whether a carrier delivered it.
 
     ⚠️ **No TARGET, on the permission branch's reasoning.** The store now holds what was
@@ -669,8 +711,9 @@ def cmd_answer_content(item, answered_by, resolved_by, answer_text, answerer, ou
     inflated by answers the operator never gave — the measurement the marker exists for.
     """
     item_id = item.get("item_id")
-    if answerer not in ANSWERER_KINDS:
-        print(f"REFUSED: --answerer must be one of {'|'.join(ANSWERER_KINDS)}, got {answerer!r}", file=out)
+    refusal = answer_text_refusal(answered_by, answerer, picks_enabled() if enabled is None else enabled)
+    if refusal:
+        print(f"REFUSED: {item_id}: {refusal}", file=out)
         return 2
     if resolved_by is None:
         resolved_by = resolved_session_id()
@@ -810,8 +853,10 @@ def main(argv=None):
     ans.add_argument("--decision", default="")
     ans.add_argument("--answer-text", default="",
                      help="a message item's answer content; its carriers deliver it, no TARGET")
-    ans.add_argument("--answerer", default="operator",
-                     help="the party the answer marker names: operator (default) or manager")
+    # No default: an answer whose party is implied is how a manager's text got the operator's
+    # marker. `answer_text_refusal` requires it to be stated.
+    ans.add_argument("--answerer", default="",
+                     help="the party the answer marker names; required with --answer-text")
     att = sub.add_parser("attempt")
     att.add_argument("item_id")
     att.add_argument("--by", default=DEFAULT_ARM)

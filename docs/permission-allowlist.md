@@ -283,12 +283,25 @@ the rubric above to what passed, and answers the card `allow` — or leaves it. 
 stays on the board as the operator's call; the answerer never denies.
 
 The check also refuses, mechanically: a `--self` that is not the running session's own
-`CLAUDE_CODE_SESSION_ID`; a `role: human` session; any tool outside `Bash`, `Write`, `Edit`,
-`MultiEdit`, `Read`, `NotebookRead` (an `mcp__*` call, `WebFetch` or `Agent` reaches something the
-classifier cannot read); a card older than its park, or either timestamp missing; a cut `Bash`
-command; a `Bash` call that runs a script file. Each manager keeps a ledger of the items it checked
-(`~/.claude/state/gate-answer/<session>.json`), so a feed re-arm never judges a card twice, and
-`--answer --expect <hash>` answers only the exact call that was judged.
+`CLAUDE_CODE_SESSION_ID`, or is not a session id at all; a `role: human` session; any tool outside
+`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`, `NotebookRead` (an `mcp__*` call, `WebFetch` or
+`Agent` reaches something the classifier cannot read); a card whose tool differs from the park's; a
+card older than its park, or either timestamp missing; any input cut at the 2000-char display cap;
+a `Write`/`Edit`/`MultiEdit` whose target is outside the worker's cwd and `/tmp`, or under
+`~/.claude`; and a `Bash` call that runs unseen code — an interpreter handed a file, a module or
+stdin, any non-shell inline program, a shell `-c` body that is not itself allowlist-tier, a path
+script, an unspaced `bash<x.sh`, and the launchers `xargs`, `find -exec`, `env -S`, `uv run`/`npx`
+and `git -c alias.*`/`!`. `make`, package-manager scripts and `go run` stay `manager` tier on
+purpose (they build the worker's own worktree; clause (a) still applies). Each manager keeps a
+ledger of the items it checked (`~/.claude/state/gate-answer/<session>.json`; env overrides are
+honoured only under `~/.claude/state`), so a feed re-arm never judges a card twice.
+
+⚠️ **`--answer --expect <hash>` binds the judgment to the re-check, not the answer to the park.**
+The store answer carries no `request_id` its carrier honours: claude-wrapper's
+`BoardDelivery.answerFor` settles the producer's CURRENT park, refusing only a card created more
+than 5 s before it. A worker that parks a new call between the re-check and the daemon's poll can
+receive the allow. The end-to-end binding needs the request id carried through — the store's answer
+route already accepts `request_id`; `board.go` must compare it with the park's before settling.
 
 ⚠️ **A permission answer's delivery can still claim the operator's voice.** Two carriers race on an
 answered permission card. claude-wrapper's board delivery settles the park with the bare verdict
@@ -331,9 +344,13 @@ pick whose producer is not a worker session, and any pick whose scope the answer
 a line of the task file. *Not scope-changing* means what rubric clause (c) above means, plus: it
 does not abort, complete, hold or defer the task.
 
-The answer goes through the same store-card path — `gate-answer-check.py --answer`, which
-re-checks and then runs `attention-answer.py answer <id> --answer-text "Manager answer, via
-supervisor: <label>" --answerer manager`. The attention-controller carries it (carrier
+When enabled, the answer would go through the same store-card path — `gate-answer-check.py
+--answer`, which re-checks and then runs `attention-answer.py answer <id> --answer-text "Manager
+answer, via supervisor: <label>" --answerer manager`. ⚠️ **Today that call is refused twice over:**
+`attention-answer.py` refuses `--answer-text` while `PICK_ANSWERING_ENABLED` is false, refuses
+`--answerer manager` and the `supervisor:gate-answerer` arm under any answerer (every carrier
+would voice the text as the operator's), and `--answerer` has no default. Enabling picks needs both
+the carrier fix and lifting that refusal. The attention-controller carries it (carrier
 `watcher:attention-watcher`: typed into a tab worker's pane, or a resumed turn into a headless
 one); measured 2026-11-18, of the store history's 21 answered pick cards 17 carry a `delivered`
 report from that carrier (1 `failed`, 3 none). ⚠️ **Known gap, outside this repo:** the controller's headless turn

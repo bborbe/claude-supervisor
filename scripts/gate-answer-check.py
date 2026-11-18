@@ -63,8 +63,16 @@ already judged — or already left for the operator. Every item that reached `an
 
 **`--answer`** re-checks ONE item and answers it only when (a) this manager checked it first,
 (b) the re-check still reads `answerable`, and (c) the question hashes to the `--expect` the
-check printed — `sha256(request_id + tool + input)`, so the call answered is the call judged.
-Then it runs `attention-answer.py answer <id> --decision allow`.
+check printed — `sha256(request_id + tool + input)`. Then it runs `attention-answer.py answer
+<id> --decision allow`.
+
+⚠️ **(c) binds the JUDGMENT to the re-check, not the answer to the park.** The store answer carries
+no `request_id` that its carrier honours: claude-wrapper's `BoardDelivery.answerFor`
+(`pkg/board.go`) settles the producer's CURRENT park, refusing only a card created more than 5 s
+before that park. A worker that drops the judged call and parks a new one in the moment between
+this re-check and the daemon's poll can receive the allow. Closing that needs the request id
+carried end to end — the store's answer route already accepts `request_id`; `board.go` must
+compare it with the park's before it settles.
 
 Usage:
   gate-answer-check.py --self <this session id> --item <store-item-id> [--item …]
@@ -93,11 +101,40 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 WRAPPER = os.environ.get("CLAUDE_WRAPPER_URL", "http://localhost:18090").rstrip("/")
-HOLDS = os.environ.get("SUPERVISOR_SESSION_HOLDS") or os.path.expanduser(
-    "~/.claude/state/session-holds.json")
+STATE_ROOT = os.path.realpath(os.path.expanduser("~/.claude/state"))
+
+
+def confined(env_name, default):
+    """An env override, honoured only when it resolves under `~/.claude/state` — else the default.
+
+    ⚠️ Both paths this script reads or writes come from the environment of the process the
+    model runs, so an unconfined override is a write anywhere the user can write: a ledger
+    pointed at `~/.claude` overwrites `settings.json`. Tests patch the module constants instead.
+    """
+    value = os.environ.get(env_name)
+    if not value:
+        return default
+    real = os.path.realpath(os.path.expanduser(value))
+    return real if real == STATE_ROOT or real.startswith(STATE_ROOT + os.sep) else default
+
+
+HOLDS = confined("SUPERVISOR_SESSION_HOLDS", os.path.expanduser("~/.claude/state/session-holds.json"))
 TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
-LEDGER_DIR = os.environ.get("SUPERVISOR_GATE_ANSWER_DIR") or os.path.expanduser(
-    "~/.claude/state/gate-answer")
+LEDGER_DIR = confined("SUPERVISOR_GATE_ANSWER_DIR", os.path.expanduser("~/.claude/state/gate-answer"))
+
+#: A Claude session id. `--self` names a file under `LEDGER_DIR`, so anything else is refused
+#: before it reaches a path — `../../settings` would otherwise name `~/.claude/settings.json`.
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+#: Write-class tools, whose target path is what rubric clause (a) is about.
+WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
+
+#: Launchers that run a program named in their arguments — the named program is unseen code.
+#: `make`, `npm`/`bun`/`yarn` scripts, `go run`/`go test` and `cargo` stay `manager` tier ON
+#: PURPOSE: they build or test the worker's own worktree, which is what most briefs name, and
+#: rubric clause (a) still confines what they may write. Treating them as script files would
+#: escalate nearly every build a worker runs.
+RUNNER_WORDS = ("uv", "uvx", "npx", "pnpx", "bunx", "pipx", "poetry", "pdm", "hatch", "rye")
 
 #: Off until every carrier renders a manager's answer in the manager's voice — see the module
 #: docstring. The pick branch below stays, tested with this flipped, so turning it on is one line.
@@ -177,6 +214,8 @@ def resolve_self(arg_self, environ=None):
     env = (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
     if not env:
         return None, "CLAUDE_CODE_SESSION_ID is unset, so this session cannot prove who it is"
+    if not UUID_RE.match(env):
+        return None, "CLAUDE_CODE_SESSION_ID is not a session id"
     if arg_self != env:
         return None, "--self does not match CLAUDE_CODE_SESSION_ID; ownership is never taken from an argument"
     return env, None
@@ -216,11 +255,84 @@ def freshness_refusal(item, question):
     return ""
 
 
-def runs_script_file(cmd, tier_mod, depth=0):
-    """True when any segment hands a FILE (or stdin) to an interpreter, or runs a path script.
+SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "fish")
 
-    Raises nothing: a command the lexer cannot take apart is `operator` tier already, and is
-    refused before this runs; here it reads as True, the conservative direction.
+
+def _inline_body_safe(body, tier_mod, depth):
+    """An inline `-c` body is safe only when it is itself allowlist-tier and runs no script."""
+    try:
+        reading = tier_mod.tier_for("Bash", {"command": body}, tier_mod.load_allowlist())
+    except Exception:
+        return False
+    return reading.get("tier") == "allowlist" and not runs_script_file(body, tier_mod, depth + 1)
+
+
+def _argv_runs_script(argv, tier_mod, depth):
+    """True when this one simple command hands unseen code to something that runs it."""
+    while argv and os.path.basename(re.split(r"[<>]", argv[0])[0]) in WRAPPER_WORDS:
+        head = os.path.basename(argv[0])
+        rest = argv[1:]
+        if head == "env" and any(a == "-S" or a.startswith(("-S", "--split-string")) for a in rest):
+            return True  # `env -S 'interp file'` re-splits a string into a command
+        argv = rest
+        while argv and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", argv[0]) or argv[0].startswith("-")):
+            argv = argv[1:]
+    if not argv:
+        return False
+    word = argv[0]
+    if "<" in word:
+        return True  # `bash<x.sh`: an unspaced redirect feeds a file to the command word
+    base = os.path.basename(word)
+    if re.fullmatch(r"python3(\.\d+)?", base):
+        base = "python3"
+    if base == "xargs":
+        # Option values (`-n 1`, `-I {}`) make the command's position unknowable, so ANY
+        # argument that names an interpreter, a runner or a path script counts.
+        for a in argv[1:]:
+            b = os.path.basename(a)
+            if re.fullmatch(r"python3(\.\d+)?", b) or b in INTERPRETERS or b in RUNNER_WORDS \
+                    or a.startswith(("./", "../", "~/")) or SCRIPT_EXT.search(a):
+                return True
+        return False
+    if base == "find":
+        return any(a in ("-exec", "-execdir", "-ok", "-okdir") for a in argv[1:])
+    if base in RUNNER_WORDS:
+        return True
+    if base == "git":
+        args = argv[1:]
+        for i, a in enumerate(args):
+            value = args[i + 1] if a == "-c" and i + 1 < len(args) else (a[2:] if a.startswith("-c") and len(a) > 2 else None)
+            if value is not None and ("!" in value or value.lower().startswith("alias.")):
+                return True
+        return False
+    if base in INTERPRETERS:
+        letters = "e" if base in ("node", "deno", "bun", "perl", "ruby", "php") else "c"
+        index = tier_mod._inline_program_index(argv, letters)
+        if index is not None:
+            # An inline program: a shell body is judged like any command, and must be
+            # allowlist-tier to pass; any other language's body is code no check here reads.
+            if base in SHELLS and index < len(argv):
+                return not _inline_body_safe(argv[index], tier_mod, depth)
+            return True
+        rest = argv[1:]
+        if "-m" in rest or "-" in rest or any(not a.startswith("-") for a in rest) or not rest:
+            return True
+        return False
+    return word.startswith(("./", "../", "~/")) or ("/" in word and bool(SCRIPT_EXT.search(word)))
+
+
+def runs_script_file(cmd, tier_mod, depth=0):
+    """True when any segment runs code no check here has read.
+
+    That is: an interpreter handed a FILE, a module (`-m`) or stdin; an inline `-c`/`-e`
+    program, unless it is a shell body that is itself allowlist-tier; a path script (`./x`,
+    `dir/x.sh`); an unspaced redirect into the command word (`bash<x.sh`); and the launchers
+    `xargs <cmd>`, `find -exec/-execdir`, `env -S`, `uv run`/`npx`/… and `git -c alias.*` /
+    `git -c …=!…`. `make`, package-manager scripts and `go run` deliberately do not count —
+    see `RUNNER_WORDS`.
+
+    Raises nothing: a command the lexer cannot take apart reads as True, the conservative
+    direction.
     """
     if depth > 8:
         return True
@@ -232,31 +344,42 @@ def runs_script_file(cmd, tier_mod, depth=0):
         if runs_script_file(inner, tier_mod, depth + 1):
             return True
     for segment in segments:
+        # ⚠️ Read on the RAW segment: the tier lexer unwraps `env` itself, so `env -S 'x y'`
+        # arrives as the single word `x y` and the flag that re-splits it is gone.
+        if re.search(r"(^|\s)env\s(.*\s)?(-S|--split-string)", segment):
+            return True
         try:
             _, argv = tier_mod.words(segment)
         except Exception:
             return True
-        while argv and os.path.basename(argv[0]) in WRAPPER_WORDS:
-            argv = [a for a in argv[1:]]
-            while argv and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", argv[0]) or argv[0].startswith("-")):
-                argv = argv[1:]
-        if not argv:
-            continue
-        word = argv[0]
-        base = os.path.basename(word)
-        if re.fullmatch(r"python3(\.\d+)?", base):
-            base = "python3"
-        if base in INTERPRETERS:
-            letters = "e" if base in ("node", "deno", "bun", "perl", "ruby", "php") else "c"
-            if tier_mod._inline_program_index(argv, letters) is not None:
-                continue
-            rest = argv[1:]
-            if "-m" in rest or "-" in rest or any(not a.startswith("-") for a in rest) or not rest:
-                return True
-            continue
-        if word.startswith(("./", "../", "~/")) or ("/" in word and SCRIPT_EXT.search(word)):
+        if any(re.search(r"\s", a) for a in argv[:1]):
+            return True  # a command word holding whitespace is a string some launcher re-splits
+        if _argv_runs_script(list(argv), tier_mod, depth):
             return True
     return False
+
+
+def write_target_refusal(tool, inp, cwd):
+    """Why a write-class call's target is outside the worker's own space, or ""."""
+    if tool not in WRITE_TOOLS:
+        return ""
+    path = inp.get("file_path") if isinstance(inp, dict) else None
+    if not isinstance(path, str) or not path.strip():
+        return "write target unreadable"
+    if not cwd:
+        return "worker cwd unknown — the write target cannot be confined"
+    home = os.path.expanduser("~")
+    target = os.path.expanduser(path.strip())
+    if not os.path.isabs(target):
+        target = os.path.join(cwd, target)
+    target = os.path.realpath(target)
+    claude = os.path.realpath(os.path.join(home, ".claude"))
+    if target == claude or target.startswith(claude + os.sep):
+        return "write into ~/.claude is operator-only"
+    roots = [os.path.realpath(cwd), os.path.realpath("/tmp")]
+    if not any(target == r or target.startswith(r + os.sep) for r in roots if r != os.sep):
+        return "write target %s is outside the worker's cwd and /tmp" % path
+    return ""
 
 
 def command_text(question):
@@ -358,6 +481,9 @@ def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
     out["tool"] = question.get("tool_name")
     if out["tool"] not in UNATTENDED_TOOLS:
         return done(ESCALATE, "tool not unattended-answerable: %s" % (out["tool"] or "unnamed"))
+    card_tool, _ = tier_mod.parse_payload(item.get("payload"))
+    if card_tool != out["tool"]:
+        return done(ESCALATE, "card names tool %s but the park is %s" % (card_tool, out["tool"]))
     stale = freshness_refusal(item, question)
     if stale:
         return done(ESCALATE, stale)
@@ -376,8 +502,11 @@ def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
         return done(ESCALATE, "operator tier: %s" % reading.get("reason"))
     if reading.get("tier") not in ("allowlist", "manager"):
         return done(ESCALATE, "unknown tier %r reads as operator" % reading.get("tier"))
-    if out["tool"] == "Bash" and out["command_truncated"]:
-        return done(ESCALATE, "Bash command truncated at %d chars — not judgeable in full" % COMMAND_CAP)
+    if out["command_truncated"]:
+        return done(ESCALATE, "%s input truncated at %d chars — not judgeable in full" % (out["tool"], COMMAND_CAP))
+    outside = write_target_refusal(out["tool"], inp, out["cwd"])
+    if outside:
+        return done(ESCALATE, outside)
     if out["tool"] == "Bash" and runs_script_file(text, tier_mod):
         return done(ESCALATE, "Bash runs a script file — unseen code")
 
@@ -510,6 +639,8 @@ def stamp_index(fleet_mod):
 
 
 def ledger_path(self_id, root=None):
+    if not isinstance(self_id, str) or not UUID_RE.match(self_id):
+        raise ValueError("ledger key is not a session id: %r" % (self_id,))
     return os.path.join(root or LEDGER_DIR, "%s.json" % self_id)
 
 

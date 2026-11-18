@@ -388,9 +388,85 @@ class Strictness(unittest.TestCase):
             self.assertIn("script file", out["why"], cmd)
 
     def test_inline_programs_and_plain_commands_are_not_script_files(self):
-        for cmd in ("ls -la /tmp", "python3 -c 'print(1)'", "git -C /work/repo status", "jq . f.json",
-                    "/usr/bin/git log"):
+        for cmd in ("ls -la /tmp", "bash -c 'ls -la /tmp'", "git -C /work/repo status", "jq . f.json",
+                    "/usr/bin/git log", "xargs -n 1 grep foo", "find . -name '*.md'"):
             self.assertFalse(gac.runs_script_file(cmd, tier), cmd)
+
+
+class ScriptBypasses(unittest.TestCase):
+    """Round 2: each of these hid a script file from the first cut of `runs_script_file`."""
+
+    def test_bypasses_are_caught(self):
+        for cmd in ("bash -c './evil.sh'", "sh -c 'sh x.sh'", "ls; bash -c ./x.sh",
+                    "python3 -c 'exec(open(\"f.py\").read())'", "python3 -c 'import evil'",
+                    "node -e 'require(\"./x\")'", "bash<x.sh", "xargs bash < list",
+                    "xargs -I{} sh {}", "find . -name '*.sh' -exec sh {} \\;", "find . -execdir ./x \\;",
+                    "env -S 'python3 f.py'", "uv run tool.py", "npx some-tool",
+                    "git -c alias.x='!sh x.sh' x", "git -c core.pager='!./p' log"):
+            self.assertTrue(gac.runs_script_file(cmd, tier), cmd)
+
+    def test_bypass_escalates_end_to_end(self):
+        cmd = "ls; bash -c ./x.sh"
+        out = run(sessions=[session(command=cmd)], item=card(payload="Bash: " + cmd))
+        self.assertEqual(out["verdict"], gac.ESCALATE)
+
+
+class Confinement(unittest.TestCase):
+    def test_non_uuid_self_is_refused(self):
+        sid, why = gac.resolve_self("../../settings", {"CLAUDE_CODE_SESSION_ID": "../../settings"})
+        self.assertIsNone(sid)
+        self.assertIn("not a session id", why)
+
+    def test_ledger_path_rejects_a_path_like_key(self):
+        with self.assertRaises(ValueError):
+            gac.ledger_path("../../settings")
+
+    def test_traversal_self_writes_nothing(self):
+        root = tempfile.mkdtemp()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "../../settings"}), \
+             mock.patch.object(gac, "LEDGER_DIR", os.path.join(root, "a", "b")), \
+             mock.patch.object(gac, "load_inputs", side_effect=AssertionError("read")), \
+             contextlib.redirect_stdout(out):
+            rc = gac.main(["--self", "../../settings", "--item", ITEM])
+        self.assertEqual(rc, 2)
+        self.assertEqual(os.listdir(root), [])
+
+    def test_env_override_outside_state_is_ignored(self):
+        with mock.patch.dict(os.environ, {"X_DIR": "/Users/someone/.claude"}):
+            self.assertEqual(gac.confined("X_DIR", "/default"), "/default")
+        inside = os.path.join(gac.STATE_ROOT, "gate-answer-test")
+        with mock.patch.dict(os.environ, {"X_DIR": inside}):
+            self.assertEqual(gac.confined("X_DIR", "/default"), inside)
+
+
+class CardAndPark(unittest.TestCase):
+    def test_card_tool_must_match_the_park(self):
+        out = run(item=card(payload="Read: /work/repo/x"))
+        self.assertEqual(out["verdict"], gac.ESCALATE)
+        self.assertIn("card names tool Read but the park is Bash", out["why"])
+
+    def test_write_outside_cwd_and_tmp_is_left(self):
+        for path in ("/Users/x/.zshrc", "~/.claude/settings.json", "/etc/hosts", "../sibling/x.md"):
+            out = run(item=card(payload="Write: " + path), sessions=[session(command=path, tool="Write")])
+            self.assertEqual(out["verdict"], gac.ESCALATE, path)
+
+    def test_write_inside_cwd_or_tmp_passes_the_gate(self):
+        for path in ("/work/repo/x.md", "sub/y.md", "/tmp/scratch.md"):
+            out = run(item=card(payload="Write: " + path), sessions=[session(command=path, tool="Write")])
+            self.assertEqual(out["verdict"], gac.ANSWERABLE, (path, out["why"]))
+
+    def test_write_with_unknown_cwd_is_left(self):
+        sess = session(command="/work/repo/x.md", tool="Write", cwd="")
+        out = run(item=card(payload="Write: /work/repo/x.md"), sessions=[sess])
+        self.assertIn("cwd unknown", out["why"])
+
+    def test_truncated_write_content_is_left(self):
+        sess = session(command="/work/repo/x.md", tool="Write")
+        sess["question"]["input"]["content"] = "x" * (gac.COMMAND_CAP + 1)
+        out = run(item=card(payload="Write: /work/repo/x.md"), sessions=[sess])
+        self.assertEqual(out["verdict"], gac.ESCALATE)
+        self.assertIn("truncated", out["why"])
 
 
 class Dedup(unittest.TestCase):
