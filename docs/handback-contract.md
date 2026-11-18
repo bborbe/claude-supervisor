@@ -75,7 +75,7 @@ The `.decision` file carries `round=`, `written_at=`, `status=` (`ok` / `unread`
 
 ## Where the full payload goes
 
-The paths are siblings under one directory, keyed by the subject slug — the subject lowercased with non-alphanumerics collapsed to `-`. They are separate files rather than fields of one record because they hold different things and can legitimately disagree; that disagreement is the point.
+The paths are siblings under one directory, keyed by the subject slug — the subject lowercased with non-alphanumerics collapsed to `-`. They are separate files rather than fields of one record because they hold different things and can legitimately disagree; that disagreement is the point. ⚠️ **One row below is keyed by ROUND, not by subject** — the hand-back signal, whose name is the round id — and it is the only exception to this section's keying.
 
 | Written by | Path | Holds |
 |---|---|---|

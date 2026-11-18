@@ -64,11 +64,13 @@ The caller passes: **the round id** — the receipt's numeric `round_started_at`
 tasks directory**. The manager read the receipt and armed before dispatching you, so the
 window is already open.
 
-⚠️ **The round id is numeric, and the digest's stamp is not a substitute.** `--handback
---round` rejects anything but the receipt float, so a caller that hands you
-`2026-10-11T18:09:40Z` (the sweep reader's own stamp format) leaves you unable to write the
-hand-back — and a round with no hand-back can never be closed. If the id you were given is
-not numeric, say so in the hand-back and stop that row rather than guessing one.
+⚠️ **Copy the id VERBATIM from the receipt — the full float, not a `date +%s` epoch.** The
+hand-back's filename is built with `f"{float(x):.6f}"`, so an integer epoch writes
+`1795010135.000000.round` while the receipt's `1795010135.451426` yields
+`1795010135.451426.round` — `--finish` then never finds the hand-back and the loop absorbs
+forever. A digest stamp (`2026-10-11T18:09:40Z`) is rejected outright. If the id you were
+given is not the receipt's exact float, say so in the hand-back and stop that row rather than
+guessing one.
 
 ⚠️ **You derive this round's digest path; the caller does not pass it.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, under
