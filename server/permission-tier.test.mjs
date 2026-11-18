@@ -23,6 +23,33 @@ test('every fixture case returns its tier and form through the wrapper', () => {
   }
 })
 
+// ⚠️ The server's own copy of the credential-path cases, named rather than left to the shared
+// loop above: these are the commands the live goal-wrangler auto-allowed as class B before
+// 2026-11-18 (`cat ~/.claude/.credentials.json`, `head ~/.teamvault.json`, `ls ~/Library/Keychains`,
+// `grep -rh token ~`, `grep -r accessToken ~/.claude`, `jq . ~/.claude.json`). The wrapper spawns
+// `scripts/permission-tier.py` — it is deliberately not a port — so this pins that the SERVER path
+// sees the classifier's answer, not that a second pattern list agrees with the first.
+test('credential paths and whole-home reads are secret through the server wrapper', () => {
+  const bash = [
+    'cat ~/.claude/.credentials.json', 'head ~/.teamvault.json', 'ls ~/Library/Keychains',
+    'grep -rh token ~', 'grep -r accessToken ~/.claude', 'jq . ~/.claude.json',
+    'ls; cat ~/.claude/.credentials.json', 'cat ~/.netrc', 'cat ~/keys/id_ed25519', 'cat server.pem',
+    'head tls.key', 'cat .env.local', 'ls ~/.kube', 'find ~ -name x', 'ls -R ~', 'cat ~/.*',
+    'grep -rh token ~bborbe', 'grep -r x ~root/', 'find ~+ -name x', 'ls ~bborbe/.claude',
+  ]
+  for (const command of bash) {
+    const got = permissionTier('Bash', { command })
+    assert.equal(got.tier, 'operator', `${command}: ${got.reason}`)
+    assert.equal(got.form, 'secret', `${command}: ${got.reason}`)
+  }
+  for (const [tool, file_path] of [['Read', '/Users/x/.claude/.credentials.json'], ['Read', '/Users/x/.claude.json'],
+    ['Write', '/w/server.pem'], ['Edit', '/w/.env.production'], ['Read', '/Users/x/Library/Keychains/login.keychain-db']]) {
+    const got = permissionTier(tool, { file_path })
+    assert.equal(got.form, 'secret', `${tool} ${file_path}: ${got.reason}`)
+  }
+  assert.equal(permissionTier('Bash', { command: 'cat docs/README.md' }).tier, 'allowlist')
+})
+
 test('the confined test entry needs the caller-checked flag', () => {
   assert.equal(permissionTier('Bash', { command: 'make test' }).tier, 'manager')
   assert.equal(permissionTier('Bash', { command: 'make test' }, { runnerConfigClean: true }).tier, 'allowlist')
