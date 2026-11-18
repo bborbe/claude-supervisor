@@ -737,9 +737,16 @@ def _local_verdict(sid, registry_dir=None, why=""):
                 "%s — %s holds a pid the identity registry cannot prove, so liveness cannot be "
                 "decided from disk" % (why, matched[0])
             ), None
-        # `alive is False`: the registry HOLDS the entry and computes death, and no live
-        # headless stamp contradicts it. Same predicate that licenses ABSENT at the end of
-        # `_absent_licensed`.
+        # `alive is False`: the registry HOLDS the entry and computes death — but that only
+        # licenses ABSENT when the OTHER channel could be read. ⚠️ **An unreadable headless
+        # store is `None`, not an empty set**, and collapsing the two would let a dead registry
+        # row answer ABSENT while a live headless stamp sat unread — the resume-authorising
+        # direction this whole fallback exists to keep shut, and the union rule stated above.
+        if headless is None:
+            return UNKNOWN, (
+                "%s — %s computes dead, but the headless heartbeat store could not be read, so "
+                "ABSENT cannot be licensed" % (why, matched[0])
+            ), None
         return ABSENT, "%s (identity registry reports the pid gone for %s)" % (
             why, matched[0]
         ), None
