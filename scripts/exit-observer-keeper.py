@@ -126,8 +126,29 @@ def sweep(now):
     try:
         out = subprocess.run([sys.executable, COVERAGE, "--json"], capture_output=True,
                              text=True, timeout=SWEEP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"exit-observer-keeper: sweep TIMEOUT after {SWEEP_TIMEOUT}s", file=sys.stderr)
+        return None
+    except OSError as exc:
+        print(f"exit-observer-keeper: sweep could not start: {exc}", file=sys.stderr)
+        return None
+    except ValueError as exc:
+        # `text=True` decodes as it reads, and a non-UTF-8 byte raises UnicodeDecodeError —
+        # itself a ValueError — from inside the call rather than from `json.loads`.
+        print(f"exit-observer-keeper: sweep output could not be decoded: {exc}", file=sys.stderr)
+        return None
+    # ⚠️ The return code and stderr are logged, not discarded. Four separate theories about why
+    # this sweep failed (blocking read, enumeration cost, host load, interpreter) were all
+    # plausible and all wrong, because this path used to print one generic line and throw the
+    # reason away. One line of real error text ends that guessing.
+    if out.returncode != 0:
+        print(f"exit-observer-keeper: sweep exited {out.returncode}: "
+              f"{(out.stderr or '').strip()[:400]}", file=sys.stderr)
+        return None
+    try:
         doc = json.loads(out.stdout)
-    except (subprocess.TimeoutExpired, ValueError, OSError):
+    except ValueError:
+        print(f"exit-observer-keeper: sweep output is not JSON: {out.stdout[:200]!r}", file=sys.stderr)
         return None
     panes = {}
     for row in list(doc.get("unrecorded", [])) + list(doc.get("unknown", [])):
