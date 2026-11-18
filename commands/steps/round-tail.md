@@ -12,8 +12,10 @@ When: end of every tick
 
   ```bash
   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/gate-owner-filter.py \
-    --feed --self "<this-session-id>" --interval 60
+    --feed --digest --self "<this-session-id>" --interval 60
   ```
+
+  ⚠️ **`--digest` is what keeps one poll to one line.** Without it the filter prints one line per gate, and every printed line becomes its own `Monitor` event, so a poll emitting twelve gates wakes this session twelve times — measured 2026-11-18 on a live fleet round: **29–106 notifications per round**, each a full manager turn. The fleet tier's arm (`commands/steps/attention-watcher.md`) carries the same flag for the same reason; this tier was left out when batching shipped in `v0.341.0`, and the gap is why a goal manager still paid per-line — measured 22:15–23:00 on a live goal session: seven `Monitor` events for three distinct sessions.
 
   ⚠️ **`--interval 60` is a fixed choice, never derived from the tick's clamped `--interval`** — it is well inside the tick's floor (5 min), and a slow tick must not slow the push channel.
 
