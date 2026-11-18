@@ -420,8 +420,12 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         # alive and writing, but its arm file is past the hard cap, so no round is coming and
         # it covers nothing. Counting it as coverage is how a dead goal-manager loop is
         # suppressed by a live-looking topic manager.
+        # ⚠️ `EXITED` too: the arm record is fresh but the session it names is gone, so it
+        # covers nothing. It is inert here today — reaching this check needs a LIVE session
+        # (≤60 s heartbeat) which cannot coexist with `work > limit` (≥ ~480 s) — but the two
+        # membership lists are kept consistent rather than relying on that coincidence.
         if cadence_state(topic_stem, "topic") in (
-            "STOPPED", "LAPSED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
+            "STOPPED", "LAPSED", "STALE", "UNARMED", "WRONG-BRANCH", "EXITED", PROBE_FAILED
         ):
             continue
         return True

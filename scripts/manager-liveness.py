@@ -1752,30 +1752,30 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
     # The same predicate the IDLE branch uses, so the two cannot disagree about what "watched"
     # means.
     session_id = read_session_marker(s)
-    # ⚠️ **Computed ONCE and reused by the IDLE branch below.** `gate_watched` does an
-    # `os.listdir` plus a `getmtime` per subject, and a fleet-wide `--check` sweep would
-    # otherwise pay it twice for every stale goal subject — once here and once in the IDLE
-    # branch, which used to call it again.
-    gate_subject_age = gate_loop_alive = None
-    gate_held = False
-    if s.startswith("goal--"):
-        gate_subject_age, gate_loop_alive = gate_watched(s, now)
-        gate_held = bool(
-            gate_loop_alive
-            and gate_subject_age is not None
-            and gate_subject_age <= GATE_SUBJECT_FRESH
-        )
     if (
         age <= limit
         and session_id is not None
         and work is not None
         and work > limit
-        and not gate_held
     ):
-        if registry_holds(session_id) is False:
+        # ⚠️ **`gate_watched` is called LAZILY, only for a subject that could otherwise be
+        # EXITED.** It costs an `os.listdir` plus a `getmtime` per subject, and hoisting it
+        # above the age test would pay that for every FRESH goal subject — the larger
+        # population — to answer a question only the `age <= limit` branch asks. The IDLE
+        # branch below keeps its own call; the two branches are disjoint age ranges, so a
+        # single subject never pays twice.
+        gate_subject_age, gate_loop_alive = (
+            gate_watched(s, now) if s.startswith("goal--") else (None, None)
+        )
+        gate_held = bool(
+            gate_loop_alive
+            and gate_subject_age is not None
+            and gate_subject_age <= GATE_SUBJECT_FRESH
+        )
+        if not gate_held and registry_holds(session_id) is False:
             return "EXITED", detail + (
-                f" exited (fresh cadence, no registry entry for {session_id[:8]}; "
-                f"transcript idle {work}s)"
+                f" exited (fresh cadence, no NON-DEAD registry entry for "
+                f"{session_id[:8]}; transcript idle {work}s)"
             )
     if age > limit:
         # A ROUND did not happen inside the limit — but a round is not the only thing a
@@ -1804,8 +1804,7 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
         # means the manager is watched; without it, STALE stands. An EXPIRED sleep marker
         # is the exception (see above): it stays STALE so `topic-keepalive.py` recovers it.
         if s.startswith("goal--") and not sleep_pending:
-            # Reused from the hoist above, not re-probed — see the note there.
-            subject_age, loop_alive = gate_subject_age, gate_loop_alive
+            subject_age, loop_alive = gate_watched(s, now)
             if loop_alive and subject_age is not None and subject_age <= GATE_SUBJECT_FRESH:
                 # ⚠️ IDLE, never OK. A gate tick proves the TIMER works and that this
                 # manager will be woken; it proves nothing about whether the manager has
