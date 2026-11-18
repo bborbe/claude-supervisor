@@ -52,7 +52,9 @@ endpoint keeps UNKNOWN.
 also quiet.** `alive: False` describes the RECORD's pid — gone, or the number recycled onto another
 process — so a live session no longer represented by any record reads that way while it is still
 writing. A transcript written within `TRANSCRIPT_RECENT_SECONDS` (120 s) keeps UNKNOWN; a transcript
-that resolves to nothing keeps today's ABSENT. See `_absent_licensed`.
+that resolves to nothing keeps today's ABSENT. ⚠️ **Both ABSENT licences carry it** — the per-id
+`_absent_licensed` and the endpoint-down `_local_verdict` — on one shared constant and one shared
+resolver, so the two cannot drift apart.
 
 ⚠️ **ABSENT is licensed only while the endpoint's coverage of live sessions is COMPLETE, and
 that is a precondition this file cannot establish for itself — it is established PER ID on the
@@ -720,7 +722,7 @@ def _headless_live_ids():
         return None
 
 
-def _local_verdict(sid, registry_dir=None, why=""):
+def _local_verdict(sid, registry_dir=None, why="", projects_dir=None):
     """`(verdict, message, row)` from the on-disk channels, for when the endpoint cannot be read.
 
     ⚠️ **This is the fallback half of the union and it may never license `ABSENT` from a
@@ -732,6 +734,15 @@ def _local_verdict(sid, registry_dir=None, why=""):
     The registry's three-state `alive` maps exactly as `_absent_licensed` maps it, on the same
     `alive is not False` predicate, so the two paths cannot disagree: `True` → LIVE, `None` →
     UNKNOWN, `False` → ABSENT (the registry HOLDS an entry and computes death).
+
+    ⚠️ **`alive: False` is a statement about the RECORD's pid, so a recent transcript write
+    disproves it — the same arm `_absent_licensed` carries.** `_pid_identity` answers `False`
+    when the pid is gone or is held by a DIFFERENT process, so a record that outlived its
+    session reads that way once the OS recycles the number, while the session keeps writing.
+    A transcript written within `TRANSCRIPT_RECENT_SECONDS` therefore keeps UNKNOWN here too;
+    one that resolves to nothing, or is older, leaves today's ABSENT. ⚠️ **One window, two
+    arms**: the constant and the resolver are shared with `_absent_licensed` deliberately, so
+    the two ABSENT licences cannot drift apart.
 
     The `row` returned is `None` on every branch: there is no heartbeat row to carry, and
     `_check`'s callers unpack three values.
@@ -787,6 +798,18 @@ def _local_verdict(sid, registry_dir=None, why=""):
             return UNKNOWN, (
                 "%s — %s computes dead, but the headless heartbeat store could not be read, so "
                 "ABSENT cannot be licensed" % (why, matched[0])
+            ), None
+        # ⚠️ **The record's death is disproved by a transcript written moments ago.** This is
+        # the second ABSENT licence in the file, so it carries the same guard `_absent_licensed`
+        # carries: a recycled pid on a record that outlived its session reads as death for a
+        # session that is demonstrably still writing. `idle is None` keeps today's ABSENT — a
+        # transcript that resolves to nothing is no evidence either way.
+        idle = _transcript_idle_seconds(sid, projects_dir)
+        if idle is not None and idle <= TRANSCRIPT_RECENT_SECONDS:
+            return UNKNOWN, (
+                "%s — %s computes dead, but its transcript was written %ds ago; a live session "
+                "whose record's pid was recycled reads this way, so ABSENT cannot be licensed"
+                % (why, matched[0], int(idle))
             ), None
         return ABSENT, "%s (identity registry reports the pid gone for %s)" % (
             why, matched[0]
@@ -885,6 +908,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, 
                 int(round((time.monotonic() - started) * 1000)),
                 _describe_read_failure(exc),
             ),
+            projects_dir=projects_dir,
         )
     if status != 200 or not isinstance(rows, list):
         # ⚠️ **Not ABSENT.** A 5xx, a 403, a body that is not JSON — none of them is the store
@@ -902,6 +926,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, 
                 status,
                 int(round((time.monotonic() - started) * 1000)),
             ),
+            projects_dir=projects_dir,
         )
 
     # The list carries every session the store has ever seen, live or stale — a stale row is
@@ -978,6 +1003,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, 
                 int(round((time.monotonic() - started) * 1000)),
                 _describe_read_failure(exc),
             ),
+            projects_dir=projects_dir,
         )
     if status == 200 and isinstance(row, dict):
         return _verdict_for(row, sid, registry_dir, projects_dir)

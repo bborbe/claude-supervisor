@@ -29,7 +29,7 @@ import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from endpoint_fixture import FixtureEndpoint
+from endpoint_fixture import FixtureEndpoint, dead_url
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -175,6 +175,106 @@ class AbsentLicensedTranscriptRecency(unittest.TestCase):
         self.transcript(sid, DEAD_TRANSCRIPT_IDLE_SECONDS)
         rc, out = self.check(sid)
         self.assertEqual(rc, UNKNOWN, out)
+
+
+class LocalVerdictTranscriptRecency(unittest.TestCase):
+    """The SECOND ABSENT licence — `_local_verdict`, the endpoint-down disk fallback.
+
+    ⚠️ **A separate population, not a second spelling of the suite above.** `_local_verdict`
+    was added by PR #977 while this task's fix was in flight, and it licensed ABSENT on
+    `alive is False` with no transcript check — this task's defect on an arm that did not
+    exist when the task was filed. The five cases above drive `_absent_licensed` through the
+    per-id 404 path and never reach this function, so they cannot fail if this arm regresses.
+
+    Every case here forces the fallback (an unreachable endpoint), patches the registry to a
+    record it HOLDS and computes dead, and patches the headless store to a readable, empty
+    set — so ABSENT is licensable on every other axis and the transcript is the only variable.
+    """
+
+    def setUp(self):
+        self.m = load()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.registry = os.path.join(self.tmp.name, "registry")
+        os.makedirs(self.registry)
+        self._prior_cache_env = os.environ.get("SUPERVISOR_START_CACHE")
+        os.environ["SUPERVISOR_START_CACHE"] = os.path.join(self.tmp.name, "starts.json")
+        self.config = os.path.join(self.tmp.name, "config")
+        os.makedirs(os.path.join(self.config, "projects", "-some-project"))
+        self._prior_config_env = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.config
+
+    def tearDown(self):
+        if self._prior_config_env is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._prior_config_env
+        if self._prior_cache_env is None:
+            os.environ.pop("SUPERVISOR_START_CACHE", None)
+        else:
+            os.environ["SUPERVISOR_START_CACHE"] = self._prior_cache_env
+        self.tmp.cleanup()
+
+    def transcript(self, session_id, idle_seconds, project="-some-project"):
+        directory = os.path.join(self.config, "projects", project)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "%s.jsonl" % session_id)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        then = time.time() - idle_seconds
+        os.utime(path, (then, then))
+        return path
+
+    def verdict(self, sid):
+        """`--check` against an UNREACHABLE endpoint, with the registry holding `sid` dead."""
+
+        class _RegistryHoldsItDead:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": False, "pid": 1234}}
+
+        prior_id, prior_headless = self.m._IDENTITY, self.m._headless_live_ids
+        self.m._IDENTITY = _RegistryHoldsItDead()
+        # A readable, EMPTY headless store: `None` would answer UNKNOWN on its own axis and
+        # mask whether the transcript arm fired at all.
+        self.m._headless_live_ids = lambda: set()
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main(
+                    ["--check", sid, "--endpoint", dead_url(), "--dir", self.registry]
+                )
+        finally:
+            self.m._IDENTITY, self.m._headless_live_ids = prior_id, prior_headless
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_a_dead_registry_row_with_a_recent_transcript_is_unknown(self):
+        """SC1 on the fallback arm: 11 s after a transcript write, the record's death is refused.
+
+        ⚠️ **Red before the fix.** This function returned ABSENT unconditionally on
+        `alive is False`, so this case read exit 1 where exit 2 is required.
+        """
+        sid = "f6c0ffee-1111-2222-3333-444455556666"
+        self.transcript(sid, 11)
+        rc, out = self.verdict(sid)
+        self.assertEqual(rc, UNKNOWN, out)
+        self.assertIn("UNKNOWN", out)
+
+    def test_a_dead_registry_row_with_a_dead_transcript_still_reads_absent(self):
+        """SC2 on the fallback arm: a genuinely dead session keeps its ABSENT.
+
+        Green before and after — the constant here is the suite's own 600 s, never the
+        module's window, so a blanket UNKNOWN on this arm fails.
+        """
+        sid = "07c0ffee-1111-2222-3333-444455556666"
+        self.transcript(sid, DEAD_TRANSCRIPT_IDLE_SECONDS)
+        rc, out = self.verdict(sid)
+        self.assertEqual(rc, ABSENT, out)
+
+    def test_a_dead_registry_row_with_no_transcript_still_reads_absent(self):
+        """No transcript is no evidence either way, so the fallback's ABSENT stands."""
+        sid = "18c0ffee-1111-2222-3333-444455556666"
+        rc, out = self.verdict(sid)
+        self.assertEqual(rc, ABSENT, out)
 
 
 if __name__ == "__main__":
