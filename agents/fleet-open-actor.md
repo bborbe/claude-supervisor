@@ -126,19 +126,34 @@ truncated block is indistinguishable from a small selection.
 
 ## 3. Run every action, in order
 
-For each `selected[].action`, invoke it through `Skill`, **in the order given and with the action's
-own bytes split across the tool's two fields**:
+For each `selected[]` row, invoke `/supervisor:open` through `Skill`, **in the order given**, with the
+row's own `name` carried across the tool's two fields:
 
-- `skill: "supervisor:open"` — the action's first token with its leading `/` dropped.
-- `args: "<everything after that first space, byte-for-byte>"` — the `shlex.quote`d name, `--task`,
-  and the `shlex.quote`d `--vault`. It already carries `--vault`; never append one.
+- `skill: "supervisor:open"` — literal.
+- `args: "<selected[].name> --task --vault <vault>"` — the row's **`name` field verbatim**, then the
+  two literal flags and this leg's own `<vault>` input. The vault is a plain name, never a path.
 
-⚠️ **"Verbatim" means verbatim inside `args`, never a pasted shell line.** `Skill` takes `skill` and
-`args` as separate fields, so a whole command line cannot be handed to it. The split is safe because
-it is **prefix removal, not re-composition**: `open-queue.py` emits the prefix as a literal
-(`"/supervisor:open %s --task%s"`), so the remainder is the identical byte string it produced —
-quotes included — and nothing re-quotes, interpolates or re-orders it. That is what keeps the
-never-compose rule intact: the name and the vault are never retyped here, only carried.
+⚠️ **Take the name from `selected[].name`, never from `selected[].action`.** `open-queue.py` emits
+`action` with `shlex.quote`d values, and `Skill` **runs no shell** — so a title containing an
+apostrophe arrives as `sweep-gate.py'"'"'s Home …`, the escape sequence never collapses to `'`, and
+`commands/open.md:419` hands that literal string to `vault-cli`, which finds no such task and exits
+1 — reported downstream as `❓ SESSION UNREADABLE`. Measured 2026-11-18: the bare title exits 0 and
+returns its session id, the same title carrying `'"'"'` exits 1, and the three sibling rows the same
+round selected (no apostrophe) exit 0. `commands/open.md` § Arguments already takes the name as
+"everything that is not a recognised flag" and quotes it for `vault-cli` itself, so the name must
+reach it **unquoted by us**.
+
+⚠️ **Leave `action` alone; do not unquote the producer.** The quoting in `open-queue.py` protects a
+`"`, a `$(…)` or a backtick in a name for any consumer that really does pass the string through a
+shell — that guard is deliberate, and `open-queue.py`'s own comment says so. The defect is only that
+**this** consumer runs no shell, so the shell-safe form is the wrong form here. Read `name`; never
+strip quoting from `action`, and never re-quote `name`.
+
+⚠️ **"Verbatim" still holds — it now means the `name` field, carried unaltered.** Nothing here
+retypes, re-quotes, interpolates or re-orders the name: it comes from the JSON field and goes into
+`args` as-is, followed by two literals. A name beginning with `--` would be read as a flag by
+`commands/open.md`; that is the one shape this cannot carry, and it is named here rather than
+silently mangled.
 
 ⚠️ **`/supervisor:open` decides admissibility.** Every gate it owns runs unchanged for every row
 this leg hands it, and the leg never pre-clears one — a row that clears the rank can still be
