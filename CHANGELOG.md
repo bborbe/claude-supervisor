@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **an unreadable vault no longer kills the reader that walks it, so the exit-observer keeper can sweep at all.** `fleet-sessions.py`'s `_walk_task_stamps()` called `root.iterdir()` unguarded, and a launchd job holds no TCC grant for `~/Documents`: measured 2026-11-18, every coverage sweep the keeper ran died there with `PermissionError: [Errno 1] Operation not permitted` **before resolving a single pane**, so the keeper's watch set was always empty and it could never re-arm an observer. ⚠️ **The keeper's own log hid the cause**: it truncates the child's stderr to 400 characters, which cut the traceback before the exception line — 630 `sweep failed` against 72 successes in one log, all this one error. `vault_index()` in `fleet-board.py` already degrades on the same condition ("a missing `~/Documents/Obsidian` degrades to an empty index rather than aborting the board"); this walk sits on that very call path and now degrades identically — an unreadable vault costs the board its titles, not the sweep its life. ⚠️ **A `launchctl submit` run with the default PATH does NOT reproduce it** — with no `wezterm` on PATH the same script takes a different branch and reports every manager `unknown` with no crash, which is why this looked like two separate defects. Change set: `scripts/fleet-sessions.py`, `scripts/tests/test_fleet_sessions.py`, `CHANGELOG.md`.
+
 ## v0.344.0
 
 - feat: `scripts/flagged-rows.py` emits a new `parked` branch for a row whose last closer declares an external wait (`⏰ Ends:`), read once per run through `declared-wait.py` so there is one definition of "waiting" — the branch sits after every LIVE branch and before `resume`/`create`, so an open session is never counted as waiting and a parked row is never counted absent
