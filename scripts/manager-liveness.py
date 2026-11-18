@@ -1507,6 +1507,51 @@ def work_age(s: str, now: float):
         return None
 
 
+def read_session_marker(s: str):
+    """The session id this subject's arm record names, or `None` when there is none.
+
+    The same marker `work_age` reads, split out so the EXITED check and the work signal
+    cannot disagree about which id the subject claims.
+    """
+    marker, _legacy = resolve(s, "session")
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            sid = fh.read().strip()
+    except OSError:
+        return None
+    if not sid or not SESSION_ID_SHAPE.fullmatch(sid):
+        return None
+    return sid
+
+
+def registry_holds(session_id):
+    """`True`/`False`/`None` — does the identity registry still hold this id as non-dead?
+
+    ⚠️ **`None` is "could not tell" and must never be read as death.** It is the same
+    three-state `session-identity.read_registry` returns (`alive` is `True` / `False` /
+    `None`), and the same rule `session-liveness.py` applies: only `False` is death.
+
+    ⚠️ **`False` is not death either, on its own** — Claude Code deletes the registry row on
+    exit, so an absent row covers a session that died AND one spawned moments ago. `classify`
+    requires a second signal (an idle transcript) before it says EXITED, exactly as
+    `_absent_licensed` does on the liveness path.
+    """
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-identity.py")
+        spec = importlib.util.spec_from_file_location("session_identity", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        identity = mod.read_registry()
+    except Exception:  # noqa: BLE001 — an unreadable registry is UNKNOWN, never a death verdict
+        return None
+    if identity is None:
+        return None
+    keys = [k for k in identity if k.lower() == session_id.lower()]
+    if not keys:
+        return False
+    return any((identity.get(k) or {}).get("alive") is not False for k in keys)
+
+
 def classify(s: str, now: float, defer_date=None) -> tuple:
     """(state, detail) for one subject: OK, WORKING, LAPSED, IDLE, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
 
@@ -1657,6 +1702,44 @@ def classify(s: str, now: float, defer_date=None) -> tuple:
     work = work_age(s, now)
     work_field = f" work={work}s" if work is not None else " work=none"
     detail = f"age={age}s limit={int(limit)}s {basis}{work_field}"
+    # ⚠️ **EXITED — the session this arm record names is gone, whatever the cadence says.**
+    # A `.cadence` file is written by `--arm` and nothing deletes it when the session exits,
+    # so a manager that died minutes ago keeps a FRESH arm record and read `OK`. Measured
+    # 2026-11-18: five flagged managers had exited while `--state` reported `OK`, so the board
+    # showed them closed and the fleet showed them healthy — they were only found by reading
+    # `~/.claude/sessions/*.json` by hand.
+    #
+    # ⚠️ **Agreement, not a single negative channel.** A missing registry row is not death:
+    # Claude Code deletes the row on exit, so "no entry" also covers a session spawned moments
+    # ago, and `docs/fleet-surface.md` records a live session whose row was removed. EXITED
+    # therefore requires BOTH — no non-dead registry entry for the recorded id, AND a
+    # transcript that has not moved for longer than the subject's own limit. A subject with no
+    # `.session` marker, an unreadable registry, or a moving transcript is never EXITED.
+    #
+    # ⚠️ **Checked BEFORE the age branch, so a fresh cadence cannot mask it** — that masking
+    # is the defect this removes. It sits AFTER the STOPPED / SLEEPING / defer gates above,
+    # so a deliberately stopped or slept subject keeps its own word.
+    session_id = read_session_marker(s)
+    # ⚠️ **A gate-watched goal manager is never EXITED, and this guard is not optional.** The
+    # goal tier's liveness is its detached sweep gate, not a live model session: the gate holds
+    # the subject between wakes, so an unregistered `.session` id and a still transcript are the
+    # NORMAL state, not death. Without this, every gate-driven goal manager reads EXITED and the
+    # IDLE branch below can never be reached — measured as a regression on the suite's own
+    # `test_an_armed_but_unworking_goal_reads_idle_not_ok` the first time this branch was added.
+    # Same predicate the IDLE branch uses, evaluated once so the two cannot disagree.
+    gate_held = False
+    if s.startswith("goal--"):
+        gate_subject_age, gate_loop_alive = gate_watched(s, now)
+        gate_held = bool(
+            gate_loop_alive
+            and gate_subject_age is not None
+            and gate_subject_age <= GATE_SUBJECT_FRESH
+        )
+    if session_id is not None and work is not None and work > limit and not gate_held:
+        if registry_holds(session_id) is False:
+            return "EXITED", detail + (
+                f" exited (no registry entry for {session_id[:8]}; transcript idle {work}s)"
+            )
     if age > limit:
         # A ROUND did not happen inside the limit — but a round is not the only thing a
         # manager does. `work` is the manager's transcript age, refreshed by ANY turn, so
@@ -1826,8 +1909,10 @@ def main() -> int:
         "--state",
         action="store_true",
         help="print ONE subject's state: OK / WORKING / IDLE / STALE / STOPPED / SLEEPING / "
-             "UNARMED / INVALID / WRONG-BRANCH, with `work=` (the work signal) in the detail; "
-             "WORKING = no round inside the limit but the manager's transcript moved "
+             "UNARMED / INVALID / EXITED / WRONG-BRANCH, with `work=` (the work signal) in the "
+             "detail; EXITED = the arm record names a session the identity registry no longer "
+             "holds AND whose transcript has stopped moving, so a fresh `.cadence` cannot mask "
+             "a manager that died; WORKING = no round inside the limit but the manager's transcript moved "
              "(never restarted); IDLE = armed but no round and no work, gate-watched or "
              "gate-down (never restarted); "
              "exits 3 (stdout empty) for a subject with no record and no page",
