@@ -639,7 +639,6 @@ def handback(topic: str, branch: str = "", text: str = "", round_id=None) -> int
     Refused, not invented, when the id is missing or not a number: a hand-back names the
     round it ends.
     """
-    s = slug(topic, branch)
     if round_id is None:
         print("--handback needs --round: the delegate's own round id from <inputs>",
               file=sys.stderr)
@@ -1316,7 +1315,8 @@ def finish(topic: str, branch: str = "", force: bool = False, reason: str = "") 
         print(f"{SENTINEL} — refused: hand-back — no {handback_path(started)}; "
               f"the delegate has not returned, so this round is in flight, not "
               f"over. Close a round whose delegate is GONE with "
-              f"--finish --branch fleet --force --reason \"<why>\"", file=sys.stderr)
+              f"--finish --subject \"{topic}\" --branch fleet --force --reason "
+              f"\"<why>\"", file=sys.stderr)
         return EXIT_IN_FLIGHT
     d["round_ended_at"] = time.time()
     write_atomic(path(s), json.dumps(d) + "\n")
