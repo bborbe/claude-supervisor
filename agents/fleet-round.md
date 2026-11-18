@@ -148,6 +148,30 @@ The full material — the digest, the leg blocks, the drive audit, the open bloc
 to the payload paths the step files name. You hand back **only** the verdict summary in
 `<output_format>`; never inline a table, a row list or a rule.
 
+## 5. Leave the hand-back file — the round's end signal
+
+**Before your turn ends, and after the payloads are written**, write the round's hand-back:
+
+```bash
+python3 "$P/manager-receipt.py" --handback --subject "Fleet Manager" --branch fleet \
+  --text "fleet round <round id> — machine half summary"
+```
+
+⚠️ **Do not format the round id yourself.** The command takes it from the receipt, so the
+file it writes carries exactly the stem `--start` and `--finish` compute. A file named from
+the digest's stamp instead is one the gate never looks for, and the round then reads as in
+flight forever.
+
+⚠️ **This file is not decoration — it is what lets the round close.** `manager-receipt.py
+--finish` refuses with exit 13 while it is absent, and the next firing's `--start` treats the
+round as IN FLIGHT and absorbs itself. A delegate that ends without writing it leaves the
+loop wedged until someone forces the close by hand, with a recorded reason.
+
+⚠️ **Write it on EVERY ending, including the bad ones** — a full round, a round whose legs
+all came back `not-run`, and the `not-run`-because-a-leg-is-still-running case in
+`<error_handling>`. The presence of the file says *this delegate returned*; what it returned
+is the verdict's business. Its body is a one-line summary; nothing reads it.
+
 </process>
 
 <error_handling>

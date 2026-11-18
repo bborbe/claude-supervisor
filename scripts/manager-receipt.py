@@ -111,10 +111,20 @@ import argparse, datetime, glob, importlib.util, json, math, os, re, sys, time
 STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_RECEIPT_STATE_DIR", "~/.claude/state/manager-receipts")
 )
+# Where a round's legs leave their payloads and the delegate leaves its hand-back.
+# The same directory the step files name; overridable so a test never touches the real one.
+HANDBACK_DIR = os.path.expanduser(
+    os.environ.get("MANAGER_HANDBACK_STATE_DIR", "~/.claude/state/fleet-handback")
+)
 EXIT_SKIPPED = 11
 # The debt's own code, distinct from EXIT_SKIPPED so a leg chained `--debt && <leg>`
 # is stopped by a debt it owes rather than by a verdict it cannot act on.
 EXIT_DEBT_OPEN = 12
+# A round is still IN FLIGHT: both `--start` and `--finish` refuse with this code, so a
+# caller can tell "the round is still running" from "the round is broken". Distinct from
+# EXIT_SKIPPED because the caller's response differs: skipped means act on a defect,
+# in-flight means take no reading and re-arm.
+EXIT_IN_FLIGHT = 13
 
 # The positive marker a skipped round prints.
 #
@@ -469,6 +479,12 @@ def path(s: str) -> str:
 
 def write_atomic(p: str, text: str) -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
+    write_atomic_at(p, text)
+
+
+def write_atomic_at(p: str, text: str) -> None:
+    """Atomic write to an arbitrary path — the hand-back store is not `STATE_DIR`."""
+    os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -482,6 +498,162 @@ def read_receipt(s: str) -> dict:
     except (OSError, ValueError):
         return {}
     return d if isinstance(d, dict) else {}
+
+
+# --- the round's hand-back ----------------------------------------------------
+#
+# A hand-back is a RETURN VALUE today, and that is the whole defect: a round's delegate
+# can still be running when the next firing lands, and the receipt has nothing to say so
+# — it reports an over-budget round as `INCOMPLETE` (a failure verdict), never as
+# *in flight*. Measured 2026-11-18 on the Fleet Manager: round `1795010135` was closed at
+# 15:07:41 and its successor dispatched at 15:08:37 while the first delegate ran until
+# 15:22 — a 14-minute overlap, with `round_ended_at` stamped 15 minutes short.
+#
+# So the delegate leaves a file, `<round>.round`, in the same directory its legs write
+# their payloads. Its PRESENCE is the signal that the round's work returned; its ABSENCE
+# while the receipt is open is what "in flight" means. Nothing in this repo wrote that
+# path before this change (checked at f273dc65), so the one existing file was the
+# manager's own ad-hoc record — the producer is `agents/fleet-round.md`.
+#
+# The stem is the receipt's own `round_started_at`, formatted the way the incident's file
+# already was (`1795010135.451426`): six decimals, no rounding, so the id in the receipt
+# and the id in the filename cannot drift.
+#
+# ⚠️ **FLEET ONLY, deliberately.** The gate is applied only when `branch == "fleet"`,
+# because the fleet round is the one whose delegate outlives its tick — and the only one
+# with a hand-back producer. A goal/topic round has no `<round>.round` writer, so a
+# refusal there would fire on every round and wedge the loop with no legal way to close
+# it. Extending the gate to those tiers needs their producer first; until then their
+# behaviour is unchanged, and the fleet round is where the measured defect lives.
+
+def round_started(d: dict):
+    """The round's start as a float, or `None` when the receipt carries no usable one.
+
+    ⚠️ **Validated, never assumed.** `round_started_at` comes from JSON, and a receipt
+    written by an older version — or hand-edited — can carry a string. Formatting that
+    with `:.6f` raises `ValueError`, and the same value reaches the round head, the round
+    tail AND the delegate's completion signal, so one bad receipt would take out all
+    three at once. A start that is not a number is treated as *no round*, which every
+    caller already handles.
+    """
+    v = d.get("round_started_at")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
+
+
+def handback_stem(started):
+    """The round's id, exactly as the receipt records it — `None` when it has none."""
+    return None if started is None else f"{float(started):.6f}"
+
+
+def handback_path(started):
+    stem = handback_stem(started)
+    return os.path.join(HANDBACK_DIR, f"{stem}.round") if stem else None
+
+
+def leg_payload_path(started, leg: str):
+    """The epoch-stem form a round's payloads may carry — never a substitute for the
+    path the receipt RECORDED (`leg_in_flight` prefers that one)."""
+    stem = handback_stem(started)
+    return os.path.join(HANDBACK_DIR, f"{stem}.{leg}") if stem else None
+
+
+def handback_present(started) -> bool:
+    """Whether the round's delegate has handed back.
+
+    ⚠️ **A missing receipt start is NOT a hand-back.** `False` here means the caller has
+    no round to judge, which every caller already handles separately; returning `True`
+    would make a start-less receipt read as a finished round.
+    """
+    p = handback_path(started)
+    return bool(p) and os.path.exists(p)
+
+
+def leg_in_flight(d: dict, started) -> str:
+    """The leg the round is waiting on, in the pinned line's own vocabulary.
+
+    The rule names two values — `sweep reader` and `drive leg` — and the line is pinned
+    to that shape so a reader can tell an absorbed firing from a quiet tick.
+
+    ⚠️ **The digest path is READ, not recomputed.** `commands/steps/confirm-candidates.md`
+    states the repo rule: never rebuild a payload path from the round stamp, because a
+    recomputed template names a file that does not exist. The receipt records the path the
+    sweep actually wrote (`--record --step digest --path`), so that record is the first
+    answer; the epoch-stem guess is only a fallback for a round that recorded nothing.
+    """
+    fields = d.get("fields") or {}
+    recorded = fields.get("digest") if isinstance(fields, dict) else None
+    if isinstance(recorded, str) and recorded and os.path.exists(recorded):
+        return "drive leg"
+    if not recorded:
+        guessed = leg_payload_path(started, "digest")
+        if guessed and os.path.exists(guessed):
+            return "drive leg"
+    return "sweep reader"
+
+
+def round_lapsed(s: str, started) -> bool:
+    """Whether the open round is older than its own limit — the dead-delegate signal.
+
+    A round whose delegate was killed with its turn can never hand back, so the refusal
+    would otherwise repeat forever with no in-loop way out. Past the limit the round is
+    not *in flight*, it is dead, and the head says so with the recovery it needs.
+    """
+    _started, limit, _basis = window(s, time.time())
+    return bool(limit) and (time.time() - started) > limit
+
+
+def rearm_seconds(s: str) -> int:
+    """The interval the manager will re-arm for, read the way `window()` reads it.
+
+    Deliberately NOT the round's limit: the limit is `period + SLACK` and bounds a round
+    in progress, while the re-arm is the cadence itself. The fallback is the declared
+    15-minute default, the same one `window()` falls back to.
+    """
+    ml = liveness()
+    live = liveness_slug(s)
+    try:
+        with open(ml.resolve(live, "cadence")[0], encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return 900
+
+
+def in_flight_line(topic: str, d: dict, started, s: str) -> str:
+    """The pinned ABSORBED line, built here so its shape cannot drift into prose."""
+    return (f"ABSORBED  {topic}  in flight: {leg_in_flight(d, started)}  "
+            f"re-armed {rearm_seconds(s)}s")
+
+
+def handback(topic: str, branch: str = "", text: str = "") -> int:
+    """Write the round's hand-back file — the delegate's completion signal.
+
+    ⚠️ **The round id is taken from the receipt, never from the caller.** The file must
+    carry exactly the stem `--finish` and `--start` compute, so the naming lives in one
+    place: a caller that formats its own id from a digest stamp produces a file the gate
+    never looks for, and the round reads as in flight forever.
+
+    Refused, not invented, when no round is open — a hand-back names the round it ends.
+    """
+    s = slug(topic, branch)
+    d = read_receipt(s)
+    started = round_started(d)
+    if started is None:
+        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    p = handback_path(started)
+    try:
+        write_atomic_at(p, text if text.endswith("\n") else text + "\n")
+    except OSError as exc:
+        # ⚠️ **This write is the delegate's LAST step, so it must not traceback.** An
+        # unwritable store would otherwise kill the delegate after its payloads and
+        # before its hand-back — the exact wedge the hand-back exists to prevent — with
+        # a stack trace instead of a reason.
+        print(f"cannot write the hand-back at {p}: {exc}", file=sys.stderr)
+        return 2
+    print(p)
+    return 0
 
 
 # --- the debt -----------------------------------------------------------------
@@ -1017,11 +1189,49 @@ def start(topic: str, branch: str = "") -> int:
     # `previous_round_started_at → previous_round_ended_at` the one window that IS a
     # completed round, mirroring the start pair exactly.
     previous = read_receipt(s)
+    # ⚠️ **THE IN-FLIGHT GATE — the round's head, not its readings.** A firing that lands
+    # while the previous round is still running must take no reading and dispatch
+    # nothing (`commands/steps/round-readings.md`), and until this refusal the only
+    # instrument was the receipt, which reports an over-budget round as a FAILURE — a
+    # verdict the manager acted on by closing it. Measured 2026-11-18: round
+    # `1795010135` was `--finish`ed at 15:07:41 and its successor dispatched at 15:08:37
+    # while the first delegate ran until 15:22.
+    #
+    # The predicate, and nothing else: an open receipt (`round_started_at`, no
+    # `round_ended_at`) whose delegate left no hand-back file is IN FLIGHT. A forced
+    # close (`forced_finish`) is a deliberate record that the delegate is gone, so it is
+    # not in flight — that is the only recovery from a delegate that died mid-round.
+    started = round_started(previous)
+    if (branch == "fleet"
+            and started is not None and not previous.get("round_ended_at")
+            and not previous.get("forced_finish")
+            and not handback_present(started)):
+        # The line is printed HERE, not by the manager, because the rule pins its shape
+        # and a model paraphrasing it is a model that can soften an absorbed tick into a
+        # quiet one.
+        print(in_flight_line(topic, previous, started, s))
+        # ⚠️ **Past its own limit the round is dead, not in flight — and the head must
+        # say how to close it.** A delegate killed with its turn never writes a hand-back,
+        # so without this the refusal repeats forever and the only recovery (`--finish
+        # --force`) sits in a tail the loop can no longer reach.
+        if round_lapsed(s, started):
+            print(f"LAPSED  {topic}  round open {int(time.time() - started)}s, past its "
+                  f"limit — close it: --finish --branch fleet --force --reason "
+                  f"\"delegate gone\"")
+        return EXIT_IN_FLIGHT
     d = {"topic": topic, "round_started_at": time.time(), "fields": {}}
     if previous.get("round_ended_at"):
         # the round that just finished is the window to carry
         d["previous_round_started_at"] = previous["round_started_at"]
         d["previous_round_ended_at"] = previous["round_ended_at"]
+    elif started is not None and branch == "fleet" and handback_present(started):
+        # ⚠️ **An open round that DID hand back is over, and its end is the hand-back's
+        # mtime.** Its delegate returned, the tail never ran, so the receipt holds no
+        # `round_ended_at` — and carrying only the start would leave the round
+        # unmeasurable, the exact defect `--finish` exists to prevent. The file's mtime is
+        # the round's last write, which is the end a reader wants.
+        d["previous_round_started_at"] = started
+        d["previous_round_ended_at"] = os.path.getmtime(handback_path(started))
     elif previous.get("previous_round_ended_at"):
         # ⚠️ **An abandoned round must not destroy the last completed window.** A round
         # that is `--start`ed and never `--finish`ed replaces a receipt that still holds
@@ -1036,7 +1246,7 @@ def start(topic: str, branch: str = "") -> int:
     return 0
 
 
-def finish(topic: str, branch: str = "") -> int:
+def finish(topic: str, branch: str = "", force: bool = False, reason: str = "") -> int:
     """Close the round: stamp `round_ended_at` on the receipt.
 
     ⚠️ **The end is what makes a round measurable, and its absence is not a detail.**
@@ -1049,12 +1259,43 @@ def finish(topic: str, branch: str = "") -> int:
     is the round.
 
     Refused, not invented, when no round is open: an end with no start names nothing.
+
+    ⚠️ **And refused when the round's delegate has not handed back.** This is the second
+    half of the 2026-11-18 defect: `--check` reported the live round as `INCOMPLETE`
+    (over its window), the manager ran `--finish`, and the round was stamped closed
+    while its delegate kept running for another 14 minutes — so the receipt recorded a
+    window 15 minutes shorter than the round. An over-budget round is not a failed
+    round, and `--finish` is not the instrument that decides it. The hand-back file
+    `<round>.round` is the signal; absent it, this refuses and names the path.
+
+    `force` closes a round whose delegate is GONE (a crashed or killed turn) and requires
+    a non-empty `reason`, which is recorded on the receipt as `forced_finish`. It exists
+    so the refusal cannot wedge the loop forever, and it is deliberately not the default:
+    a forced close is a statement a reader can audit, never a silent one.
     """
     s = slug(topic, branch)
     d = read_receipt(s)
-    if not d.get("round_started_at"):
+    started = round_started(d)
+    if started is None:
         print(f"no round in progress for {s} — run --start first", file=sys.stderr)
         return 2
+    # ⚠️ **`force` is validated and recorded WHATEVER the hand-back says.** Leaving it
+    # inside the absent-hand-back branch silently discarded both the reason and the
+    # record on a round that had already handed back — a forced close that looked
+    # ordinary and left nothing to audit.
+    if force:
+        if not reason.strip():
+            print("--force needs --reason: a forced close is recorded on the receipt",
+                  file=sys.stderr)
+            return 2
+        d["forced_finish"] = {"at": time.time(), "reason": reason.strip()}
+        print(f"{SENTINEL} — forced close: {reason.strip()}", file=sys.stderr)
+    elif not handback_present(started) and branch == "fleet":
+        print(f"{SENTINEL} — refused: hand-back — no {handback_path(started)}; "
+              f"the delegate has not returned, so this round is in flight, not "
+              f"over. Close a round whose delegate is GONE with "
+              f"--finish --branch fleet --force --reason \"<why>\"", file=sys.stderr)
+        return EXIT_IN_FLIGHT
     d["round_ended_at"] = time.time()
     write_atomic(path(s), json.dumps(d) + "\n")
     print(f"finished {s}")
@@ -1703,8 +1944,14 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--start", action="store_true", help="begin a round (manager, tick head)")
     mode.add_argument("--finish", action="store_true",
-                      help="close the round: stamp round_ended_at (manager, round tail)")
+                      help="close the round: stamp round_ended_at (manager, round tail); "
+                           "refuses with exit 13 while the round is in flight (no "
+                           "<round>.round hand-back)")
     mode.add_argument("--record", action="store_true", help="record a step's artifact")
+    mode.add_argument("--handback", action="store_true",
+                      help="fleet only: write the round's `<round>.round` hand-back file "
+                           "(the delegate's completion signal) and print its path; the "
+                           "round id comes from the receipt, never from the caller")
     mode.add_argument("--check", action="store_true", help="validate the round (manager, tail)")
     mode.add_argument("--debt", action="store_true",
                       help="print the open debt; exits 12 while any step is unpaid, 0 when clear")
@@ -1763,6 +2010,14 @@ def main() -> int:
                          "never reaches the state slug, so it cannot orphan a receipt")
     ap.add_argument("--step", choices=ALL_STEPS)
     ap.add_argument("--path", help="the artifact the step produced")
+    ap.add_argument("--force", action="store_true",
+                    help="with --finish --branch fleet: close a round whose delegate is "
+                         "GONE (crashed turn). Needs --reason; the close is recorded on "
+                         "the receipt as forced_finish")
+    ap.add_argument("--reason", help="with --finish --force: why the round is closed "
+                                     "without a hand-back")
+    ap.add_argument("--text", default="",
+                    help="with --handback: the file's body (a one-line summary)")
     ap.add_argument("--only", action="append", choices=FLEET_STEPS, metavar="STEP",
                     help="with --debt: gate only on this step (repeatable). The debt "
                          "file still records every owed step; only the exit code and "
@@ -1833,10 +2088,24 @@ def main() -> int:
         if not a.outcome:
             ap.error("--record-outcome needs --outcome")
         return record_outcome(subject, a.goal, a.outcome, a.verdict or "")
+    if a.handback:
+        if a.branch != "fleet":
+            ap.error("--handback is fleet-only: only the fleet round reads the hand-back "
+                     "file, so a goal/topic write here would be a dead artifact. "
+                     "Pass --branch fleet.")
+        return handback(subject, a.branch, a.text)
     if a.start:
         return start(subject, a.branch)
     if a.finish:
-        return finish(subject, a.branch)
+        # `--force`/`--reason` are fleet-only for the same reason `--abandon` is: the
+        # hand-back refusal exists for the fleet round, and a goal/topic receipt that
+        # accepted a forced close would record a reason nothing reads.
+        if (a.force or a.reason) and a.branch != "fleet":
+            ap.error("--force/--reason are fleet-only: only the fleet round writes a "
+                     "hand-back. Pass --branch fleet.")
+        if a.reason and not a.force:
+            ap.error("--reason is the forced close's record; it needs --force")
+        return finish(subject, a.branch, force=a.force, reason=a.reason or "")
     if not a.step or not a.path:
         ap.error("--record needs --step and --path")
     return record(subject, a.branch, a.step, a.path)

@@ -129,4 +129,11 @@ esac
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --finish --subject "Fleet Manager" --branch fleet
   ```
 
+  ⚠️ **Exit 13 means the round is still IN FLIGHT, not broken.** `--finish` refuses while the delegate has left no `~/.claude/state/fleet-handback/<round>.round` hand-back: an over-budget `--check` verdict is not a failed round, and stamping it closed is exactly how the 2026-11-18 overlap was made (round `1795010135` closed at 15:07:41 while its delegate ran until 15:22, recording a window 15 minutes short). On exit 13, **do not close it and do not start another** — the round's delegate is still running; end the turn and let the next firing's `--start` absorb it. ⚠️ **A round whose delegate is GONE** (killed with its turn, so no hand-back will ever arrive) is closed deliberately, and the reason is recorded on the receipt:
+
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --finish --subject "Fleet Manager" --branch fleet --force --reason "<why the delegate is gone>"
+  ```
+
+  ⚠️ **`--force` is a statement, never a shortcut.** It is the only way past the refusal, it prints `INCOMPLETE ROUND — forced close: <reason>` on stderr, and the reason lands in the receipt's `forced_finish` — so a reader can always tell a round that ended from one that was declared over.
   ⚠️ **Without this the round has no end, and every consumer infers one.** A receipt carrying only `round_started_at` forces a measurement to bound the round by the next fire or the first closer, and each charges unrelated work to it: measured 2026-11-18 on one transcript, **75.4 KB** by the next fire, **8.3 KB** by the first closer, **233.1 KB** after the delegate under the same closer rule — three answers from one dataset, none of them the round. `round_started_at → round_ended_at` is the only window that is the round. ⚠️ **It runs last, after every leg and the `--check`**, because it closes the window the measurement reads; stamping it earlier would exclude the round's own tail.
