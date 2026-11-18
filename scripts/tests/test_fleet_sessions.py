@@ -30,6 +30,7 @@ import importlib.util
 import io
 import json
 import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -347,6 +348,47 @@ class CountsRestOnSpawnedAt(unittest.TestCase):
         self.assertIn("spawned_at", count_body)
         self.assertNotIn("status", count_body)
         self.assertNotIn("ended_at", count_body)
+
+
+class VaultWalkDegrades(unittest.TestCase):
+    """An UNREADABLE vault must not take the caller down with it.
+
+    ⚠️ Measured 2026-11-18: the exit-observer keeper runs as a launchd job, which holds no
+    TCC grant for `~/Documents`, so the walk's first `iterdir()` raised `PermissionError`
+    and **every coverage sweep died before resolving a single pane** — the keeper never
+    re-armed an observer, so the mechanism it exists for could not fire at all. The
+    keeper's own log hid it: it truncates the child's stderr to 400 characters, which cut
+    the traceback before the exception line (630 such failures against 72 successes).
+
+    `vault_index()` in `fleet-board.py` already degrades on the same condition; this walk
+    sits on that very call path and must degrade identically — an unreadable vault costs
+    the board its titles, not the sweep its life.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # `obsidian_dir()` is the PARENT of the vaults, not a vault: the walk iterates it
+        # and then looks for the task dirs one level down.
+        self.obsidian = Path(self.tmp.name) / "Obsidian"
+        self.obsidian.mkdir()
+
+    def test_an_unreadable_root_yields_nothing_instead_of_raising(self):
+        os.chmod(self.obsidian, 0o000)
+        self.addCleanup(os.chmod, self.obsidian, 0o700)
+        with mock.patch.dict(os.environ, {"OBSIDIAN_DIR": str(self.obsidian)}):
+            self.assertEqual(list(fs._walk_task_stamps()), [])
+
+    def test_a_readable_root_still_yields_its_stamps(self):
+        """Control: the degrade must not be 'this walk never returns anything at all'."""
+        tasks = self.obsidian / "a-vault" / "25 Tasks"
+        tasks.mkdir(parents=True)
+        sid = "aaaaaaaa-0000-0000-0000-000000000000"
+        (tasks / "A Task.md").write_text(
+            f"---\nclaude_session_id: {sid}\n---\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"OBSIDIAN_DIR": str(self.obsidian)}):
+            got = [s for s, _f, _t in fs._walk_task_stamps()]
+        self.assertEqual(got, [sid])
 
 
 if __name__ == "__main__":
