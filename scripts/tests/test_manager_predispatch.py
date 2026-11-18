@@ -29,7 +29,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Side effect only: points the start-time cache at an isolated per-run store, in one shared
 # home so five suites cannot each assign the same key and leave only the last standing.
@@ -228,13 +228,20 @@ class Base(unittest.TestCase):
         with open(os.path.join(self.vault, rel), "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def task(self, name, sid="", progress="", goals=None):
-        self.write(
-            "25 Tasks/%s.md" % name,
-            TASK.format(sid=sid, progress=progress).replace(
-                "[[AGoal]]", "[[%s]]" % (goals or "AGoal")
-            ),
+    def task(self, name, sid="", progress="", goals=None, defer=""):
+        text = TASK.format(sid=sid, progress=progress).replace(
+            "[[AGoal]]", "[[%s]]" % (goals or "AGoal")
         )
+        if defer:
+            # A future `defer_date` in the frontmatter, in the quoted shape the vault
+            # writes. Injected into the formatted body rather than the template so every
+            # existing caller keeps its exact bytes.
+            text = text.replace(
+                "claude_session_id: %s\n" % sid,
+                'claude_session_id: %s\ndefer_date: "%s"\n' % (sid, defer),
+                1,
+            )
+        self.write("25 Tasks/%s.md" % name, text)
 
     def registry(self, sid, status="idle"):
         with open(os.path.join(self.m.REGISTRY_DIR, "1.json"), "w") as fh:
@@ -475,6 +482,75 @@ class TestActionablePassThrough(Base):
         self.assertIn("actionable", out)
         self.assertIn("AGoalTask", out)
 
+    def test_a_future_deferred_row_alone_reports_nochange(self):
+        """A future `defer_date` keeps the `ready-to-start` KEY by design.
+
+        The deferred overlay (`agents/goal-sweep-reader.md` § bucket list) repaints the
+        cell and subtracts the row from the OFFER — never from the classification. So the
+        stored bucket set still places the row in `ready-to-start`, `actionable_names`
+        still finds it, and the gate reports CHANGE on every tick for the whole life of
+        the defer while the frozen-tree predicate answers FROZEN on the same tick. The
+        round then starts, both legs gate, and nothing is read or acted on.
+
+        Measured 2026-11-17 on subject `5b29b81a-e7c2-4cca-bd66-2b1b216151aa` (interval
+        900s): `--print` -> `CHANGE digest differs` (exit 10) while `--predicate` ->
+        `FROZEN — newest tracked mtime 3838s ago (window 1800s), 0 open asked-of-you,
+        26 tracked` (exit 0). The subject's only non-terminal content was the row
+        deferred to 2026-11-23.
+
+        The control is `test_a_ready_to_start_row_passes_through_on_an_unchanged_tree`:
+        a ready row with NO defer must still report CHANGE, so a fix that silences the
+        gate wholesale fails there.
+        """
+        self.task("AGoalTask", defer="2099-01-01")
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        # The save's own verdict moves with the fix (CHANGE pre-fix, NOCHANGE after), so
+        # only "the save succeeded" is asserted here; the verdict is the check below.
+        self.assertIn(rc, (self.m.EXIT_NOCHANGE, self.m.EXIT_CHANGE), out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertNotIn("actionable", out)
+
+    def test_a_defer_date_that_has_come_due_is_actionable_again(self):
+        """The subtraction is clock-bound, not a latch.
+
+        A defer whose date has passed is `due`, so the row must report CHANGE on the first
+        tick after it expires — otherwise a stale `defer_date` would silence a row forever,
+        which is the opposite failure from the one this fix closes.
+        """
+        self.task("AGoalTask", defer="2020-01-01")
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("actionable", out)
+
+    def test_an_unparseable_defer_date_keeps_the_row_actionable(self):
+        """The safe direction: an unreadable value must not suppress a dispatch.
+
+        `defer_state` answers `invalid`, and `deferred_names` treats anything that is not
+        `deferred` as actionable — so a malformed date costs a replay, never a suppressed
+        sweep. This is the negative control for the subtraction itself.
+        """
+        self.task("AGoalTask", defer="not-a-date")
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+
     def test_a_waiting_approval_row_keeps_the_saving_on_an_unchanged_tree(self):
         """The row waits on the OPERATOR, not on the loop: it leaves `waiting-approval` only
         through `vault-cli task approve`, which the act leg may not run. Sweeping cannot move
@@ -536,6 +612,310 @@ class TestActionablePassThrough(Base):
             ),
             ["A", "B"],
         )
+
+    def test_actionable_names_cross_checks_the_tracked_set(self):
+        """A stored entry is a snapshot; the tracked set says what can be acted on NOW."""
+        tracked = [
+            {"name": "A", "status": "in_progress"},
+            {"name": "B", "status": "aborted"},
+            {"name": "C", "status": "in_progress", "defer_date": "2099-01-01"},
+        ]
+        self.assertEqual(
+            self.m.actionable_names(
+                {"ready-to-start": ["A", "B", "C", "Gone"]}, tracked
+            ),
+            ["A"],
+        )
+
+    def test_a_terminal_row_in_the_stored_bucket_is_not_actionable(self):
+        """A stored entry naming a row that has since aborted is a snapshot, not work.
+
+        Measured on the live subject: `bucket_sets["ready-to-start"]` still carried an
+        `aborted` row, so the clause stayed true after the future-deferred row was
+        excluded — and a gated round never runs the sweep that would reclassify it.
+        """
+        self.write(
+            "25 Tasks/AGoalTask.md",
+            TASK.format(sid="", progress="").replace(
+                "status: in_progress", "status: aborted", 1
+            ),
+        )
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_a_stored_name_absent_from_the_tracked_set_is_not_actionable(self):
+        """A classification entry for a row that is no longer tracked cannot be opened."""
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "ready-to-start": ["NotATrackedRow"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+
+class TestFrozenSettle(Base):
+    """The SECOND deadlock path: a stale digest on a frozen tree.
+
+    `--print` answers `CHANGE digest differs` because the stored digest predates the last
+    content change, and a gated round never reaches `--save`, so it is never refreshed.
+    `--predicate --persist` settles it on a FROZEN verdict; without the flag the verdict is
+    a pure read and the stale digest survives — the negative control.
+    """
+
+    def age_the_tree(self, seconds=3600):
+        for name in ("ATask", "AGoalTask"):
+            p = os.path.join(self.vault, "25 Tasks", name + ".md")
+            t = time.time() - seconds
+            os.utime(p, (t, t))
+
+    def stale_digest(self, subject="ATopic"):
+        self.save(subject)
+        path = self.m.state_path(subject)
+        rec = json.loads(self.read_state(subject))
+        rec["digest"] = "stale-digest"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def predicate(self, *extra):
+        return self.run_gate("--subject", "ATopic", "--predicate", *extra)
+
+    def test_a_frozen_predicate_with_persist_settles_a_stale_digest(self):
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_without_persist_the_stale_digest_survives(self):
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+        rc, out = self.predicate()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_persist_does_nothing_when_the_verdict_is_not_frozen(self):
+        # A fresh tree is not frozen, so the flag must not touch the record: the legs run
+        # and the sweep's own `--save` writes it.
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.stale_digest()
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+
+    def test_persist_settles_nothing_when_the_record_has_no_table(self):
+        """A record with no stored render cannot be settled — and inventing one would
+        record a table the sweep never produced. The verdict stays FROZEN and exits 0;
+        the record is left exactly as it was."""
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.save("ATopic")
+        path = self.m.state_path("ATopic")
+        rec = json.loads(self.read_state("ATopic"))
+        del rec["table"]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        before = self.read_state("ATopic")
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        self.assertEqual(self.read_state("ATopic"), before)
+        self.assertNotIn("table", json.loads(self.read_state("ATopic")))
+
+    def test_a_change_landing_after_the_render_is_not_frozen(self):
+        """The render-currency conjunct: `quiet` does not prove the table is current.
+
+        A write that landed while the manager was down is older than the window but newer
+        than the render. Settling it away keeps the pre-change table, and the next
+        `--print` compares equal and replays it forever — the change is never swept.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.save("ATopic")  # rendered now
+        # Backdate the record: as if the render predated the newest write.
+        path = self.m.state_path("ATopic")
+        rec = json.loads(self.read_state("ATopic"))
+        rec["recorded_at"] = (
+            datetime.now().astimezone() - timedelta(hours=2)
+        ).isoformat(timespec="seconds")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        # The change landed after that render, and the tree has been quiet since.
+        self.task("AGoalTask", sid="", progress="landed after the render", goals="AGoal")
+        old = time.time() - 3600
+        os.utime(os.path.join(self.vault, "25 Tasks", "AGoalTask.md"), (old, old))
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        self.assertIn("render predates", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_a_parked_flip_on_a_quiet_tree_is_not_frozen(self):
+        """A live<->parked flip moves no mtime and no digest liveness term, but it does
+        change the Status cell the stored table shows. The settle would rewrite the
+        stored `parked` set against that old table and defeat `parked_replay_reason`, so
+        the flip must be part of the FROZEN precondition."""
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
+        sid = "sid-park-under-test"
+        self.task("AGoalTask", sid=sid, goals="AGoal")
+        # No OPEN box: `idle_stuck` would otherwise flip on the park (a parked row is
+        # never stuck), and that flip would move the live half for a reason other than
+        # the parked set this test pins.
+        self.write(
+            "25 Tasks/AGoalTask.md",
+            TASK.format(sid=sid, progress="").replace("- [ ] one", "- [x] one"),
+        )
+        self.registry(sid, status="idle")
+        self.age_the_tree()
+        self.save("ATopic")
+        self.registry(sid, status="waiting")  # the worker now holds a gate
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        self.assertIn("live inputs moved", out)
+
+    def test_a_worker_death_on_a_quiet_tree_is_not_frozen(self):
+        """The settle's third conjunct: a death moves no mtime, so mtime alone would call
+        the tree frozen and settle the digest past it — replaying the stored table over a
+        row whose worker is gone, and never dispatching the sweep that would re-render it.
+
+        The two gates must AGREE here: `--print` sees the digest move (CHANGE), so the
+        predicate has to answer NOT-FROZEN rather than start a round that does nothing.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        # No role map: `is_held` must not shell out to a real WezTerm from a fixture.
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
+        sid = "sid-death-under-test"
+        self.task("AGoalTask", sid=sid, goals="AGoal")
+        self.registry(sid, status="idle")
+        self.age_the_tree()
+        self.save("ATopic")  # recorded while the worker is LIVE
+        os.unlink(os.path.join(self.m.REGISTRY_DIR, "1.json"))
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        self.assertIn("live inputs moved", out)
+        # And nothing was settled: the change is still owed.
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_a_hold_set_on_a_quiet_tree_is_not_frozen(self):
+        """Same shape, the other non-mtime input: a hold landing after the stored sweep."""
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.m.HOLDS_PATH = os.path.join(self.tmp, "holds.json")
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
+        sid = "sid-hold-under-test"
+        self.task("AGoalTask", sid=sid, goals="AGoal")
+        self.registry(sid, status="idle")
+        self.age_the_tree()
+        self.save("ATopic")
+        with open(self.m.HOLDS_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "holds": {sid: {"reason": "operator"}}}, fh)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+
+    def test_a_change_landing_between_the_verdict_and_the_digest_is_still_dispatched(self):
+        """The fail-closed window: the digest must describe the verdict's OWN snapshot.
+
+        A settle that re-reads the tracked set at a later instant than the FROZEN verdict
+        bakes a content change landing in that window into the stored digest, and the
+        next `--print` then compares equal — the change is silently never dispatched, in
+        a gate whose whole purpose is to remove that class of suppression.
+
+        The injection point is the verdict's second conjunct, which runs after the tracked
+        set was read and before the settle writes — in both builds, so the mutation lands
+        exactly in the window rather than in an artefact of the new ordering.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+
+        real = self.m.open_asked_of_you
+        fired = []
+
+        def change_then_ask():
+            if not fired:
+                fired.append(True)
+                self.task(
+                    "AGoalTask", sid="", progress="landed mid-settle", goals="AGoal"
+                )
+                old = time.time() - 3600
+                os.utime(os.path.join(self.vault, "25 Tasks", "AGoalTask.md"), (old, old))
+            return real()
+
+        self.m.open_asked_of_you = change_then_ask
+        try:
+            rc, out = self.predicate("--persist")
+        finally:
+            self.m.open_asked_of_you = real
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        self.assertEqual(fired, [True], "the injection point never ran")
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_settle_reads_the_tracked_set_exactly_once(self):
+        """Mechanism pin for the test above: one read, shared by verdict and digest.
+
+        The behavioural test proves the change is dispatched; this one names why, so a
+        future edit that re-adds a read inside `settle_digest` fails even when it happens
+        to compute the same digest that tick.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+
+        reads = []
+        real = self.m.resolve_tracked
+
+        def counting(vault, members):
+            reads.append(tuple(members))
+            return real(vault, members)
+
+        self.m.resolve_tracked = counting
+        try:
+            rc, out = self.predicate("--persist")
+        finally:
+            self.m.resolve_tracked = real
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(reads), 1, reads)
 
 
 class TestLiveness(Base):
@@ -3626,13 +4006,26 @@ class TestFrozenTree(Base):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"session_id": self.sid, "items": items}, fh)
 
+    def settled(self, seconds=4 * 3600):
+        """Age the tree, then record it — the third conjunct needs a stored sweep.
+
+        The live-input half (`live_digest_of`) is stored by `--save`, so a fixture that
+        never saved has no baseline and the predicate answers NOT-FROZEN by design
+        (fail-open: one sweep). Ageing FIRST is load-bearing — `stuck` is derived from
+        the mtime, so a record written before the ageing would carry a different `stuck`
+        term and make the fixture's own verdict depend on that.
+        """
+        self.age(seconds)
+        self.save("ATopic")
+
     def test_quiet_tree_with_no_open_asks_is_frozen(self):
-        self.age(4 * 3600)
+        self.settled()
         v = self.m.frozen_tree(self.vault, "ATopic")
         self.assertTrue(v["frozen"], v)
+        self.assertTrue(v["live_stable"], v)
 
     def test_a_recently_moved_tracked_file_is_not_frozen(self):
-        self.age(4 * 3600)
+        self.settled()
         self.write("25 Tasks/ATask.md", TASK.format(sid="", progress=""))
         v = self.m.frozen_tree(self.vault, "ATopic")
         self.assertFalse(v["frozen"], v)
@@ -3641,21 +4034,21 @@ class TestFrozenTree(Base):
     def test_an_open_asked_of_you_blocks_the_gate_even_on_a_quiet_tree(self):
         # The conjunct that mtime alone cannot see: the tree is frozen, but a question
         # the operator has not answered is still the manager's live context.
-        self.age(4 * 3600)
+        self.settled()
         self.ledger([{"kind": "asked-of-you", "state": "open", "text": "ship it?"}])
         v = self.m.frozen_tree(self.vault, "ATopic")
         self.assertFalse(v["frozen"], v)
         self.assertEqual(v["open_asks"], ["ship it?"])
 
     def test_a_closed_asked_of_you_does_not_block(self):
-        self.age(4 * 3600)
+        self.settled()
         self.ledger([{"kind": "asked-of-you", "state": "closed", "text": "answered"}])
         self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
 
     def test_other_ledger_kinds_do_not_block(self):
         # Only `asked-of-you` is a question awaiting an answer; `pushed` and `asked-of-me`
         # close on their task file and carry nothing the operator still owes.
-        self.age(4 * 3600)
+        self.settled()
         self.ledger([
             {"kind": "pushed", "state": "open", "text": "filed a task"},
             {"kind": "asked-of-me", "state": "open", "text": "do the thing"},
@@ -3665,8 +4058,25 @@ class TestFrozenTree(Base):
     def test_a_missing_ledger_does_not_block(self):
         # Unreadable is `[]`, never fail-closed: a session that never used the ledger
         # asked the operator nothing, and blocking there would freeze the gate forever.
-        self.age(4 * 3600)
+        self.settled()
         self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
+
+    def test_a_record_without_a_stored_live_digest_is_not_frozen(self):
+        """A record from before the field cannot say the live inputs held — fail-open.
+
+        One sweep, and its own `--save` writes the field; answering FROZEN here would
+        settle a digest over a baseline that was never recorded.
+        """
+        self.age(4 * 3600)
+        self.save("ATopic")
+        path = self.m.state_path("ATopic")
+        rec = json.loads(self.read_state("ATopic"))
+        del rec["live_digest"]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertFalse(v["frozen"], v)
+        self.assertFalse(v["live_stable"], v)
 
 
 if __name__ == "__main__":
