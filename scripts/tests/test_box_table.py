@@ -27,6 +27,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import importlib.util
+import json
 import os
 import unittest
 from unittest import mock
@@ -218,19 +219,17 @@ class TestResolution(unittest.TestCase):
         bt._url_cache.clear()
         self.addCleanup(bt._url_cache.clear)
 
-    def test_both_hops_are_called_and_the_url_is_returned(self):
+    def test_the_pane_comes_from_the_service_and_only_the_link_hop_spawns(self):
         calls = []
 
         def fake_run(argv, **kw):
             calls.append(argv)
-            if "--pane-for" in argv:
-                return mock.Mock(returncode=0, stdout="1642\n")
             return mock.Mock(returncode=0, stdout=URL + "\n")
 
-        self.assertEqual(bt.jump_url("deadbeef", run=fake_run, env={}), URL)
-        self.assertIn("--pane-for", calls[0])
-        self.assertEqual(calls[0][-1], "deadbeef")
-        self.assertEqual(calls[1][-1], "1642")
+        with mock.patch.object(bt, "pane_for", return_value="1642"):
+            self.assertEqual(bt.jump_url("deadbeef", run=fake_run, env={}), URL)
+        self.assertEqual(len(calls), 1, "one spawn: jump-link.py, not the pane hop")
+        self.assertEqual(calls[0][-1], "1642")
 
     def test_a_failed_pane_lookup_returns_none_without_asking_for_a_url(self):
         calls = []
@@ -239,31 +238,60 @@ class TestResolution(unittest.TestCase):
             calls.append(argv)
             return mock.Mock(returncode=1, stdout="")
 
-        self.assertIsNone(bt.jump_url("deadbeef", run=fake_run, env={}))
-        self.assertEqual(len(calls), 1, "no second hop after a failed first")
+        with mock.patch.object(bt, "pane_for", return_value=""):
+            self.assertIsNone(bt.jump_url("deadbeef", run=fake_run, env={}))
+        self.assertEqual(len(calls), 0, "no second hop after a failed first")
 
     def test_a_non_numeric_pane_is_rejected(self):
         def fake_run(argv, **kw):
-            return mock.Mock(returncode=0, stdout="not-a-pane\n")
+            return mock.Mock(returncode=0, stdout=URL + "\n")
 
-        self.assertIsNone(bt.jump_url("deadbeef", run=fake_run, env={}))
+        with mock.patch.object(bt, "pane_for", return_value="not-a-pane"):
+            self.assertIsNone(bt.jump_url("deadbeef", run=fake_run, env={}))
 
     def test_a_subprocess_failure_degrades_rather_than_raising(self):
         def fake_run(argv, **kw):
             raise OSError("wezterm unreachable")
 
-        self.assertIsNone(bt.jump_url("deadbeef", run=fake_run, env={}))
+        with mock.patch.object(bt, "pane_for", return_value="1642"):
+            self.assertIsNone(bt.jump_url("deadbeef", run=fake_run, env={}))
 
     def test_resolution_is_cached_per_session(self):
         calls = []
 
         def fake_run(argv, **kw):
             calls.append(argv)
-            return mock.Mock(returncode=0, stdout="1642\n" if "--pane-for" in argv else URL)
+            return mock.Mock(returncode=0, stdout=URL + "\n")
 
-        bt.jump_url("deadbeef", run=fake_run, env={})
-        bt.jump_url("deadbeef", run=fake_run, env={})
-        self.assertEqual(len(calls), 2, "one resolution, not two")
+        with mock.patch.object(bt, "pane_for", return_value="1642"):
+            bt.jump_url("deadbeef", run=fake_run, env={})
+            bt.jump_url("deadbeef", run=fake_run, env={})
+        self.assertEqual(len(calls), 1, "one resolution, not two")
+
+    def test_an_ambiguous_prefix_resolves_to_nothing(self):
+        """Two sessions sharing a prefix are not interchangeable — never guess."""
+        payload = {"sessions": [
+            {"session_id": "deadbeef-1", "pane": "10"},
+            {"session_id": "deadbeef-2", "pane": "11"},
+        ]}
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(bt.pane_for("deadbeef"), "")
+
+    def test_a_single_match_resolves_its_pane(self):
+        payload = {"sessions": [
+            {"session_id": "deadbeef-1", "pane": "10"},
+            {"session_id": "cafebabe-2", "pane": "11"},
+        ]}
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(bt.pane_for("deadbeef"), "10")
+
+    def test_an_unreadable_service_resolves_to_nothing(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            self.assertEqual(bt.pane_for("deadbeef"), "")
 
     def test_child_env_adds_the_wezterm_directory_when_it_exists(self):
         """The launchd gate host has no WezTerm on PATH — measured 2026-09-24."""
