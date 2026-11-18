@@ -37,13 +37,15 @@ that will be pasted into a git-tracked file.
 import json, os, re, subprocess, sys, unicodedata
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-WHO_NEEDS_ME = os.path.join(_HERE, "who-needs-me.py")
 JUMP_LINK = os.path.join(_HERE, "jump-link.py")
 
-# Where WezTerm lives when it is not on PATH. The detached gate host runs under
-# launchd with a PATH that omits it (com.bborbe.sweep-gate-notify.plist), and there
-# `who-needs-me.py --pane-for` fails with "WezTerm pane list unreadable" — measured
-# 2026-09-24. Appending this to the child's PATH makes resolution work on that host
+# Where WezTerm lives when it is not on PATH. ⚠️ **The pane hop no longer spawns a
+# script** (it asks the service, `pane_for`), so this entry is now inert for that
+# call; it is kept because `jump-link.py` is still a child and removing a PATH entry
+# is a behaviour change nobody has measured. The original reason stands on record:
+# the detached gate host runs under launchd with a PATH that omits WezTerm
+# (com.bborbe.sweep-gate-notify.plist), and the old `who-needs-me.py --pane-for`
+# spawn failed there with "WezTerm pane list unreadable" — measured 2026-09-24. Appending this to the child's PATH makes resolution work on that host
 # without touching either sibling script, both of which call a bare `wezterm` and
 # are outside this script's remit. Only appended when the directory exists, so a
 # host without WezTerm degrades to plain text exactly as it would anyway.
@@ -104,13 +106,49 @@ def child_env():
 _url_cache = {}
 
 
+def pane_for(sid8, endpoint=None, timeout=15):
+    """The live pane for a sessionId prefix, or "" — the endpoint's answer, no spawn.
+
+    ⚠️ **An ambiguous prefix resolves to "" rather than the first match**, the rule
+    `who-needs-me.py --pane-for` states: two sessions sharing a prefix are not
+    interchangeable, and a guessed pane links the operator to the wrong tab. A failed
+    read is "" too, which is what keeps a dead link impossible.
+    """
+    import urllib.request
+
+    base = (
+        endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080"
+    ).rstrip("/")
+    try:
+        with urllib.request.urlopen(
+            base + "/api/1.0/who-needs-me", timeout=timeout
+        ) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    hits = [
+        str(row.get("pane")).strip()
+        for row in (payload.get("sessions") or [])
+        if isinstance(row, dict)
+        and str(row.get("session_id") or "").startswith(sid8)
+        and str(row.get("pane") or "").strip()
+    ]
+    return hits[0] if len(hits) == 1 else ""
+
+
 def jump_url(sid8, run=subprocess.run, env=None):
     """The jump URL for a sessionId prefix, or None when nothing resolves.
 
-    Two hops, because neither script does both: `who-needs-me.py --pane-for` turns
-    the prefix into a live pane — the only sound join, since the session registry
-    carries no pane field and a title join breaks on `/rename` — and `jump-link.py`
-    turns a pane into the URL the jump server accepts.
+    Two hops, because neither side does both: `pane_for` asks the service for the live
+    pane — the only sound join, since the session registry carries no pane field and a
+    title join breaks on `/rename` — and `jump-link.py` turns a pane into the URL the
+    jump server accepts.
+
+    ⚠️ **The pane hop used to spawn `who-needs-me.py --pane-for`** (changed 2026-11-18):
+    a fresh interpreter per row per render, for an answer the `attention-controller`
+    already holds. The spawn is gone; `jump-link.py` is a separate concern and stays.
 
     Every failure returns None rather than raising, so a cell that cannot be linked
     renders as the plain text it was before this existed. That is also what makes a
@@ -123,10 +161,8 @@ def jump_url(sid8, run=subprocess.run, env=None):
     env = child_env() if env is None else env
     url = None
     try:
-        pane = run([sys.executable, WHO_NEEDS_ME, "--pane-for", sid8],
-                   capture_output=True, text=True, timeout=15, env=env)
-        pane_id = (pane.stdout or "").strip()
-        if pane.returncode == 0 and pane_id.isdigit():
+        pane_id = pane_for(sid8)
+        if pane_id.isdigit():
             link = run([sys.executable, JUMP_LINK, pane_id],
                        capture_output=True, text=True, timeout=15, env=env)
             out = (link.stdout or "").strip()
