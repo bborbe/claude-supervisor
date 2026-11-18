@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.343.0
 
 - feat: **a round now records where it ENDED, so a round can be measured instead of inferred.** `manager-receipt.py --finish` stamps `round_ended_at` on the receipt, and the fleet round's tail runs it last; `round-context-delta.py --receipt` then measures `round_started_at -> round_ended_at` exactly. ⚠️ **The absence of an end was not a detail — it was the whole defect.** With only a start, every consumer invents the end: measured 2026-11-18 on ONE transcript, bounding a round by the next fire gave **75.4 KB**, by the first closer **8.3 KB**, and after the delegate under the same closer rule **233.1 KB** — three answers from one dataset, none of them the round. Fire→fire charges every unrelated turn between rounds; fire→first-closer charges everything up to whichever closer comes first. ⚠️ **`--finish` refuses when no round is open** rather than inventing an end, and `--receipt` exits 2 on a receipt with no `round_ended_at`, naming `--finish` — a missing end is reported, never approximated. The inferred modes stay for transcripts recorded before this change, and their docstrings now say they are inference. Change set: `scripts/manager-receipt.py`, `scripts/round-context-delta.py`, `commands/steps/fleet-round-tail.md`, `scripts/tests/test_round_context_delta.py`, `CHANGELOG.md`.
 
