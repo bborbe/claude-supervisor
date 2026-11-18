@@ -122,6 +122,40 @@ def has_live_spawn(lines, alive):
     return False
 
 
+def resolve_pane_by_session(session_id, records, alive):
+    """The pane whose record carries `session_id`, or `None`.
+
+    ⚠️ **A title match is the only join `resolve_pane()` has, and it breaks whenever a tab is
+    retitled or a session is renamed** — measured 2026-11-18: all eight live manager rows
+    resolved to `None`, so every one landed in `unknown` carrying no `pane`, and the keeper
+    built an EMPTY watch set. `unrecorded: 0` then read as "all healthy" while nothing was
+    being checked at all. The store already holds this join — each record line carries
+    `session=` — so fall back to it rather than reporting the pane unresolvable.
+
+    Prefers a pane with a live spawn line (the current run of that pane). Pane ids are
+    reused, so a session id can survive in an earlier pane's log: with more than one
+    candidate the newest record wins, and an unbreakable tie resolves to `None` rather than
+    a guess — the same discipline `resolve_pane()` uses.
+    """
+    if not session_id:
+        return None
+    hits = [pane for pane, lines in records.items()
+            if any(field(line, "session") == session_id for line in lines)]
+    if not hits:
+        return None
+    live = [pane for pane in hits if has_live_spawn(records[pane], alive)]
+    pool = live or hits
+    if len(pool) == 1:
+        return pool[0]
+    newest = {pane: last_seen(records[pane], alive) for pane in pool}
+    stamps = [stamp for stamp in newest.values() if stamp is not None]
+    if not stamps:
+        return None
+    top = max(stamps)
+    winners = [pane for pane, stamp in newest.items() if stamp == top]
+    return winners[0] if len(winners) == 1 else None
+
+
 HEARTBEAT_STALE_SECONDS = 45
 """How old a writer's last evidence may be before its pane counts as UNRECORDED.
 
@@ -195,17 +229,30 @@ def coverage(managers, panes, records, alive, stale=None):
 
     `stale` is `stale_panes()`'s `{pane: age_seconds}`: a pane with a live spawn line but a
     silent writer is unrecorded too, and its line says which of the two failures it is.
+
+    ⚠️ **`recorded` is not decoration — it is the keeper's watch list.** A response that
+    watches only the panes already reported broken can never see the FIRST death: the
+    healthy pane it would have to notice is not in its set. Measured 2026-11-18 — the keeper's
+    watch set was empty while eight manager panes carried live writers, so a kill inside any
+    60 s window would have gone unnoticed until the next 600 s sweep. Every resolved, covered
+    pane is therefore reported too, and the caller decides what to watch.
     """
-    unrecorded, unknown = [], []
+    unrecorded, unknown, recorded = [], [], []
     stale = stale or {}
     for sid in sorted(managers):
         name = managers[sid]
         pane = resolve_pane(name, panes)
         if pane is None:
+            # ⚠️ A manager whose tab was retitled is still a manager with a pane. Without
+            # this fallback it lands in `unknown` with no `pane`, and every consumer that
+            # keys on `pane` — the keeper's watch set above all — silently watches nothing.
+            pane = resolve_pane_by_session(sid, records, alive)
+        if pane is None:
             unknown.append({"session_id": sid, "name": name})
             continue
         age = stale.get(str(pane))
         if has_live_spawn(records.get(str(pane), []), alive) and age is None:
+            recorded.append({"session_id": sid, "name": name, "pane": str(pane)})
             continue
         reason = ("runs with a silent exit recorder (last heartbeat %d s old)" % age
                   if age is not None else
@@ -219,7 +266,7 @@ def coverage(managers, panes, records, alive, stale=None):
                 "its death would leave no record"
             ),
         })
-    return {"unrecorded": unrecorded, "unknown": unknown}
+    return {"unrecorded": unrecorded, "unknown": unknown, "recorded": recorded}
 
 
 def unknown_line(result):

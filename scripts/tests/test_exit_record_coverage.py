@@ -207,6 +207,51 @@ class TestLiveCoverage(unittest.TestCase):
         self.assertEqual(len(out["unrecorded"]), 1)
 
 
+class TestSessionJoin(unittest.TestCase):
+    """A retitled tab must not make its manager unresolvable.
+
+    ⚠️ Measured 2026-11-18: the title join resolved **all eight** live manager rows to
+    `None`, so each landed in `unknown` carrying no `pane`. The keeper builds its watch set
+    from the rows that DO carry a pane, so it watched nothing at all — and `unrecorded: 0`
+    then read as "all healthy" while no pane was being checked. The store already holds the
+    join in every record line's `session=` field; these tests pin that fallback.
+    """
+
+    SID = "aaaaaaaa-0000"
+    # No title here names the manager, so `resolve_pane()` cannot help.
+    NO_TITLE = {"3": "✳ Something Else Entirely"}
+
+    def test_a_retitled_tab_resolves_by_session_and_reads_unrecorded(self):
+        """The SC1 shape: a dead writer on a retitled tab is `unrecorded`, never `unknown`."""
+        out = erc.coverage(MGR, self.NO_TITLE, {"7": [spawn(DEAD, session=self.SID)]}, alive)
+        self.assertEqual(len(out["unknown"]), 0)
+        self.assertEqual(len(out["unrecorded"]), 1)
+        self.assertEqual(out["unrecorded"][0]["pane"], "7")
+
+    def test_a_live_writer_on_a_retitled_tab_is_recorded(self):
+        lines = [spawn(LIVE, session=self.SID), heartbeat(pid=LIVE)]
+        out = erc.coverage(MGR, self.NO_TITLE, {"7": lines}, alive)
+        self.assertEqual((out["unknown"], out["unrecorded"]), ([], []))
+
+    def test_a_session_in_no_record_stays_unknown(self):
+        """The control: the fallback must not invent a pane for a session the store never saw."""
+        out = erc.coverage(MGR, self.NO_TITLE, {"7": [spawn(LIVE, session="bbbbbbbb-0000")]},
+                           alive)
+        self.assertEqual(len(out["unknown"]), 1)
+        self.assertEqual(out["unrecorded"], [])
+
+    def test_two_panes_carrying_one_session_resolve_to_none(self):
+        """Pane ids are reused, so an id can survive in an old pane's log. A tie is not a guess."""
+        records = {"7": [spawn(LIVE, session=self.SID)],
+                   "8": [spawn(LIVE, session=self.SID)]}
+        self.assertIsNone(erc.resolve_pane_by_session(self.SID, records, alive))
+
+    def test_the_newest_record_wins_when_one_carries_a_live_spawn(self):
+        records = {"7": [spawn(DEAD, session=self.SID, stamp="2026-11-02T09:00:00Z")],
+                   "8": [spawn(LIVE, session=self.SID)]}
+        self.assertEqual(erc.resolve_pane_by_session(self.SID, records, alive), "8")
+
+
 class TestNarrowedStoreRead(unittest.TestCase):
     """`read_records()` opens only the panes that resolved — not the whole store.
 
