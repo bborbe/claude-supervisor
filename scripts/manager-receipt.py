@@ -626,21 +626,28 @@ def in_flight_line(topic: str, d: dict, started, s: str) -> str:
             f"re-armed {rearm_seconds(s)}s")
 
 
-def handback(topic: str, branch: str = "", text: str = "") -> int:
-    """Write the round's hand-back file — the delegate's completion signal.
+def handback(topic: str, branch: str = "", text: str = "", round_id=None) -> int:
+    """Write a round's hand-back file — the delegate's completion signal.
 
-    ⚠️ **The round id is taken from the receipt, never from the caller.** The file must
-    carry exactly the stem `--finish` and `--start` compute, so the naming lives in one
-    place: a caller that formats its own id from a digest stamp produces a file the gate
-    never looks for, and the round reads as in flight forever.
+    ⚠️ **The round id comes from the DELEGATE, never from the current receipt.** Reading
+    it from the receipt was the first cut's defect: a delegate that outlives a forced
+    close would then write its *successor's* `<round>.round`, and the successor's tail
+    would find a hand-back and close early — recording a window far shorter than the
+    round it names. The id in `<inputs>` is the delegate's own round, so it is the only
+    correct source.
 
-    Refused, not invented, when no round is open — a hand-back names the round it ends.
+    Refused, not invented, when the id is missing or not a number: a hand-back names the
+    round it ends.
     """
     s = slug(topic, branch)
-    d = read_receipt(s)
-    started = round_started(d)
-    if started is None:
-        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+    if round_id is None:
+        print("--handback needs --round: the delegate's own round id from <inputs>",
+              file=sys.stderr)
+        return 2
+    try:
+        started = float(round_id)
+    except (TypeError, ValueError):
+        print(f"--round must be the numeric round id, got {round_id!r}", file=sys.stderr)
         return 2
     p = handback_path(started)
     try:
@@ -1215,9 +1222,15 @@ def start(topic: str, branch: str = "") -> int:
         # so without this the refusal repeats forever and the only recovery (`--finish
         # --force`) sits in a tail the loop can no longer reach.
         if round_lapsed(s, started):
+            # ⚠️ **Age alone does NOT mean the delegate is gone.** The incident's own
+            # round ran 1 586 s against a 450 s limit with its delegate ALIVE, so a
+            # force-close offered purely on age would reproduce the very overlap this
+            # gate exists to prevent. The line therefore states the condition and leaves
+            # the judgement to the caller, who can check whether the turn is gone.
             print(f"LAPSED  {topic}  round open {int(time.time() - started)}s, past its "
-                  f"limit — close it: --finish --branch fleet --force --reason "
-                  f"\"delegate gone\"")
+                  f"limit, no hand-back — if the delegate's turn is GONE close it with "
+                  f"--finish --branch fleet --force --reason \"<why>\"; if it may still "
+                  f"be running, keep absorbing and raise it to the operator")
         return EXIT_IN_FLIGHT
     d = {"topic": topic, "round_started_at": time.time(), "fields": {}}
     if previous.get("round_ended_at"):
@@ -2018,6 +2031,9 @@ def main() -> int:
                                      "without a hand-back")
     ap.add_argument("--text", default="",
                     help="with --handback: the file's body (a one-line summary)")
+    ap.add_argument("--round", help="with --handback: the delegate's OWN round id, taken "
+                                    "from the dispatch inputs — never the current "
+                                    "receipt's, which a stale delegate would mislabel")
     ap.add_argument("--only", action="append", choices=FLEET_STEPS, metavar="STEP",
                     help="with --debt: gate only on this step (repeatable). The debt "
                          "file still records every owed step; only the exit code and "
@@ -2093,7 +2109,7 @@ def main() -> int:
             ap.error("--handback is fleet-only: only the fleet round reads the hand-back "
                      "file, so a goal/topic write here would be a dead artifact. "
                      "Pass --branch fleet.")
-        return handback(subject, a.branch, a.text)
+        return handback(subject, a.branch, a.text, a.round)
     if a.start:
         return start(subject, a.branch)
     if a.finish:

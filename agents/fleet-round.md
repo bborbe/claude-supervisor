@@ -154,18 +154,20 @@ to the payload paths the step files name. You hand back **only** the verdict sum
 
 ```bash
 python3 "$P/manager-receipt.py" --handback --subject "Fleet Manager" --branch fleet \
+  --round "<the round id from <inputs>>" \
   --text "fleet round <round id> — machine half summary"
 ```
 
-⚠️ **Do not format the round id yourself.** The command takes it from the receipt, so the
-file it writes carries exactly the stem `--start` and `--finish` compute. A file named from
-the digest's stamp instead is one the gate never looks for, and the round then reads as in
-flight forever.
+⚠️ **`--round` is the id you were DISPATCHED with, never the current receipt's.** The
+command refuses without it, and that is deliberate: a delegate that outlives a forced close
+would otherwise write its *successor's* hand-back, and the successor's tail would find one
+and close early — recording a window far shorter than the round it names. Your round is the
+one in `<inputs>`; a receipt that has moved on is somebody else's round.
 
 ⚠️ **This file is not decoration — it is what lets the round close.** `manager-receipt.py
 --finish` refuses with exit 13 while it is absent, and the next firing's `--start` treats the
 round as IN FLIGHT and absorbs itself. A delegate that ends without writing it leaves the
-loop wedged until someone forces the close by hand, with a recorded reason.
+loop wedged until someone closes it by hand, with a recorded reason.
 
 ⚠️ **Write it on EVERY ending, including the bad ones** — a full round, a round whose legs
 all came back `not-run`, and the `not-run`-because-a-leg-is-still-running case in

@@ -2438,19 +2438,21 @@ class RoundInFlight(unittest.TestCase):
                   encoding="utf-8") as fh:
             json.dump({"topic": self.topic,
                        "round_started_at": "2026-11-18T14:56:01Z"}, fh)
-        rc, out, err = self.fleet("--handback", "--text", "x")
-        self.assertEqual(rc, 2)
-        self.assertIn("no round in progress", err)
         rc, out, err = self.fleet("--finish")
         self.assertEqual(rc, 2)
         self.assertIn("no round in progress", err)
+        # The producer takes its id from the caller, so it still works on a receipt the
+        # gate cannot read — which is the point: it must never traceback.
+        rc, out, err = self.fleet("--handback", "--round", "1795010135.451426",
+                                  "--text", "x")
+        self.assertEqual(rc, 0)
         # And the head opens a fresh round instead of refusing on an unjudgeable one.
         self.assertEqual(self.start()[0], 0)
 
-    def test_a_lapsed_open_round_names_the_recovery(self):
-        # A delegate killed with its turn can never hand back, so the refusal must say
-        # how to close the round — otherwise the loop is wedged with the only recovery
-        # sitting in a tail it can no longer reach.
+    def test_a_lapsed_open_round_does_not_instruct_an_unconditional_force_close(self):
+        # Age alone does NOT mean the delegate is gone — the incident's own round ran
+        # 1 586 s against a 450 s limit with its delegate ALIVE. A line that said
+        # "close it" would reproduce the overlap this gate exists to prevent.
         self.start()
         rec = self.receipt()
         rec["round_started_at"] = time.time() - 4000
@@ -2461,7 +2463,8 @@ class RoundInFlight(unittest.TestCase):
         self.assertEqual(rc, self.m.EXIT_IN_FLIGHT)
         self.assertIn("ABSORBED", out)
         self.assertIn("LAPSED", out)
-        self.assertIn("--finish --branch fleet --force --reason", out)
+        self.assertIn("if the delegate's turn is GONE", out)
+        self.assertIn("keep absorbing", out)
 
     def test_an_open_round_that_handed_back_carries_its_handback_end(self):
         # Its delegate returned, the tail never ran: the hand-back's mtime IS the end,
@@ -2570,24 +2573,40 @@ class RoundInFlight(unittest.TestCase):
     # --- the producer ----------------------------------------------------------
 
     def test_handback_writes_the_path_the_gate_reads(self):
-        # The whole gate depends on this file's NAME: `--start` and `--finish` both
-        # derive it from the receipt's `round_started_at`, so a producer that formats
-        # its own id from a digest stamp writes a file the gate never looks for and the
-        # round reads as in flight forever.
+        # The gate reads a file NAMED BY THE ROUND ID the delegate was given, so the
+        # producer must write exactly that stem. A file named from anything else is one
+        # the gate never looks for, and the round then reads as in flight forever.
         self.start()
         started = self.receipt()["round_started_at"]
-        rc, out, _ = self.fleet("--handback", "--text", "fleet round — machine half summary")
+        rc, out, _ = self.fleet("--handback", "--round", repr(started),
+                                "--text", "fleet round — machine half summary")
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), self.m.handback_path(started))
         self.assertTrue(os.path.exists(self.m.handback_path(started)))
         # And the gate releases: this is the producer the refusal was waiting on.
         self.assertEqual(self.fleet("--finish")[0], 0)
 
+    def test_handback_uses_the_delegates_own_round_not_the_current_receipt(self):
+        # A delegate that outlives a forced close must NOT release its successor's gate.
+        # Reading the id from the current receipt would write the successor's hand-back
+        # and let its tail close early, recording a window shorter than the round.
+        self.start()
+        first = self.receipt()["round_started_at"]
+        self.fleet("--finish", "--force", "--reason", "delegate gone")
+        self.start()                                   # the successor round
+        successor = self.receipt()["round_started_at"]
+        rc, out, _ = self.fleet("--handback", "--round", repr(first), "--text", "late")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), self.m.handback_path(first))
+        self.assertFalse(os.path.exists(self.m.handback_path(successor)))
+        self.assertEqual(self.fleet("--finish")[0], self.m.EXIT_IN_FLIGHT)
+
     def test_handback_without_a_round_is_refused(self):
+        self.start()
         rc, out, err = self.fleet("--handback", "--text", "nothing to end")
         self.assertEqual(rc, 2)
         self.assertEqual(out, "")
-        self.assertIn("no round in progress", err)
+        self.assertIn("--round", err)
 
     def test_handback_is_fleet_only(self):
         self.cli("--start", "--topic", "Recurring Operator Gates")
