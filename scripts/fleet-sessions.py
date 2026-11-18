@@ -144,13 +144,30 @@ def _walk_task_stamps():
     pat = re.compile(r'claude_session_id:\s*["\']?(' + UUID_RE.pattern + ')')
     known = vault_dirs_from_cli()
     root = obsidian_dir()
-    if not root.is_dir(): return
-    for vault in root.iterdir():
+    try:
+        if not root.is_dir(): return
+        vaults = list(root.iterdir())
+    except OSError:
+        # ⚠️ An UNREADABLE vault is not an empty one, and it must not be fatal. A launchd
+        # job holds no TCC grant for `~/Documents`, so `iterdir()` raises PermissionError
+        # on the first call — measured 2026-11-18, that killed every coverage sweep the
+        # exit-observer keeper ran, so the keeper never resolved a single pane and could
+        # never re-arm an observer. `vault_index()` in `fleet-board.py` already degrades
+        # on the same condition ("a missing `~/Documents/Obsidian` degrades to an empty
+        # index rather than aborting the board"); this reader sits on that very call path
+        # and must degrade identically — an unreadable vault costs the board its titles,
+        # not the sweep its life.
+        return
+    for vault in vaults:
         if not vault.is_dir(): continue
         for sub in known.get(os.path.realpath(vault)) or PROBE_DIRS:
             d = vault / sub
             if not d.is_dir(): continue
-            for f in d.glob("*.md"):
+            try:
+                files = list(d.glob("*.md"))
+            except OSError:
+                continue
+            for f in files:
                 try:
                     text = f.read_text("utf-8", "replace")
                 except Exception:
