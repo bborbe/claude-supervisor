@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.341.0
 
 - feat: **the last two per-tick `who-needs-me.py` spawns are gone: `box-table.py` and `drive-unverifiable.py` resolve a session's pane from the service.** Both called `who-needs-me.py --pane-for <sid8>` — a fresh interpreter per row per render, for an answer the `attention-controller` already holds in its `sessions[]` (`session_id` + `pane`). Each now asks `GET /api/1.0/who-needs-me` in-process. ⚠️ **The ambiguity rule is preserved, not lost with the spawn**: two sessions sharing a prefix resolve to `""`, never the first match — a guessed pane links the operator to the wrong tab. A failed read is `""` too, so a broken service degrades to the plain-text cell it was before links existed, never to a dead link. `box-table` keeps exactly one spawn — `jump-link.py`, a different concern — and its now-unused `WHO_NEEDS_ME` constant is removed. `drive-unverifiable.resolve_pane` keeps its `script` parameter, accepted and ignored, because callers and tests still pass it. Change set: `scripts/box-table.py`, `scripts/drive-unverifiable.py`, `scripts/tests/test_box_table.py`, `scripts/tests/test_drive_unverifiable.py`, `CHANGELOG.md`.
 
