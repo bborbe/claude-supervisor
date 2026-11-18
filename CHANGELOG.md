@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.341.2
 
 - fix: **the `fleet-round` delegate now emits its hand-back fence and nothing else, because it was returning roughly twice the contract.** Measured 2026-11-18 from the six `supervisor:fleet-round` subagent transcripts under a live manager: the returned text was **1 612 / 1 969 / 2 086 / 2 525 / 2 627 bytes** — median **2 086 B against the 1 024 B cap**, every measurable run over. The cause is not the fence, which is 542 B: the delegate wrapped it in a "Final state of this round" table, a per-leg narrative, and a trailing `note:` line ("keepalive (5b) not-run — round hit the 15-min bound"). ⚠️ **`check-handback-size.py` cannot catch this and never claimed to** — it asserts the *authored template*, and its own docstring says it pins the authored shape, not a live round. The contract now states the rule the measurement implies: the hand-back stops at its last count, a leg's `not-run` reason is payload detail, and no prose surrounds the fence. ⚠️ **The fix is behavioural and is verified by re-measuring from the subagent transcripts, not by a static check** — a static check can only assert that the instruction is present. Change set: `agents/fleet-round.md`, `CHANGELOG.md`.
 
