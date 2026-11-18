@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.343.2
 
 - feat: `scripts/flagged-rows.py` emits a new `parked` branch for a row whose last closer declares an external wait (`⏰ Ends:`), read once per run through `declared-wait.py` so there is one definition of "waiting" — the branch sits after every LIVE branch and before `resume`/`create`, so an open session is never counted as waiting and a parked row is never counted absent
 
