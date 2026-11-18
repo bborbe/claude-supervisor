@@ -17,15 +17,23 @@ the resume with `topic-keepalive.py --record-resume`. Running this script perfor
 no open and no cap write, which is what makes it safe for a worker to run as a read-only check.
 
 Population: every goal page that `crashed-managers.py`'s `fleet_keeps` accepts, which means
-`status: in_progress`, `phase: execution`, a `claude_session_id`, and no topic page whose
-`## Goals` list names it. The predicate lives in `crashed-managers.py`, one home, because that
-script must treat the same set as covered. Otherwise it would card a manager this leg has
-just restarted.
+`status: in_progress`, `phase: execution`, a `claude_session_id`, and either no topic page
+whose `## Goals` list names it, or only topics whose own manager reads dead or `cannot-tell`.
+The predicate lives in `crashed-managers.py`, one home, because that script must treat the
+same set as covered. Otherwise it would card a manager this leg has just restarted.
 
-⚠️ **A goal a topic declares is never selected, even while that topic's manager is down.**
-The topic round owns it. The fleet leg restarts the topic manager, and the topic manager
-then restarts the goal manager. Taking the goal here too would make a second keeper, and so
-a second writer.
+⚠️ **A goal a topic declares is selected ONLY when that topic's manager is itself unkept —
+dead (`resume`) or `cannot-tell`.** Otherwise the topic round owns it: the fleet leg restarts
+the topic manager, and the topic manager then restarts the goal manager. Taking the goal here
+too would make a second keeper, and so a second writer.
+
+⚠️ **The exception exists because nothing else covers it.** A topic manager that is dead or
+undecidable is not restarted by any round — the topic leg's `cannot-tell` acts on nothing —
+so every goal manager under it is nobody's population. Measured 2026-11-18 on private-personal:
+`selected=22 actionable=0` from the old guard, and the declaring topic's probe returning
+`cannot-tell  session 6f14c290… → UNKNOWN; an undecidable probe is never death`.
+`topic-keepalive.py`'s `O_EXCL` claim is the double-writer guard for the race that exception
+opens: two writers reading `ABSENT` for one `claude_session_id` cannot both resume it.
 
 Output, one block:
 
@@ -122,13 +130,52 @@ def keepalive():
         raise Refused(str(exc)) from exc
 
 
-def select(vault: str, goals_dir: str, topics_dir: str) -> list[str]:
+#: Topic-manager verdicts that mean no round will restart it, so its declared goals fall to
+#: the fleet tier. `restart` is deliberately absent: that session is live with a lapsed loop,
+#: and § 1 of the same round restarts it, after which the topic round resumes its goals.
+UNKEPT_TOPIC_VERDICTS = ("resume", "cannot-tell")
+
+
+def topic_verdict(vault: str, topics_dir: str, topic: str) -> str:
+    """`topic-keepalive.py --branch topic`'s verdict word for one topic page."""
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out):
+            keepalive().main(["--vault", vault, "--subject", topic, "--branch", "topic",
+                              "--dir", topics_dir])
+    except SystemExit:
+        return "cannot-tell"
+    except Exception:  # noqa: BLE001 — an unreadable topic is undecidable, never dead
+        return "cannot-tell"
+    lines = out.getvalue().splitlines()
+    return lines[0].strip() if lines else "cannot-tell"
+
+
+def unkept_topics(vault: str, topics_dir: str) -> dict[str, str]:
+    """`topic name → verdict` for every topic whose manager no round will restart."""
+    cm = crashed()
+    try:
+        entries = sorted(e[: -len(".md")] for e in cm._listdir(os.path.join(vault, topics_dir))
+                         if e.endswith(".md"))
+    except cm.Refused as exc:
+        raise Refused(str(exc)) from exc
+    out = {}
+    for name in entries:
+        word = topic_verdict(vault, topics_dir, name)
+        if word in UNKEPT_TOPIC_VERDICTS:
+            out[name] = word
+    return out
+
+
+def select(vault: str, goals_dir: str, topics_dir: str,
+           unkept: dict[str, str] | None = None) -> list[str]:
     """The goal names this leg keeps, sorted. Raises Refused on an unreadable directory."""
     cm = crashed()
     try:
         names = sorted(e[: -len(".md")] for e in cm._listdir(os.path.join(vault, goals_dir))
                        if e.endswith(".md"))
-        return [n for n in names if cm.fleet_keeps(vault, n, goals_dir, topics_dir)]
+        return [n for n in names
+                if cm.fleet_keeps(vault, n, goals_dir, topics_dir, set(unkept or {}))]
     except cm.Refused as exc:
         raise Refused(str(exc)) from exc
 
@@ -193,10 +240,18 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         cm._MEMO.clear()  # the memo is per RUN
-        names = select(vault, a.goals_dir, a.topics_dir)
+        unkept = unkept_topics(vault, a.topics_dir)
+        names = select(vault, a.goals_dir, a.topics_dir, unkept)
         rows = []
         for name in names:
             word, reason = verdict(vault, a.goals_dir, name)
+            # The reason carries the declaring topic's own verdict, so a round log shows the
+            # DECISION (why this goal fell to the fleet tier) rather than an inference, and a
+            # leg that hardcoded `cannot-tell` would be caught by a dead-topic fixture.
+            for topic in cm.declaring_topics(vault, name, a.topics_dir):
+                if topic in unkept:
+                    reason = f"declaring topic {topic} reads {unkept[topic]}; {reason}"
+                    break
             rows.append((name, word, command(word, name, session_id(vault, a.goals_dir, name)), reason))
     except (Refused, cm.Refused) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)

@@ -285,6 +285,72 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("resume", out[0])
 
+    # --- the claim guard: the only check that covers a RACE --------------------
+
+    def run_actor(self, flag, sid="sid-1"):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--goal", "A Goal", flag, sid])
+        return rc, out.getvalue().splitlines()
+
+    def test_a_second_writer_cannot_take_the_same_claim(self):
+        # Neither the live check nor the cap refuses this: the session is ABSENT and the cap
+        # allows three. Two rounds racing on one id is exactly the case they miss.
+        self.page()
+        rc1, out1 = self.run_actor("--claim-resume")
+        self.assertEqual(0, rc1)
+        self.assertEqual("claim-taken", out1[0])
+        rc2, out2 = self.run_actor("--claim-resume")
+        self.assertEqual(1, rc2)
+        self.assertEqual("claimed", out2[0])
+        self.assertIn("already claimed", out2[1])
+
+    def test_the_deciding_probe_reports_a_held_claim_and_never_writes(self):
+        self.page()
+        self.run_actor("--claim-resume")
+        rc, out = self.run_keepalive(live="ABSENT")
+        self.assertEqual(1, rc)
+        self.assertEqual("claimed", out[0])
+        # Read-only: a probe that took or released a claim would block the real resume.
+        self.assertTrue(os.path.exists(
+            self.k.claim_path(str(self.vault), "A Goal", "sid-1")))
+
+    def test_a_probe_that_decides_resume_writes_no_claim(self):
+        self.page()
+        rc, out = self.run_keepalive(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+        self.assertFalse(os.path.exists(
+            self.k.claim_path(str(self.vault), "A Goal", "sid-1")))
+
+    def test_a_stale_claim_does_not_block_a_resume(self):
+        # Past CLAIM_TTL the claim is stale: a resume that never landed must not become a
+        # permanent block, which would recreate the gap this guard closes.
+        self.page()
+        self.k.state_path(str(self.vault), "A Goal")  # creates the directory
+        claim = self.k.claim_path(str(self.vault), "A Goal", "sid-1")
+        with open(claim, "w", encoding="utf-8") as fh:
+            fh.write("0")
+        os.utime(claim, (0, 0))
+        rc, out = self.run_keepalive(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+        rc, taken = self.run_actor("--claim-resume")
+        self.assertEqual(0, rc)
+        self.assertEqual("claim-taken", taken[0])
+
+    def test_a_confirmed_resume_releases_its_claim(self):
+        self.page()
+        self.run_actor("--claim-resume")
+        self.k.session_verdict = lambda sid: "LIVE"
+        rc, out = self.run_actor("--record-resume")
+        self.assertEqual(0, rc)
+        self.assertEqual("recorded", out[0])
+        self.assertFalse(os.path.exists(
+            self.k.claim_path(str(self.vault), "A Goal", "sid-1")))
+        rc, again = self.run_keepalive(live="ABSENT")
+        self.assertEqual("resume", again[0])
+
     # --- the write half -------------------------------------------------------
 
     def test_a_resume_that_did_not_take_does_not_arm_the_cap(self):

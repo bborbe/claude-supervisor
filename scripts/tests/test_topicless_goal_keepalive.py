@@ -106,9 +106,12 @@ class LegTest(unittest.TestCase):
         self.goal("Lapsed Goal", "sid-live")
         self.verdicts["sid-live"] = "LIVE"
         self.cadences["Lapsed Goal"] = "STALE"
-        # Exclusion: a topic declares it — the topic round owns it, even with the id ABSENT.
+        # Exclusion: a topic declares it AND that topic's manager is live and armed — the
+        # topic round owns it, even with the goal's own id ABSENT.
         self.goal("Declared Goal", "sid-declared")
         self.verdicts["sid-declared"] = "ABSENT"
+        self.verdicts["topic-sid"] = "LIVE"
+        self.cadences["Some Topic"] = "OK"
         self.topic("Some Topic", ["Declared Goal"])
         # Exclusion: not in execution — no loop runs on it, so it is never resumed.
         self.goal("Backlog Goal", "sid-todo", phase="todo")
@@ -130,6 +133,43 @@ class LegTest(unittest.TestCase):
 
         for absent in ("Declared Goal", "Backlog Goal", "Unopened Goal"):
             self.assertNotIn(absent, out)
+
+    def test_a_declared_goal_is_selected_when_its_topic_manager_is_dead(self):
+        # The gap this leg closes: the topic round cannot keep it (no manager to run that
+        # round), so nobody did. The reason names the DECISION, not an inference.
+        self.goal("Declared Goal", "sid-declared")
+        self.verdicts["sid-declared"] = "ABSENT"
+        self.verdicts["topic-sid"] = "ABSENT"
+        self.cadences["Some Topic"] = "OK"
+        self.topic("Some Topic", ["Declared Goal"])
+        rc, out, _ = self.run_leg()
+        self.assertEqual(rc, 0)
+        rows = self.rows(out)
+        self.assertIn("Declared Goal", rows)
+        self.assertEqual(rows["Declared Goal"][1], "resume")
+        self.assertIn("declaring topic Some Topic reads resume", rows["Declared Goal"][3])
+
+    def test_a_declared_goal_is_selected_when_its_topic_manager_is_cannot_tell(self):
+        # `topic-sid` is deliberately left out of the injected verdicts, so the probe answers
+        # UNKNOWN — an undecidable probe, which Option A rules is not death but still unkept.
+        self.goal("Declared Goal", "sid-declared")
+        self.verdicts["sid-declared"] = "ABSENT"
+        self.topic("Some Topic", ["Declared Goal"])
+        rc, out, _ = self.run_leg()
+        self.assertEqual(rc, 0)
+        rows = self.rows(out)
+        self.assertIn("Declared Goal", rows)
+        self.assertIn("declaring topic Some Topic reads cannot-tell", rows["Declared Goal"][3])
+
+    def test_a_declared_goal_under_a_live_topic_is_never_selected(self):
+        self.goal("Declared Goal", "sid-declared")
+        self.verdicts["sid-declared"] = "ABSENT"
+        self.verdicts["topic-sid"] = "LIVE"
+        self.cadences["Some Topic"] = "OK"
+        self.topic("Some Topic", ["Declared Goal"])
+        rc, out, _ = self.run_leg()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("Declared Goal", out)
 
     def test_jump_and_leave_carry_no_command(self):
         self.goal("Healthy Goal", "sid-ok")

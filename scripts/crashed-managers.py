@@ -319,6 +319,16 @@ def declares(text: str, goal: str) -> bool:
     return False
 
 
+def declaring_topics(vault: str, goal_name: str, topics_dir: str | None = None) -> list[str]:
+    """The topic page names that declare this goal in their `## Goals` section, sorted."""
+    directory = os.path.join(vault, topics_dir or TOPICS_DIR)
+    out = []
+    for entry in _listdir(directory):
+        if entry.endswith(".md") and declares(_read_page(os.path.join(directory, entry)), goal_name):
+            out.append(entry[: -len(".md")])
+    return sorted(out)
+
+
 def topic_declares(vault: str, goal_name: str, topics_dir: str | None = None) -> bool:
     """Does ANY topic page list this goal in its `## Goals` section — live manager or not?
 
@@ -326,12 +336,13 @@ def topic_declares(vault: str, goal_name: str, topics_dir: str | None = None) ->
     *right now*; this asks which tier owns the goal at all. A goal a topic declares belongs to
     that topic's round even while the topic manager is down — the fleet leg restarts the topic
     manager, which then restarts the goal manager. Taking the goal too would be a second keeper.
+
+    ⚠️ **The "never take it" half has one exception, and it is `unkept_topics` on
+    `fleet_keeps`:** when the declaring topic's own manager reads dead or `cannot-tell`, no
+    round will restart it, so the fleet tier takes the goal. `declaring_topics` names the
+    declaring pages so that caller can decide; this predicate still answers only "declared".
     """
-    directory = os.path.join(vault, topics_dir or TOPICS_DIR)
-    for entry in _listdir(directory):
-        if entry.endswith(".md") and declares(_read_page(os.path.join(directory, entry)), goal_name):
-            return True
-    return False
+    return bool(declaring_topics(vault, goal_name, topics_dir))
 
 
 #: The goal state the fleet keep-alive leg keeps. One home: `scripts/topicless-goal-keepalive.py`
@@ -341,12 +352,21 @@ FLEET_KEPT_PHASE = "execution"
 
 
 def fleet_keeps(vault: str, goal_name: str, goals_dir: str | None = None,
-                topics_dir: str | None = None) -> bool:
+                topics_dir: str | None = None,
+                unkept_topics: set[str] | None = None) -> bool:
     """Is this goal's manager kept by the fleet round's topic-less goal leg?
 
     True for a goal page at `status: in_progress` + `phase: execution`, carrying a
     `claude_session_id`, that no topic page declares (`commands/steps/keepalive.md`
-    § Restart a lapsed goal manager whose goal no topic declares).
+    § Restart a lapsed goal manager whose goal no topic declares) — **or** that a topic
+    declares while every declaring topic is named in `unkept_topics`.
+
+    ⚠️ **`unkept_topics` is the one exception to "a declared goal is never selected", and it
+    is the caller's probe, never this predicate's.** The declaring topic's manager reading
+    dead or `cannot-tell` means no round restarts it, so nobody keeps the goal managers under
+    it; the fleet tier takes them. Passing nothing preserves the old answer exactly, which is
+    what keeps a caller that has not probed (the census) from silently widening its own
+    coverage.
 
     ⚠️ **The phase filter is load-bearing, and `topic-keepalive.py` does not apply it.** That
     script reads liveness and cadence only, so it answers `resume` for an ABSENT manager on a
@@ -365,7 +385,10 @@ def fleet_keeps(vault: str, goal_name: str, goals_dir: str | None = None,
         return False
     if not _page_session_id(front):
         return False
-    return not topic_declares(vault, goal_name, topics_dir)
+    declared = declaring_topics(vault, goal_name, topics_dir)
+    if not declared:
+        return True
+    return all(t in (unkept_topics or set()) for t in declared)
 
 
 def session_state(sid: str) -> str:
