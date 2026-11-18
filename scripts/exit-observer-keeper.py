@@ -132,6 +132,11 @@ def sweep(now):
     except OSError as exc:
         print(f"exit-observer-keeper: sweep could not start: {exc}", file=sys.stderr)
         return None
+    except ValueError as exc:
+        # `text=True` decodes as it reads, and a non-UTF-8 byte raises UnicodeDecodeError —
+        # itself a ValueError — from inside the call rather than from `json.loads`.
+        print(f"exit-observer-keeper: sweep output could not be decoded: {exc}", file=sys.stderr)
+        return None
     # ⚠️ The return code and stderr are logged, not discarded. Four separate theories about why
     # this sweep failed (blocking read, enumeration cost, host load, interpreter) were all
     # plausible and all wrong, because this path used to print one generic line and throw the
