@@ -2664,3 +2664,75 @@ class RoundInFlight(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoundBudget(unittest.TestCase):
+    """The delegate's brake — exit 14 once the round's own bound is spent.
+
+    The rule this replaces was prose and the prose lost: `agents/fleet-round.md` said a leg
+    still in flight is `not-run`, and the delegate polled for five minutes and then five
+    more, pushing the round past its limit. A test that only checked the exit code on a
+    fresh round would pass on a brake that never fires, so both directions are pinned —
+    and the spent case asserts the printed line names the hand-back, not just a number.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+        self.topic = "Fleet Manager"
+        self.slug = "fleet--fleet-manager"
+
+    def tearDown(self):
+        for t in (self.tmp, self.live):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+        os.environ.pop("MANAGER_HANDBACK_STATE_DIR", None)
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def fleet(self, *argv):
+        return self.cli(*argv, "--subject", self.topic, "--branch", "fleet")
+
+    def backdate(self, seconds):
+        p = os.path.join(self.tmp.name, self.slug + ".json")
+        with open(p, encoding="utf-8") as fh:
+            rec = json.load(fh)
+        rec["round_started_at"] = time.time() - seconds
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def test_a_fresh_round_reports_time_left(self):
+        self.fleet("--start")
+        rc, out, _ = self.fleet("--budget")
+        self.assertEqual(rc, 0)
+        self.assertIn("budget left", out)
+
+    def test_a_spent_round_stops_the_delegate(self):
+        # The incident's shape: the delegate kept waiting. Past the limit the brake must
+        # fire, and its line must say what to do — a bare exit code is not an instruction.
+        self.fleet("--start")
+        self.backdate(4000)
+        rc, out, _ = self.fleet("--budget")
+        self.assertEqual(rc, self.m.EXIT_BUDGET_SPENT)
+        self.assertIn("budget spent", out)
+        self.assertIn("not-run", out)
+        self.assertIn("Hand back NOW", out)
+
+    def test_budget_without_a_round_refuses(self):
+        rc, out, err = self.fleet("--budget")
+        self.assertEqual(rc, 2)
+        self.assertIn("no round in progress", err)
+
+
+if __name__ == "__main__":
+    unittest.main()
