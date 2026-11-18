@@ -29,7 +29,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Side effect only: points the start-time cache at an isolated per-run store, in one shared
 # home so five suites cannot each assign the same key and leave only the last standing.
@@ -740,6 +740,66 @@ class TestFrozenSettle(Base):
         self.assertIn("FROZEN", out)
         self.assertEqual(self.read_state("ATopic"), before)
         self.assertNotIn("table", json.loads(self.read_state("ATopic")))
+
+    def test_a_change_landing_after_the_render_is_not_frozen(self):
+        """The render-currency conjunct: `quiet` does not prove the table is current.
+
+        A write that landed while the manager was down is older than the window but newer
+        than the render. Settling it away keeps the pre-change table, and the next
+        `--print` compares equal and replays it forever — the change is never swept.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.save("ATopic")  # rendered now
+        # Backdate the record: as if the render predated the newest write.
+        path = self.m.state_path("ATopic")
+        rec = json.loads(self.read_state("ATopic"))
+        rec["recorded_at"] = (
+            datetime.now().astimezone() - timedelta(hours=2)
+        ).isoformat(timespec="seconds")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        # The change landed after that render, and the tree has been quiet since.
+        self.task("AGoalTask", sid="", progress="landed after the render", goals="AGoal")
+        old = time.time() - 3600
+        os.utime(os.path.join(self.vault, "25 Tasks", "AGoalTask.md"), (old, old))
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        self.assertIn("render predates", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_a_parked_flip_on_a_quiet_tree_is_not_frozen(self):
+        """A live<->parked flip moves no mtime and no digest liveness term, but it does
+        change the Status cell the stored table shows. The settle would rewrite the
+        stored `parked` set against that old table and defeat `parked_replay_reason`, so
+        the flip must be part of the FROZEN precondition."""
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
+        sid = "sid-park-under-test"
+        self.task("AGoalTask", sid=sid, goals="AGoal")
+        # No OPEN box: `idle_stuck` would otherwise flip on the park (a parked row is
+        # never stuck), and that flip would move the live half for a reason other than
+        # the parked set this test pins.
+        self.write(
+            "25 Tasks/AGoalTask.md",
+            TASK.format(sid=sid, progress="").replace("- [ ] one", "- [x] one"),
+        )
+        self.registry(sid, status="idle")
+        self.age_the_tree()
+        self.save("ATopic")
+        self.registry(sid, status="waiting")  # the worker now holds a gate
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        self.assertIn("live inputs moved", out)
 
     def test_a_worker_death_on_a_quiet_tree_is_not_frozen(self):
         """The settle's third conjunct: a death moves no mtime, so mtime alone would call
