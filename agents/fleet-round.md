@@ -199,6 +199,18 @@ manager's row 14 branches on.
 
 ⚠️ **The hand-back carries no rules**: no bucket definitions, no step text, no render. Those
 live in the step files and `docs/closer-classes.md`.
+
+⚠️ **Emit the fence and NOTHING else — no heading, no preamble, no table, no trailing note.**
+The hand-back is exactly the `text` block above and stops at its last count. Measured
+2026-11-18 from six live `fleet-round` runs: the returned text was **1 612 / 1 969 / 2 086 /
+2 525 / 2 627 bytes**, median **2 086 B against the 1 024 B cap** — every measurable run over
+it, because the delegate wrapped the fence in a "Final state of this round" table and a
+per-leg narrative. That is roughly **2× the contract**, and the manager pays it on every tick.
+
+⚠️ **A leg's `not-run` reason is payload detail, not a hand-back line.** The count is the
+verdict; the reason belongs in the payload the step file names. A `note:` line appended under
+the fence is the exact shape that pushed these runs over — the manager can read the payload
+when a count needs explaining, and it will not, on a healthy round.
 </output_format>
 
 <success_criteria>
