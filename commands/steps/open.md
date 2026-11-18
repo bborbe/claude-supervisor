@@ -48,6 +48,7 @@ delegate rule's carve-out).
      not render as a quiet `opened 0`:**
 
      ```
+     P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
      python3 "$P/check-open-leg-opened.py" "<render>"
      ```
 
