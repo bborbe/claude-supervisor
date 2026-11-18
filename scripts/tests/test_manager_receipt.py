@@ -279,11 +279,12 @@ class Receipt(unittest.TestCase):
     def test_a_topic_tier_gate_is_honoured_by_a_goal_tier_check(self):
         """A goal round cannot lose the readings gate to a tier mismatch.
 
-        `commands/steps/round-readings.md:33` records the readings gate with
-        `--tier topic`, and `commands/goal-drive.md:54` routes that same step on a GOAL
-        round. `--tier` selects the step tuple only and never reaches the state slug
-        (`manager-receipt.py` `--tier` help text), so the goal-tier tail's `--check` — no
-        `--tier`, default `goal` — must honour a gate recorded with `--tier topic`.
+        `--tier` selects the step tuple only and never reaches the state slug
+        (`manager-receipt.py` `--tier` help text), so a gate recorded from EITHER tier is
+        honoured by the goal tail's `--check` — no `--tier`, default `goal`. The
+        invocation below deliberately passes `--tier topic`, which is what
+        `commands/steps/round-readings.md:33` used to instruct; that file now omits the
+        flag, and this test keeps the harder case so the invariant stays pinned either way.
 
         The artifact is removed so the GATE, not the recorded path, is what excuses the
         step. If `--tier` ever reached `slug()`, the gate would land in

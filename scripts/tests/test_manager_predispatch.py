@@ -613,6 +613,115 @@ class TestActionablePassThrough(Base):
             ["A", "B"],
         )
 
+    def test_actionable_names_cross_checks_the_tracked_set(self):
+        """A stored entry is a snapshot; the tracked set says what can be acted on NOW."""
+        tracked = [
+            {"name": "A", "status": "in_progress"},
+            {"name": "B", "status": "aborted"},
+            {"name": "C", "status": "in_progress", "defer_date": "2099-01-01"},
+        ]
+        self.assertEqual(
+            self.m.actionable_names(
+                {"ready-to-start": ["A", "B", "C", "Gone"]}, tracked
+            ),
+            ["A"],
+        )
+
+    def test_a_terminal_row_in_the_stored_bucket_is_not_actionable(self):
+        """A stored entry naming a row that has since aborted is a snapshot, not work.
+
+        Measured on the live subject: `bucket_sets["ready-to-start"]` still carried an
+        `aborted` row, so the clause stayed true after the future-deferred row was
+        excluded — and a gated round never runs the sweep that would reclassify it.
+        """
+        self.write(
+            "25 Tasks/AGoalTask.md",
+            TASK.format(sid="", progress="").replace(
+                "status: in_progress", "status: aborted", 1
+            ),
+        )
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_a_stored_name_absent_from_the_tracked_set_is_not_actionable(self):
+        """A classification entry for a row that is no longer tracked cannot be opened."""
+        self.save("ATopic")
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "ready-to-start": ["NotATrackedRow"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+
+class TestFrozenSettle(Base):
+    """The SECOND deadlock path: a stale digest on a frozen tree.
+
+    `--print` answers `CHANGE digest differs` because the stored digest predates the last
+    content change, and a gated round never reaches `--save`, so it is never refreshed.
+    `--predicate --persist` settles it on a FROZEN verdict; without the flag the verdict is
+    a pure read and the stale digest survives — the negative control.
+    """
+
+    def age_the_tree(self, seconds=3600):
+        for name in ("ATask", "AGoalTask"):
+            p = os.path.join(self.vault, "25 Tasks", name + ".md")
+            t = time.time() - seconds
+            os.utime(p, (t, t))
+
+    def stale_digest(self, subject="ATopic"):
+        self.save(subject)
+        path = self.m.state_path(subject)
+        rec = json.loads(self.read_state(subject))
+        rec["digest"] = "stale-digest"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def predicate(self, *extra):
+        return self.run_gate("--subject", "ATopic", "--predicate", *extra)
+
+    def test_a_frozen_predicate_with_persist_settles_a_stale_digest(self):
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_without_persist_the_stale_digest_survives(self):
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.stale_digest()
+        rc, out = self.predicate()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_persist_does_nothing_when_the_verdict_is_not_frozen(self):
+        # A fresh tree is not frozen, so the flag must not touch the record: the legs run
+        # and the sweep's own `--save` writes it.
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.stale_digest()
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+
 
 class TestLiveness(Base):
     """Property 2 and its negative control — the pair SC3 is graded on."""

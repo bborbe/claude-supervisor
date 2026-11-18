@@ -108,13 +108,31 @@ Exit codes (same three the loop gate uses)
       frozen-tree predicate reads only mtime plus open `asked-of-you`, so it answered
       FROZEN on the same tick. The round then started, both legs gated, `--save` never
       ran, and the two answers stayed opposed for the whole life of the defer. Measured
-      2026-11-17 on subject `5b29b81a-e7c2-4cca-bd66-2b1b216151aa` (interval 900s):
+      2026-11-17 on the goal `Manager Token Overhead Falls and the Worker Share Rises`
+      (manager session `5b29b81a-e7c2-4cca-bd66-2b1b216151aa`, interval 900s):
       `--print` -> `CHANGE digest differs` (exit 10) against `--predicate` -> `FROZEN`
       (exit 0), the subject's only non-terminal content being the row deferred to
       2026-11-23. The subtraction is by `deferred_names`, which uses the shared
       `defer-date.py` so both stored shapes parse; an unparseable value is NOT deferred
       (the safe direction: a replay, never a suppressed dispatch) and a value that has come
       due is actionable again on the first tick after it expires.
+
+      ⚠️ The same clause reads the classification against the TRACKED SET, and that is a
+      third trap of the same shape: a stored entry naming a row that has since completed,
+      aborted, gone on hold, returned to the backlog, or left the tracked set is a snapshot
+      from an earlier tick — and a gated round never runs the sweep that would reclassify
+      it. Measured on the same subject: `bucket_sets["ready-to-start"]` still carried an
+      `aborted` row, so the clause stayed true after the deferred row was excluded.
+      `NOT_ACTIONABLE_STATUSES` and the missing-name drop are what make the clause answer
+      what the act leg could do now rather than what it could have done at the last sweep.
+
+      ⚠️ And the `digest_moved` clause is a SEPARATE deadlock path of the same shape, which
+      the actionable narrowing does not touch — the measured reason was `digest differs`,
+      not `actionable`. A gated round never reaches `--save`, so a digest left stale by the
+      last content change is never refreshed, and `--print` keeps answering CHANGE against
+      a gate answering FROZEN. `--predicate --persist` closes it by settling the stored
+      digest to the tree's current one on a FROZEN verdict — authorised by that verdict,
+      since a frozen tree renders the same table it last rendered.
 
       ⚠️ The parked-set clause is a THIRD reason of the same shape, and it is the one that
       keeps the replay honest. `digest_of` hashes a DEATH-only liveness term, so a worker
@@ -853,10 +871,71 @@ def frozen_tree(vault: str, subject: str, now: float | None = None,
     }
 
 
-def predicate(vault: str, subject: str) -> int:
-    """Print the verdict and its two reads; exit 0 only when frozen."""
+def settle_digest(vault: str, subject: str) -> None:
+    """Rewrite the stored digest to the tree's current one, keeping the stored render.
+
+    Authorised ONLY by a FROZEN verdict: the predicate has already decided that no tracked
+    file's mtime moved and that the tick's content left the machine, so the cached table is
+    still what the sweep would render. Without this, a stale digest makes `--print` answer
+    CHANGE on every tick while the legs gate — and a gated round never reaches `--save`
+    (`commands/steps/goal-sweep.md`: exit 0 dispatches no reader and runs `--render-cached`,
+    not the persist block), so the two answers stay opposed for as long as the tree stays
+    quiet. That is the second deadlock path, distinct from the actionable clause's: the
+    cited measurement prints `CHANGE digest differs`, which is `digest_moved`.
+
+    Best-effort and silent on failure: the verdict belongs to the predicate, and a write
+    error must not turn FROZEN into NOT-FROZEN. The next gated tick retries.
+    """
+    try:
+        branch, members = resolve_subject(vault, subject)
+        tracked = resolve_tracked(vault, members)
+        stored, table, fail_reason = load_stored(subject)
+    except (ValueError, OSError):
+        return
+    if fail_reason is not None or not table:
+        # No stored render to keep: nothing to settle, and inventing one would record a
+        # table the sweep never produced.
+        return
+    prev = load_state(subject)
+    prev_busy = prev.get("busy_since") or {}
+    # The SAME enrichment `evaluate` applies before `digest_of`. Without it the liveness
+    # term defaults to the death value for every row carrying a session id, so the digest
+    # written here would differ from the one the next `--print` computes — and the gate
+    # would settle forever without ever matching.
+    registry = read_registry()
+    enrich_liveness(tracked, registry, read_feed())
+    apply_stuck(tracked, registry, prev_busy, time.time())
+    digest = digest_of(tracked)
+    if stored == digest:
+        return
+    try:
+        save_stored(
+            subject,
+            branch,
+            digest,
+            table,
+            tracked,
+            prev_busy,
+            bucket_sets=prev.get("bucket_sets"),
+            recorded_at=prev.get("recorded_at"),
+        )
+    except OSError:
+        return
+
+
+def predicate(vault: str, subject: str, persist: bool = False) -> int:
+    """Print the verdict and its two reads; exit 0 only when frozen.
+
+    ⚠️ **`persist` acts ONLY on a FROZEN verdict.** A gated tick moves nothing, so the
+    digest it computes is the one the next tick will compute too — and the round it just
+    short-circuited never reaches `--save`. Settling the stored digest here is what stops
+    `--print` answering CHANGE against a gate that answered FROZEN. On NOT-FROZEN the legs
+    run and the sweep's own `--save` writes the record, so nothing is touched.
+    """
     v = frozen_tree(vault, subject)
     if v["frozen"]:
+        if persist:
+            settle_digest(vault, subject)
         print(
             f"FROZEN — newest tracked mtime {v['quiet_seconds']}s ago "
             f"(window {v['window_seconds']}s), 0 open asked-of-you, {v['tracked']} tracked"
@@ -2271,8 +2350,15 @@ def save_stored(
 # carrying an approval queue. See the module docstring's exit-code note.
 ACTIONABLE_BUCKETS = ("ready-to-start",)
 
+# Statuses under which a row cannot be acted on, whatever the stored classification says.
+# The classification is a snapshot of an earlier tick: a row that has since completed,
+# aborted, gone on hold or returned to the backlog still sits under `ready-to-start` in
+# the record, and counting it keeps the no-change verdict unreachable for as long as the
+# round is gated — because a gated round never runs the sweep that would reclassify it.
+NOT_ACTIONABLE_STATUSES = ("completed", "aborted", "hold", "backlog")
 
-def actionable_names(bucket_sets) -> list[str]:
+
+def actionable_names(bucket_sets, tracked: list[dict] | None = None) -> list[str]:
     """The rows the stored classification places in an actionable bucket, sorted.
 
     Read from the CALLER's own per-bucket half, because that is the only place a row's
@@ -2280,6 +2366,15 @@ def actionable_names(bucket_sets) -> list[str]:
     bucket concept. A missing or malformed half returns `[]` and changes no verdict — the
     gate then behaves exactly as it did before this clause existed, which is the safe
     direction: an absent classification costs a replay, never a wrong dispatch.
+
+    ⚠️ **`tracked` cross-checks the classification, and omitting it disables the check.**
+    The stored set is a snapshot. A row can complete, abort, go on hold, return to the
+    backlog, leave the tracked set, or acquire a future `defer_date` after it was
+    classified, and every one of those leaves the name under `ready-to-start` — so the
+    clause reports CHANGE on every tick, while a gated round never runs the sweep that
+    would reclassify it. Passing the tracked set drops exactly those entries, so the clause
+    answers what the act leg could do NOW rather than what it could have done at the last
+    sweep. A name absent from `tracked` is dropped too: it cannot be opened.
     """
     if not isinstance(bucket_sets, dict):
         return []
@@ -2288,7 +2383,22 @@ def actionable_names(bucket_sets) -> list[str]:
         rows = bucket_sets.get(bucket)
         if isinstance(rows, list):
             names.extend(n for n in rows if isinstance(n, str) and n.strip())
-    return sorted(set(names))
+    names = sorted(set(names))
+    if tracked is None:
+        return names
+    by_name = {t.get("name"): t for t in tracked}
+    deferred = deferred_names(tracked)
+    live: list[str] = []
+    for name in names:
+        row = by_name.get(name)
+        if row is None:
+            continue
+        if str(row.get("status") or "").strip().lower() in NOT_ACTIONABLE_STATUSES:
+            continue
+        if name in deferred:
+            continue
+        live.append(name)
+    return live
 
 
 def deferred_names(tracked: list[dict]) -> set:
@@ -2352,14 +2462,12 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     # render-truth check about a single cell has any business moving it. See the module
     # docstring's exit-code note.
     digest_moved = stored != digest
-    actionable = actionable_names(stored_bucket_sets)
-    # A future-deferred row keeps the `ready-to-start` KEY by design (the sweep reader's
-    # deferred overlay subtracts it from the OFFER, not the classification), so it has to
-    # be subtracted here or one parked row makes this clause permanently true — the
-    # CHANGE/FROZEN deadlock documented in the module docstring.
-    if actionable:
-        deferred = deferred_names(tracked)
-        actionable = [n for n in actionable if n not in deferred]
+    # Cross-checked against the tracked set: an entry that names a row which is gone,
+    # terminal, or future-deferred is a snapshot from an earlier tick, not work the act leg
+    # can do now — see `actionable_names`. Without the cross-check one such entry keeps this
+    # clause permanently true on a gated round, which never runs the sweep that would
+    # reclassify it.
+    actionable = actionable_names(stored_bucket_sets, tracked)
     parked_reason = parked_replay_reason(prev.get("parked"), parked_names(tracked))
     changed = (
         fail_reason is not None
@@ -2880,6 +2988,16 @@ def main(argv: list[str]) -> int:
             "only when frozen. This is not the digest `--check` computes"
         ),
     )
+    ap.add_argument(
+        "--persist",
+        action="store_true",
+        help=(
+            "with --predicate: on a FROZEN verdict, rewrite the stored digest to the "
+            "tree's current one (keeping the stored table). A gated round never reaches "
+            "`--save`, so without this a stale digest keeps `--print` answering CHANGE "
+            "against a gate answering FROZEN"
+        ),
+    )
     mode.add_argument(
         "--write-payload",
         action="store_true",
@@ -2939,8 +3057,14 @@ def main(argv: list[str]) -> int:
         print("--heal requires --compare-tracked", file=sys.stderr)
         return EXIT_USAGE
 
+    if args.persist and not args.predicate:
+        # `--persist` is not a mode: it modifies the predicate's FROZEN verdict. Pairing it
+        # with any other mode would read as a request to write from a read-only command.
+        print("--persist only applies with --predicate", file=sys.stderr)
+        return EXIT_USAGE
+
     if args.predicate:
-        return predicate(args.vault, args.subject)
+        return predicate(args.vault, args.subject, persist=args.persist)
 
     if args.content_keys:
         # The single home of the derivation clause (1) used to carry as prose. The leg is an
