@@ -305,6 +305,92 @@ class AnswerGateTest(unittest.TestCase):
         self.assertIn("RESOLVED_BY: unknown", out)
 
 
+class AnswerContentTest(unittest.TestCase):
+    """`--answer-text`: content answers are gated — every carrier voices them as the operator."""
+
+    REG = [_session("p1", "Asker")]
+    ITEM = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "11111111-2222-4333-8444-555555555555"}
+
+    def _run(self, status="delivered", post=None, answerer="operator", by="arm", enabled=True):
+        out = io.StringIO()
+        state = tempfile.mkdtemp()
+        delivery = {"item_id": "i1", "status": status, "carrier": "watcher:attention-watcher"}
+        if post is None:
+            post = lambda *_a, **_k: {"answered_at": "t", "answered_by": by}
+        with mock.patch.object(aa, "fetch_item", return_value=self.ITEM), \
+             mock.patch.object(aa, "post_answer", side_effect=post) as posted, \
+             mock.patch.object(aa, "fetch_delivery", return_value=delivery), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", state), \
+             mock.patch.object(aa, "resolved_session_id", return_value="mgr-1"), \
+             mock.patch.object(aa, "picks_enabled", return_value=enabled), \
+             mock.patch.object(aa, "_sleep", lambda _s: None):
+            rc = aa.cmd_answer("i1", by, self.REG, out=out, answer_text="go", answerer=answerer)
+        return rc, out.getvalue(), posted, state
+
+    def assertRefused(self, fragment, **kw):
+        rc, out, posted, _ = self._run(**kw)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", out)
+        self.assertIn(fragment, out)
+        posted.assert_not_called()
+
+    def test_refused_while_picks_are_disabled(self):
+        self.assertRefused("PICK_ANSWERING_ENABLED is false", enabled=False)
+
+    def test_real_flag_is_off_so_the_unpatched_path_refuses(self):
+        self.assertFalse(aa.picks_enabled())
+
+    def test_manager_answerer_is_refused(self):
+        self.assertRefused("operator's voice", answerer="manager")
+
+    def test_gate_answerer_arm_is_refused_under_any_answerer(self):
+        self.assertRefused("gate answerer", by=aa.GATE_ANSWERER_ARM, answerer="operator")
+
+    def test_answerer_has_no_default(self):
+        self.assertRefused("explicit --answerer", answerer="")
+
+    def test_operator_relay_content_reaches_the_body_and_no_target_is_printed(self):
+        rc, out, posted, state = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.kwargs["answer"], {"kind": "text", "value": "go"})
+        self.assertIn("DELIVERY: delivered", out)
+        self.assertNotIn("TARGET", out)
+        with open(os.path.join(state, self.ITEM["producer_id"] + ".answer.json")) as fh:
+            self.assertEqual(json.load(fh)["answerer_kind"], "operator")
+
+    def test_undelivered_content_exits_3(self):
+        rc, out, _, _ = self._run(status="failed")
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertIn("NOT_DELIVERED", out)
+
+    def test_lost_race_never_delivers(self):
+        err = urllib.error.HTTPError("u", 409, "conflict", {}, None)
+        rc, out, _, _ = self._run(post=err)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("TARGET", out)
+
+    def test_answer_rides_in_the_post_body(self):
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return _Resp()
+
+        with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            aa.post_answer("i1", "arm", "", "", {"kind": "text", "value": "x"})
+        self.assertEqual(captured["body"], {"answered_by": "arm", "answer": {"kind": "text", "value": "x"}})
+
+
 class ResolvedSessionIdTest(unittest.TestCase):
     def test_reads_the_session_env(self):
         self.assertEqual(aa.resolved_session_id({"CLAUDE_CODE_SESSION_ID": "s1"}), "s1")

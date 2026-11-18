@@ -287,10 +287,10 @@ and never on the duration merely dropping. Leaving the bucket, leaving the fleet
 `watching_since` re-arms it.
 
 ⚠️ **A manager-tier session is never a candidate** — the script reports `<k> manager-skipped`.
-Do not filter `NUDGE` by tier.
+Nor is a busy-registry `idle` row or an unanchored one: never filter `NUDGE`.
 
-**Report the line.** Print the `park-nudge:` summary verbatim
-(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live · <k> manager-skipped`)
+**Report the line.** Print the `park-nudge:` summary verbatim, plus its
+`status-skipped`, `unanchored-skipped` and `anchor-unknown` counts,
 beside the three counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not one
 of them** — item 14's block is the digest's `LEGS` section, which admits exactly three
 `unactioned:` lines, so a `park-nudge:` line inside it fails item 14's `--check`.
