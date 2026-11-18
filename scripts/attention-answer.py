@@ -62,7 +62,16 @@ nobody approved, and an implicit deny would refuse one nobody refused. That
 refusal is the whole guard -- it is what keeps this arm from becoming a path
 that settles an irreversible prompt without an operator-supplied decision.
 
+A `message` answer may carry its CONTENT (`--answer-text TEXT`), and then it routes
+like a permission one: the store holds what was said, the attention-controller's
+carriers deliver it (pane, or a resumed headless turn), so no TARGET is printed and
+the same bounded delivery wait reports whether it landed. ⚠️ It is REFUSED while
+`gate-answer-check.py`'s `PICK_ANSWERING_ENABLED` is false, for the gate answerer's arm,
+and for `--answerer manager` — every carrier renders answer content in the operator's
+voice (see `answer_text_refusal`). `--answerer` has no default and must be stated.
+
 Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
+                                  [--answer-text TEXT] [--answerer operator|manager]
      python3 attention-answer.py attempt ITEM_ID --outcome delivered|failed [--by ARM]
 """
 
@@ -370,7 +379,7 @@ def resolved_session_id(environ=None):
     return (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
 
 
-def post_answer(item_id, answered_by, resolved_by="", decision=""):
+def post_answer(item_id, answered_by, resolved_by="", decision="", answer=None):
     body = {"answered_by": answered_by}
     # Omitted rather than sent empty: downstream, "" is a set value, not an absent one.
     if resolved_by:
@@ -380,6 +389,10 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
     # *present* field holding no verdict instead of an absent one.
     if decision:
         body["decision"] = decision
+    # The answer CONTENT of a message item (`{kind, value}`), omitted when absent — an
+    # answer with no content is what every relay-style answer before it stored.
+    if answer:
+        body["answer"] = answer
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}/answer",
         data=json.dumps(body).encode(),
@@ -491,7 +504,8 @@ def cmd_next(registry, out=sys.stdout):
     return 0
 
 
-def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision=""):
+def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision="",
+               answer_text="", answerer=""):
     try:
         item = fetch_item(item_id)
     except urllib.error.HTTPError as err:
@@ -545,6 +559,8 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
     if mech != "message":
         print(f"REFUSED: {item_id} is {mech}-class; it asks nothing, so there is nothing to route", file=out)
         return 2
+    if answer_text:
+        return cmd_answer_content(item, answered_by, resolved_by, answer_text, answerer, out)
     if resolved_by is None:
         resolved_by = resolved_session_id()
     try:
@@ -638,6 +654,97 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
     print(f"UNCONFIRMED: {reason or status} after {DELIVERY_WAIT_SECONDS:g}s -- no carrier reported "
           f"delivery, so the asking session may still be parked; do NOT SendMessage, "
           f"and do not report this gate as answered", file=out)
+    return EXIT_NOT_DELIVERED
+
+
+#: The arm name `agents/gate-answerer.md` answers under. It must never answer a card in the
+#: operator's voice, so `--answer-text` is refused outright when it is the caller.
+GATE_ANSWERER_ARM = "supervisor:gate-answerer"
+
+
+def picks_enabled():
+    """`gate-answer-check.py`'s `PICK_ANSWERING_ENABLED`, or False when it cannot be read."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "gate_answer_check_flag", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                   "gate-answer-check.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return bool(getattr(mod, "PICK_ANSWERING_ENABLED", False))
+    except Exception:
+        return False
+
+
+def answer_text_refusal(answered_by, answerer, enabled):
+    """Why `--answer-text` must not run, or "" when it may.
+
+    ⚠️ **Every carrier renders a card's answer content in the OPERATOR's voice** — the pane
+    carrier types `Operator answer, via attention board:`, the controller's headless arm opens
+    "The operator answered on the attention board.", and claude-wrapper's `messageAnswer`
+    prefixes `Operator answer, via supervisor:`. So a manager's text would reach the worker as
+    the operator's own answer whatever marker it wrote here: `manager` is refused, the gate
+    answerer is refused under any answerer, and the whole path is off while picks are.
+    """
+    if not enabled:
+        return "--answer-text is disabled while PICK_ANSWERING_ENABLED is false"
+    if answered_by == GATE_ANSWERER_ARM:
+        return "the gate answerer never answers a card's content — every carrier would voice it as the operator"
+    if answerer == "manager":
+        return "a manager answer would be delivered in the operator's voice by every carrier"
+    if answerer != "operator":
+        return "--answer-text needs an explicit --answerer operator"
+    return ""
+
+
+def cmd_answer_content(item, answered_by, resolved_by, answer_text, answerer, out=sys.stdout,
+                       enabled=None):
+    """Answer a message item WITH its content, and report whether a carrier delivered it.
+
+    ⚠️ **No TARGET, on the permission branch's reasoning.** The store now holds what was
+    said, and the attention-controller carries an answered card's content itself — typed
+    into the asker's pane, or written as a resumed turn into a headless one. A TARGET line
+    would invite a SendMessage on top, and the asker would receive the answer twice.
+
+    ⚠️ **`answerer` is the party, not the arm.** A manager answering in its own voice
+    writes `manager` onto the asker's marker, so the board's operator count is not
+    inflated by answers the operator never gave — the measurement the marker exists for.
+    """
+    item_id = item.get("item_id")
+    refusal = answer_text_refusal(answered_by, answerer, picks_enabled() if enabled is None else enabled)
+    if refusal:
+        print(f"REFUSED: {item_id}: {refusal}", file=out)
+        return 2
+    if resolved_by is None:
+        resolved_by = resolved_session_id()
+    try:
+        answered = post_answer(item_id, answered_by, resolved_by,
+                               answer={"kind": "text", "value": answer_text})
+    except urllib.error.HTTPError as err:
+        if err.code == 409:
+            print(answer_conflict_line(item_id, err, "deliver"), file=out)
+        else:
+            print(f"FAILED: store returned {err.code} for {item_id}", file=out)
+        return 1
+    write_answer_marker(item.get("producer_id", ""),
+                        resolved_by if answerer == "manager" else "", answerer)
+    status, carrier, reason = wait_for_delivery(item_id)
+    stamp = f"{item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}"
+    print(f"ANSWERED: {stamp}" if status == "delivered" else
+          f"RECORDED: {stamp} -- answer stored, NOT observed delivered", file=out)
+    print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
+          "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
+    print(f"ANSWER: {answer_text}", file=out)
+    by = carrier or "unknown carrier"
+    if status == "delivered":
+        print(f"DELIVERY: delivered by {by} -- do NOT SendMessage", file=out)
+        return 0
+    if status in ("failed", "held"):
+        print(f"NOT_DELIVERED: {status} by {by} -- the asking session has not received it; "
+              f"do NOT SendMessage, and do not report this card as answered", file=out)
+        return EXIT_NOT_DELIVERED
+    print(f"UNCONFIRMED: {reason or status} after {DELIVERY_WAIT_SECONDS:g}s -- no carrier reported "
+          f"delivery yet; do NOT SendMessage, and do not report this card as answered", file=out)
     return EXIT_NOT_DELIVERED
 
 
@@ -744,6 +851,12 @@ def main(argv=None):
     # verdict on the caller's behalf, and the refusal belongs to this script so
     # its wording stays testable rather than becoming an argparse usage dump.
     ans.add_argument("--decision", default="")
+    ans.add_argument("--answer-text", default="",
+                     help="a message item's answer content; its carriers deliver it, no TARGET")
+    # No default: an answer whose party is implied is how a manager's text got the operator's
+    # marker. `answer_text_refusal` requires it to be stated.
+    ans.add_argument("--answerer", default="",
+                     help="the party the answer marker names; required with --answer-text")
     att = sub.add_parser("attempt")
     att.add_argument("item_id")
     att.add_argument("--by", default=DEFAULT_ARM)
@@ -758,7 +871,8 @@ def main(argv=None):
             return cmd_next(registry)
         if args.cmd == "attempt":
             return cmd_attempt(args.item_id, args.by, args.outcome)
-        return cmd_answer(args.item_id, args.by, registry, decision=args.decision)
+        return cmd_answer(args.item_id, args.by, registry, decision=args.decision,
+                          answer_text=args.answer_text, answerer=args.answerer)
     except urllib.error.HTTPError as err:
         print(f"FAILED: store returned {err.code}")
         return 1

@@ -219,7 +219,7 @@ turns exit 10 into a push.
 """
 from __future__ import annotations
 
-import argparse, glob, importlib.util, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import argparse, glob, importlib.util, json, math, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
@@ -610,17 +610,30 @@ def period_floor_applies(spans, declared: int) -> bool:
     return not any(iv == declared and gap < declared / 2 for gap, iv in spans)
 
 
-def read_high_water(s: str) -> float:
-    """The persisted high-water mark for a subject, or 0.0 when absent or unreadable.
+def read_high_water(s: str, max_age: float) -> float:
+    """The persisted high-water mark for a subject, or 0.0 when unusable.
 
-    A missing or malformed file is not an error: it means "no mark yet", and every
-    caller then falls back to the ring it already has.
+    ⚠️ Three ways a mark must NOT be honoured, each a way it could pin the limit for
+    ever instead of bounding it:
+
+    - **Expired.** A mark older than `max_age` (`ARMS_KEEP` observed periods) describes
+      a cadence this manager may no longer run. Without this, one outage or a
+      stop/resume keeps the limit at the cap indefinitely.
+    - **Non-finite or non-positive.** `float("nan")` parses happily and then poisons
+      every comparison, so a corrupt `.hwm` would crash or silently disable `--state`.
+    - **Unreadable.** A missing or malformed file means "no mark yet", never an error.
     """
+    p = path(s, "hwm")
     try:
-        with open(path(s, "hwm"), encoding="utf-8") as fh:
-            return float(fh.read().strip())
+        if max_age > 0 and (time.time() - os.stat(p).st_mtime) > max_age:
+            return 0.0
+        with open(p, encoding="utf-8") as fh:
+            val = float(fh.read().strip())
     except (OSError, ValueError):
         return 0.0
+    if not math.isfinite(val) or val <= 0:
+        return 0.0
+    return val
 
 
 def write_high_water(s: str, seconds: float) -> None:
@@ -736,12 +749,20 @@ def observed_period(s: str):
     # manager's limit must not move with this change.
     fleet = s.startswith("fleet--")
     if fleet:
-        ring_max = max(gaps)
-        mark = read_high_water(s)
-        if ring_max > mark:
-            write_high_water(s, ring_max)
-            mark = ring_max
-        period = mark
+        # ⚠️ Seed only from a population with NO idle gap in it. A ring that straddles
+        # an outage carries that outage as a span, and seeding the mark from it would
+        # pin the limit at the cap for ever — the mark would then cause the over-wide
+        # limit the p90 was chosen to avoid. The mark also expires (`read_high_water`),
+        # so a stop/resume or one long outage cannot hold the bound up indefinitely.
+        clean = not any(g > IDLE_GAP_SECONDS for g, _ in spans)
+        ring_max = max(gaps) if clean else 0.0
+        max_age = ARMS_KEEP * max(med, declared or 0)
+        mark = read_high_water(s, max_age)
+        seed = min(ring_max, 2.0 * med) if ring_max else 0.0
+        if seed > mark:
+            write_high_water(s, seed)
+            mark = seed
+        period = mark or p90
     else:
         period = p90
     if declared and period_floor_applies(spans, declared):

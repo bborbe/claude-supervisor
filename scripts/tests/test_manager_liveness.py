@@ -120,6 +120,23 @@ class Liveness(unittest.TestCase):
         os.remove(self.m.path(slug, "hwm"))
         self.assertEqual(self.m.observed_period(slug), 900)
 
+    def test_a_corrupt_mark_cannot_disable_the_fleet_bound(self):
+        # `float("nan")` parses, and every comparison against it is False — so an
+        # unguarded `.hwm` would silently disable the bound (or crash `--state`).
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Fleet Manager", "fleet", 900)
+        slug = self.m.slug("Fleet Manager", "fleet")
+        rows, t = [], 1795000000
+        for i in range(12):
+            rows.append(t)
+            t += 900
+        with open(self.m.path(slug, "arms"), "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{e} 900\n" for e in rows))
+        with open(self.m.path(slug, "hwm"), "w", encoding="utf-8") as fh:
+            fh.write("nan\n")
+        # The mark is discarded, so the ring's own cadence decides.
+        self.assertEqual(self.m.observed_period(slug), 900)
+
     def test_an_unknown_branch_is_still_refused(self):
         with self.assertRaises(ValueError):
             self.m.slug("Fleet Manager", "workers")
