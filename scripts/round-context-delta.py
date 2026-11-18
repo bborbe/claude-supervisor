@@ -128,30 +128,56 @@ def segment(records: list[dict], prefix: str) -> list[dict]:
     return rounds
 
 
+def record_epoch(record: dict) -> float | None:
+    """The record's timestamp as an epoch, or None when it carries no usable clock."""
+    stamp = record.get("timestamp")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def window_bytes(records: list[dict], start: float, end: float) -> int:
     """Main-thread bytes whose record timestamp falls in `[start, end]`.
 
     ⚠️ **This is the only exact measurement this tool offers**, and it needs the
     receipt's `round_ended_at`. Every other mode infers where a round ended — the next
     fire, or the first closer — and each inference charges unrelated work to the round
-    (see `segment`'s note and `manager-receipt.py --finish`). A record with no
-    parsable timestamp is counted, not dropped: an unreadable clock is not evidence
-    that the record was outside the window.
+    (see `segment`'s note and `manager-receipt.py --finish`).
+
+    ⚠️ **A record with no parsable timestamp is SKIPPED, not counted.** An unreadable
+    clock is not evidence that the record was *inside* the window either, and the
+    untimestamped population is session-wide harness state rather than round content:
+    measured 2026-11-18 on the live Fleet Manager, 320 `api-request-blob` records
+    carried **726.7 KB**, and counting them charged that constant to every window. The
+    readings then sat ~727 KB high — 758.7 KB for a round whose true cost was 155.8 KB
+    — which read as a 10.8× failure of a criterion the round actually met.
+    `unattributed_bytes` reports what was skipped, so the omission is never silent.
     """
     total = 0
     for record in records:
         if record.get("isSidechain"):
             continue
-        stamp = record.get("timestamp")
-        if isinstance(stamp, str):
-            try:
-                ts = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                ts = None
-            if ts is not None and not (start <= ts <= end):
-                continue
+        ts = record_epoch(record)
+        if ts is None or not (start <= ts <= end):
+            continue
         total += record_bytes(record)
     return total
+
+
+def unattributed_bytes(records: list[dict]) -> int:
+    """Main-thread bytes this tool cannot place in any round — no parsable timestamp.
+
+    Reported so a window reading is never silently short. A large value is the signal
+    that the transcript carries session-wide harness state rather than round content;
+    see `window_bytes` for the measurement that made this the default.
+    """
+    return sum(
+        record_bytes(record) for record in records
+        if not record.get("isSidechain") and record_epoch(record) is None
+    )
 
 
 def load_receipt(path: Path) -> tuple[float, float] | None:
@@ -226,7 +252,15 @@ def main(argv=None) -> int:
             return 2
         start, end = window
         total = window_bytes(records, start, end)
+        skipped = unattributed_bytes(records)
         kb = total / 1024
+        if skipped:
+            print(
+                f"note: {skipped} B ({skipped / 1024:.1f} KB) of untimestamped records "
+                f"could not be placed in any round and are excluded — session-wide "
+                f"harness state, not this round's cost.",
+                file=sys.stderr,
+            )
         if args.json:
             print(json.dumps({
                 "mode": "receipt",
@@ -234,6 +268,7 @@ def main(argv=None) -> int:
                 "end": datetime.datetime.fromtimestamp(end).isoformat(),
                 "bytes": total,
                 "kb": round(kb, 1),
+                "unattributed_bytes": skipped,
             }, indent=1))
             return 0
         print(

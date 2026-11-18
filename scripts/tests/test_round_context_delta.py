@@ -202,12 +202,29 @@ class ReceiptWindowTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3072 B", result.stdout)   # 2048 + 1024, not 500 or 4000
 
+    def test_an_untimestamped_record_is_not_charged_to_the_window(self):
+        """Measured 2026-11-18 on the live Fleet Manager: 726.7 KB of untimestamped
+        `api-request-blob` records were charged to EVERY window, so a round whose true
+        cost was 155.8 KB read as 758.7 KB and a met criterion looked like a 10.8×
+        failure. An untimestamped record cannot be placed in a round, so it is skipped
+        — and reported, so the omission is visible rather than silent."""
+        base = self.transcript().read_text(encoding="utf-8")
+        blob = json.dumps({"type": "api-request-blob",
+                           "message": {"role": "user",
+                                       "content": [{"type": "text", "text": "q" * 9000}]}})
+        transcript = self.write("t-blob.jsonl", base + "\n" + blob)
+        result = self.run_cli(transcript, self.receipt(end=True))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3072 B", result.stdout)      # the blob is NOT in the window
+        self.assertIn("9000 B", result.stderr)      # and the skip is reported
+
     def test_json_shape(self):
         result = self.run_cli(self.transcript(), self.receipt(end=True), "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["mode"], "receipt")
         self.assertEqual(payload["bytes"], 3072)
+        self.assertEqual(payload["unattributed_bytes"], 0)
 
     def test_the_carried_previous_pair_is_preferred(self):
         """A round head carries the previous round's start AND end; that pair survives."""
