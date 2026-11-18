@@ -55,7 +55,7 @@ Scoped mode reads the parks once and never waits on `await_permission`, so it co
 
 An escalation of an ordinary tool request stays pending for the operator — that is the correct result. A **`pending_question`** park is never dispatched to the wrangler (it carries no `allowlist_entry`, per the split above); a class-C `AskUserQuestion` among them is instead **routed** to step 7, because leaving it pending is what the 15-minute timeout then answers with a denial.
 
-⚠️ **Latency limit.** The step sees only what is parked when it runs. A park raised just after it waits for the next tick, and at a 15-minute interval it auto-denies first (`worker-channels.md`: *"Answer promptly or not at all"*). This step shortens the wait for routine parks; it does not make it zero.
+⚠️ **This step is the backstop, not the fast path.** It sees only what is parked when it runs, so a park raised just after it waits a whole round — and at a 15-minute interval a park auto-denies first (`worker-channels.md`: *"Answer promptly or not at all"*). The fast path is the gate feed: every manager tier keeps that `Monitor` armed continuously and, on each `hst:` line, dispatches `supervisor:gate-answerer` in the background, which answers a wrapper-backed worker's store card within seconds of the park (`commands/steps/attention-watcher.md`). This step answers what that path does not reach — a server-held `pending_permissions` park — and names the rest.
 
 ## What this step never answers
 

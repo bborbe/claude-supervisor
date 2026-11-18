@@ -305,6 +305,83 @@ class AnswerGateTest(unittest.TestCase):
         self.assertIn("RESOLVED_BY: unknown", out)
 
 
+class AnswerContentTest(unittest.TestCase):
+    """`--answer-text`: a message answer that carries its content routes like a permission one."""
+
+    REG = [_session("p1", "Asker")]
+    ITEM = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "11111111-2222-4333-8444-555555555555"}
+
+    def _run(self, status="delivered", post=None, answerer="manager"):
+        out = io.StringIO()
+        state = tempfile.mkdtemp()
+        delivery = {"item_id": "i1", "status": status, "carrier": "watcher:attention-watcher"}
+        if post is None:
+            post = lambda *_a, **_k: {"answered_at": "t", "answered_by": "arm"}
+        with mock.patch.object(aa, "fetch_item", return_value=self.ITEM), \
+             mock.patch.object(aa, "post_answer", side_effect=post) as posted, \
+             mock.patch.object(aa, "fetch_delivery", return_value=delivery), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", state), \
+             mock.patch.object(aa, "resolved_session_id", return_value="mgr-1"), \
+             mock.patch.object(aa, "_sleep", lambda _s: None):
+            rc = aa.cmd_answer("i1", "arm", self.REG, out=out,
+                               answer_text="Manager answer, via supervisor: go", answerer=answerer)
+        return rc, out.getvalue(), posted, state
+
+    def test_content_reaches_the_body_and_no_target_is_printed(self):
+        rc, out, posted, _ = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.kwargs["answer"],
+                         {"kind": "text", "value": "Manager answer, via supervisor: go"})
+        self.assertIn("DELIVERY: delivered", out)
+        self.assertNotIn("TARGET", out)
+
+    def test_undelivered_content_exits_3(self):
+        rc, out, _, _ = self._run(status="failed")
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertIn("NOT_DELIVERED", out)
+        self.assertNotIn("TARGET", out)
+
+    def test_manager_marker_names_the_manager(self):
+        _, _, _, state = self._run()
+        with open(os.path.join(state, self.ITEM["producer_id"] + ".answer.json")) as fh:
+            marker = json.load(fh)
+        self.assertEqual(marker["answerer_kind"], "manager")
+        self.assertEqual(marker["answerer_session"], "mgr-1")
+
+    def test_unknown_answerer_is_refused_before_write(self):
+        rc, out, posted, _ = self._run(answerer="robot")
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", out)
+        posted.assert_not_called()
+
+    def test_lost_race_never_delivers(self):
+        err = urllib.error.HTTPError("u", 409, "conflict", {}, None)
+        rc, out, _, _ = self._run(post=err)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("TARGET", out)
+
+    def test_answer_rides_in_the_post_body(self):
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return _Resp()
+
+        with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            aa.post_answer("i1", "arm", "", "", {"kind": "text", "value": "x"})
+        self.assertEqual(captured["body"], {"answered_by": "arm", "answer": {"kind": "text", "value": "x"}})
+
+
 class ResolvedSessionIdTest(unittest.TestCase):
     def test_reads_the_session_env(self):
         self.assertEqual(aa.resolved_session_id({"CLAUDE_CODE_SESSION_ID": "s1"}), "s1")
