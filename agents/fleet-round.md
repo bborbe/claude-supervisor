@@ -113,6 +113,21 @@ skipped — re-read it once the sweep hand-back exists, honouring every row whos
 newly become decidable **and that has not run this round**. Never re-run a leg: each
 `every tick` row is once-per-round, and a second sweep or drive leg duplicates sends.
 
+⚠️ **The budget is a CALL, not a rule you remember.** Before dispatching each leg, and again
+before waiting on one that has not returned, run:
+
+```bash
+python3 "$P/manager-receipt.py" --budget --subject "Fleet Manager" --branch fleet
+```
+
+**Exit 0** prints the time left — dispatch the next leg. **Exit 14** means the round's own
+bound (`period + SLACK`, the same limit the manager's `--check` uses) is spent: **dispatch no
+further leg, hand back now, and mark every leg not yet returned `not-run` with its reason on
+the payload.** This exists because the prose alone did not hold — this file already said "a
+leg still in flight is `not-run`", and the delegate still waited five minutes and then five
+more, which is what pushed round `1795010135` past its limit and produced the 14-minute
+overlap. A rule you can re-read and override is not a bound; a non-zero exit is.
+
 ## 2. The rows you leave alone
 
 These belong to the manager and are **not** yours. Leave them, and say so in the hand-back if
@@ -200,6 +215,8 @@ is the verdict's business. Its body is a one-line summary; nothing reads it.
   ⚠️ **`not-run` is for a leg still in flight, never for one that returned nothing usable.**
   A delegation that completed empty takes its step file's own fallback — `commands/steps/sweep.md`
   requires you to run the reads yourself and carry real counts, not a `not-run`.
+  ⚠️ **The wait itself is bounded by `--budget`** (exit 14), not by your judgement of how long
+  is reasonable: re-run it before each further wait, and when it refuses, hand back.
 - **A leg's script exits 2** → its count is `not-run` with the reason on stderr, and every
   later row that depended on it is also `not-run`. Never a `0`.
 - **A leg's hand-back is over 1 KB** → that is the leg's defect, not yours to trim: report it
