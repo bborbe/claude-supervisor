@@ -130,6 +130,27 @@ class QuotedBraces(unittest.TestCase):
         got = self._got("gh -R bborbe/x pr view 1 --json a,b --jq '{a: .a, b: .b}'")
         self.assertEqual(got["tier"], "manager", got["reason"])
 
+    def test_substitution_inside_double_quotes_is_unverifiable(self):
+        for cmd in (
+            'cat "$(: "\'")"/Users/bborbe/{.netrc,x}"$(: "\'")"',
+            'cat "`: "\'"`"/Users/bborbe/{.netrc,x}"`: "\'"`"',
+        ):
+            self.assertEqual(self._got(cmd).get("form"), "unverifiable", cmd)
+
+    def test_sequence_expansion_is_unverifiable(self):
+        self.assertEqual(self._got("cat ~/.netr{c..c}").get("form"), "unverifiable")
+
+    def test_brace_after_quoted_word_is_unverifiable(self):
+        for cmd in ("echo 'x'{a,b}", 'echo "a"{b,c}', 'echo "a\\"b"{c,d}'):
+            self.assertEqual(self._got(cmd).get("form"), "unverifiable", cmd)
+
+    def test_nested_quoted_braces_are_literal(self):
+        self.assertNotEqual(self._got('echo "$(echo "{a,b}")"').get("form"), "unverifiable")
+
+    def test_masker_fails_closed_on_unterminated_input(self):
+        for seg in ("echo 'abc", 'echo "abc', "echo abc\\"):
+            self.assertTrue(tier._unquoted_brace_expansion(seg), seg)
+
     def test_ansi_c_quote_stays_fail_closed(self):
         # `$'…'` is rejected as unverifiable elsewhere (shlex does not model it); not loosened here.
         self.assertEqual(self._got("echo $'{a,b}'").get("form"), "unverifiable")

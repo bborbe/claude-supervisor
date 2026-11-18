@@ -273,7 +273,7 @@ def words(segment):
 def _unquoted_brace_expansion(segment):
     """True when `segment` has a `{a,b}` bash would brace-expand — i.e. one OUTSIDE quotes.
 
-    Quoted (`'…'`, `"…"`, `$'…'`) and backslash-escaped characters are masked before the match, so
+    Quoted (`'…'`, `"…"`) and backslash-escaped characters are masked before the match, so
     `--jq '{a: .x, b: .y}'` and `echo \\{a,b\\}` are literal. Fail-closed: an unterminated quote
     or trailing backslash cannot be masked reliably, so it reports True (unverifiable)."""
     out, i, n = [], 0, len(segment)
@@ -284,22 +284,24 @@ def _unquoted_brace_expansion(segment):
                 return True
             out.append("xx")
             i += 2
-        elif c == "'" or c == '"' or (c == "$" and segment[i + 1:i + 2] == "'"):
-            ansi = c == "$"
-            if ansi:
-                i += 1
-            q = segment[i]
-            j = i + 1
-            while j < n and segment[j] != q:
-                j += 2 if (segment[j] == "\\" and (q == '"' or ansi)) else 1
-            if j >= n:
+        elif c == "'":
+            k = segment.find("'", i + 1)
+            if k < 0:
                 return True
-            out.append("x" * (j + 1 - i + (1 if ansi else 0)))
-            i = j + 1
+            out.append("x" * (k + 1 - i))
+            i = k + 1
+        elif c == '"':
+            # The lexer's own span: `$(…)` and backticks inside double quotes start a new command.
+            try:
+                k = _skip_double(segment, i + 1)
+            except Unverifiable:
+                return True
+            out.append("x" * (k - i))
+            i = k
         else:
             out.append(c)
             i += 1
-    return bool(re.search(r"\{[^}]*,[^}]*\}", "".join(out)))
+    return bool(re.search(r"\{[^}]*,[^}]*\}|\{[^}]*\.\.[^}]*\}", "".join(out)))
 
 
 def segment_words(segment):
