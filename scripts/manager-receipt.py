@@ -125,6 +125,10 @@ EXIT_DEBT_OPEN = 12
 # EXIT_SKIPPED because the caller's response differs: skipped means act on a defect,
 # in-flight means take no reading and re-arm.
 EXIT_IN_FLIGHT = 13
+# The round's time bound is spent: a delegate that sees this must stop dispatching legs
+# and hand back, marking every leg not yet returned as `not-run`. Distinct from
+# EXIT_IN_FLIGHT — this one is the DELEGATE's brake, not the manager's.
+EXIT_BUDGET_SPENT = 14
 
 # The positive marker a skipped round prints.
 #
@@ -602,6 +606,43 @@ def round_lapsed(s: str, started) -> bool:
     """
     _started, limit, _basis = window(s, time.time())
     return bool(limit) and (time.time() - started) > limit
+
+
+def budget(topic: str, branch: str = "") -> int:
+    """The DELEGATE's brake: exit 14 once the round's own time bound is spent.
+
+    ⚠️ **Prose could not hold this bound, and the incident is why.** `agents/fleet-round.md`
+    already said "a leg still in flight is `not-run`" (`CHANGELOG v0.344.2`, *waiting is not
+    a verdict*), and the delegate still polled — five minutes, then five more — pushing the
+    round past its limit and producing the 14-minute overlap this task exists to remove. A
+    rule a model can re-read and still override is not an enforcement.
+
+    So the bound is a call the delegate makes at every leg boundary. Zero means the next leg
+    may be dispatched; 14 means stop dispatching and hand back, with every leg not yet
+    returned marked `not-run` and its reason on the payload. It cannot interrupt a leg that
+    is already running — nothing can — but it is what stops the SECOND wait, and the second
+    wait is what made the round long.
+
+    The limit is `window()`'s, imported from `manager-liveness.py`: the same
+    `observed_period + SLACK` the manager's `--check` uses, so a delegate and its manager
+    cannot disagree about how long the round is allowed to take.
+    """
+    s = slug(topic, branch)
+    started = round_started(read_receipt(s))
+    if started is None:
+        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    _started, limit, basis = window(s, time.time())
+    elapsed = time.time() - started
+    left = (limit or 0) - elapsed
+    if left > 0:
+        print(f"budget left {int(left)}s (round started {int(elapsed)}s ago, "
+              f"limit {math.ceil(limit)}s {basis})")
+        return 0
+    print(f"{SENTINEL} — budget spent: round started {int(elapsed)}s ago, limit "
+          f"{math.ceil(limit)}s {basis}. Hand back NOW: dispatch no further leg, mark "
+          f"every leg not yet returned `not-run`, and put each reason on the payload")
+    return EXIT_BUDGET_SPENT
 
 
 def rearm_seconds(s: str) -> int:
@@ -1975,6 +2016,10 @@ def main() -> int:
                            "(the delegate's completion signal) and print its path; needs "
                            "--round, the id the delegate was dispatched with")
     mode.add_argument("--check", action="store_true", help="validate the round (manager, tail)")
+    mode.add_argument("--budget", action="store_true",
+                      help="the delegate's brake: prints the time left in the round and "
+                           "exits 14 once it is spent, so the delegate stops dispatching "
+                           "legs and hands back with the rest `not-run`")
     mode.add_argument("--debt", action="store_true",
                       help="print the open debt; exits 12 while any step is unpaid, 0 when clear")
     mode.add_argument("--abandon", action="store_true",
@@ -2072,6 +2117,8 @@ def main() -> int:
         ap.error("--force/--reason belong to --finish")
     if a.check:
         return check(subject, a.branch, tier=a.tier)
+    if a.budget:
+        return budget(subject, a.branch)
     if a.render_cached:
         return render_cached(subject, a.branch, tier=a.tier)
     if a.tokens:
