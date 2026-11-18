@@ -14,8 +14,10 @@ HOLDING and two resumes would have landed on two live conversations.
 
 ⚠️ **This module is the ONE reader of that directory, and it is not the liveness authority.**
 The verdict "is this session id live?" moved to `session-liveness.py`, which reads the
-attention store's `session-heartbeat` endpoint alone — a session that holds a socket and one
-that holds none (a headless worker, a cluster pod) answer through the same channel there.
+attention store's `session-heartbeat` endpoint — a session that holds a socket and one that
+holds none (a headless worker, a cluster pod) answer through the same channel there — and
+falls back to **this registry** and the headless heartbeat store when that endpoint is
+unreadable, so a single local process restarting no longer blanks the fleet.
 What stays here is the question the registry is actually good at: **identity** — the name a
 session holds, the names it used to hold, the `cwd` to resume it into, and the pid its socket
 sits on. `session-liveness.py --list --json` imports these functions to join that identity

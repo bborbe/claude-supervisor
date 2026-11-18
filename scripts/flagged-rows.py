@@ -365,10 +365,21 @@ def live_sessions():
     an answer. Folding the second into the first empties `managers`, so `subject_live`
     returns False for every subject and every goal/topic row emits `open-manager` — a
     duplicate-spawn hazard, and the exact fold `branch: unknown` exists to reject.
+
+    ⚠️ **Exit 0 is not sufficient either, and this is the 2026-11-18 addition.** When the
+    session-heartbeat endpoint is unreadable, `--list` exits 0 built from the identity
+    registry and the headless store — a list that structurally OMITS cluster and a2a
+    sessions, because they have no local pid and no registry entry. Reading that as a
+    complete fleet makes a live cluster manager read absent and emits `open-manager` against
+    it: the same duplicate-spawn hazard as a non-zero exit, arriving through exit 0. The
+    fallback announces itself on stderr, so that line is the signal.
     """
     out = subprocess.run([sys.executable, os.path.join(HERE, "session-liveness.py"),
                           "--list"], capture_output=True, text=True, check=False)
     if out.returncode != 0:
+        return None
+    if "WARNING — the session-heartbeat endpoint" in (out.stderr or ""):
+        # The registry fallback: omits cluster/a2a, so a no-match is not "not live".
         return None
     sessions = {}
     for line in out.stdout.splitlines():
