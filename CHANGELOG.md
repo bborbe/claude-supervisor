@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `scripts/session-liveness.py` no longer licenses ABSENT for a registry record whose `alive` is `False` while the session's transcript was written within 120 s (`TRANSCRIPT_RECENT_SECONDS`). `alive: False` is a statement about the RECORD's pid — gone, or the number recycled onto another process — so a record that outlived its session read as death for a session still writing: measured 2026-11-17, two live sessions read ABSENT 11 s and 34 s after a transcript write, both held `busy` on a recycled pid. The arm reuses `_transcript_idle_seconds`, answers UNKNOWN inside the window, and keeps today's ABSENT when the transcript resolves to nothing or is older — so a genuinely dead session still reads ABSENT and the reaper keeps the one verdict it reclaims on. Change set: `scripts/session-liveness.py`, `scripts/tests/test_session_liveness_absent_licensed.py`, `CHANGELOG.md`.
+
 ## v0.344.0
 
 - feat: `scripts/flagged-rows.py` emits a new `parked` branch for a row whose last closer declares an external wait (`⏰ Ends:`), read once per run through `declared-wait.py` so there is one definition of "waiting" — the branch sits after every LIVE branch and before `resume`/`create`, so an open session is never counted as waiting and a parked row is never counted absent
