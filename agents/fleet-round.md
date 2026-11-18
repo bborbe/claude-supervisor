@@ -151,6 +151,15 @@ to the payload paths the step files name. You hand back **only** the verdict sum
 </process>
 
 <error_handling>
+- **A leg that has not returned is `not-run`, and you STILL hand back.** ⚠️ **Never end a turn
+  without the hand-back fence.** Measured 2026-11-18: a delegate that dispatched
+  `supervisor:fleet-sweep-reader` and found it still running ended with *"The sweep is still
+  running. Waiting for its hand-back before the drive leg can be gated."* and emitted **no
+  hand-back at all**. The manager then had no verdict, could not render, never reached its
+  tail, and the round never closed — **two rounds hung exactly this way**, one at 09:57 and
+  one at 13:33. Waiting is not a verdict. If a leg has not returned, its counts are `not-run`
+  with the reason, every row that depended on it is `not-run` too, the rest of the round
+  proceeds on what you have, and the hand-back says so.
 - **A leg's script exits 2** → its count is `not-run` with the reason on stderr, and every
   later row that depended on it is also `not-run`. Never a `0`.
 - **A leg's hand-back is over 1 KB** → that is the leg's defect, not yours to trim: report it
