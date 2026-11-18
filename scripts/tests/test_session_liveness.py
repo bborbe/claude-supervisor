@@ -821,10 +821,74 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, LIVE)
         self.assertIn(sid, out)
 
-    def test_list_on_an_unreachable_endpoint_is_unknown(self):
-        rc, out = self.listing(dead_url())
+    def test_list_on_an_unreachable_endpoint_degrades_instead_of_refusing(self):
+        # ⚠️ **The union's list half, and the 2026-11-18 outage it removes.** An unreadable
+        # endpoint used to make this exit 2, so a single local process restarting blanked every
+        # caller: measured that day, `--list --json` exited 2 with `ECONNREFUSED` for ~70 minutes
+        # and 15 of 25 flagged rows could not be opened — while the identity registry sat
+        # readable on disk the whole time.
+        #
+        # ⚠️ **Every row is `degraded: true`, and that is the price of exiting 0.** A
+        # registry-built list structurally omits cluster and a2a sessions, so
+        # `commands/open.md` Step 2C must stop on a degraded row rather than fall through to its
+        # spawn branch. A fix that exits 0 with plain rows re-opens the duplicate-spawn hazard
+        # and fails this case.
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant(sid)
+        rc, rows = self.json_listing(dead_url())
+        self.assertEqual(rc, LIVE)
+        by_id = {r["sessionId"]: r for r in rows}
+        self.assertIn(sid, by_id)
+        self.assertTrue(by_id[sid]["degraded"])
+
+    def test_check_on_an_unreachable_endpoint_reads_live_from_the_registry(self):
+        # ⚠️ **SC1(b).** With the endpoint stopped, a session whose registry pid is running must
+        # still answer LIVE — that is the whole population the fleet lost during the outage.
+        sid = "9c0ffee1-1111-2222-3333-444455556666"
+
+        class _RegistryHoldsItLive:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": True, "pid": 1234}}
+
+        prior = self.m._IDENTITY
+        self.m._IDENTITY = _RegistryHoldsItLive()
+        try:
+            rc, out = self.check(sid, dead_url())
+        finally:
+            self.m._IDENTITY = prior
+        self.assertEqual(rc, LIVE)
+        self.assertIn("identity registry", out)
+
+    def test_check_on_an_unreachable_endpoint_reads_absent_only_from_a_dead_entry(self):
+        # ⚠️ **The one cell that may license ABSENT with the endpoint down.** The registry HOLDS
+        # an entry and computes death — the same predicate that licenses ABSENT at the end of
+        # `_absent_licensed`. A missing entry may NOT license it (the case below).
+        sid = "9c0ffee2-1111-2222-3333-444455556666"
+
+        class _RegistryHoldsItDead:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": False, "pid": 1234}}
+
+        prior = self.m._IDENTITY
+        self.m._IDENTITY = _RegistryHoldsItDead()
+        try:
+            rc, out = self.check(sid, dead_url())
+        finally:
+            self.m._IDENTITY = prior
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("pid gone", out)
+
+    def test_check_on_an_unreachable_endpoint_is_unknown_for_an_unprovable_pid(self):
+        # ⚠️ **`alive is None` is "cannot tell", never death.** With the endpoint down there is no
+        # second channel to break the tie, so the answer stays UNKNOWN — the direction that
+        # withholds a resume. This is the `plant()` shape: a record with no usable `procStart`.
+        sid = "9c0ffee3-1111-2222-3333-444455556666"
+        self.plant(sid)
+        rc, out = self.check(sid, dead_url())
         self.assertEqual(rc, UNKNOWN)
-        self.assertIn("UNKNOWN", out)
+        self.assertIn("cannot prove", out)
 
     def test_list_on_an_unreadable_registry_is_unknown(self):
         # The names half is load-bearing: a names-less list makes `/supervisor:open`'s
