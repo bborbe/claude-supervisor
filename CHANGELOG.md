@@ -10,6 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: **a failed sweep now says why it failed.** The failure path caught `TimeoutExpired / ValueError / OSError` and printed one generic line, so the reason was thrown away — and four separate theories about the same failure (a blocking read, the enumeration's cost, host load, the interpreter) were all plausible and all wrong for want of the actual error. It now logs the return code and the subprocess's stderr on a non-zero exit, the timeout value on a timeout, the exception on a start failure, and the first bytes of stdout when it is not JSON. No behaviour change beyond the message.
+
 - fix: **the keeper backs off a full refresh after a failed sweep, and its sweep timeout sits below its own staleness threshold.** A failed sweep was retried after 60 s, and a sweep costs ~55 s (`build_task_index` 21 s + `build_grouping` 33 s, measured 2026-11-17), so the retry re-scanned the vault almost continuously — which kept the vault hot and every sweep slow enough to time out again. A failure now waits `REFRESH_SECONDS`. `SWEEP_TIMEOUT` drops 300 → 120, below `exit-record-coverage.py`'s `KEEPER_STALE_SECONDS` (300), because a sweep that blocks longer than that threshold makes the board report the keeper itself as stale — a false alarm the old value allowed by construction.
 
 ## v0.338.0
