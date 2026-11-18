@@ -688,9 +688,21 @@ def observed_period(s: str):
             p90 = percentile(gaps, 0.90)
             med = median(gaps)
     declared = declared_interval(s)
+    # ⚠️ FLEET ONLY: the p90 is the wrong statistic for the fleet subject, because the
+    # round's own duration sits in the tail the p90 discards BY CONSTRUCTION. An arm
+    # gap is start-to-start, so a round that runs long sets a floor on its own gap —
+    # and a healthy long round then reads STALE. Measured 2026-11-18: 72 rounds in the
+    # retained handback window had a median duration of 1262 s (21.0 min) and 42 of 72
+    # exceeded the then-live 1157 s limit (p90 977 + SLACK 180); one round ran 1355 s
+    # start-to-start against that limit. The fleet therefore measures the DECAYED
+    # MAXIMUM of its window — decayed by ARMS_KEEP, still capped by PERIOD_CAP x the
+    # median so one historic stop cannot stretch it for ever (the failure the p90 was
+    # chosen to avoid). Every other branch keeps the p90: a topic or goal manager's
+    # limit must not move with this change.
+    period = max(gaps) if s.startswith("fleet--") else p90
     if declared and period_floor_applies(spans, declared):
-        return max(declared, min(p90, PERIOD_CAP * max(med, declared)))
-    return min(p90, PERIOD_CAP * med)
+        return max(declared, min(period, PERIOD_CAP * max(med, declared)))
+    return min(period, PERIOD_CAP * med)
 
 
 # ⚠️ `stopped` is NOT here, and its absence is the fix this list is part of. Migration
