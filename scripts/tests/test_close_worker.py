@@ -1018,10 +1018,11 @@ class TestGrepTask(unittest.TestCase):
             path = os.path.join(d, "A Task.md")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("---\nclaude_session_id: abc-123\nstatus: completed\n---\n")
-            own, handed = cw._grep_task("abc-123", [d])
+            own, handed, error = cw._grep_task("abc-123", [d])
             self.assertIsNotNone(own, "the matcher missed a task that is plainly there")
             self.assertEqual(own[0], path)
             self.assertIsNone(handed)
+            self.assertIsNone(error, "a successful search reports no error")
 
     def test_prefers_ripgrep_when_it_is_installed(self):
         seen = {}

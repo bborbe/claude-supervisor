@@ -173,6 +173,16 @@ class TestTaskGate(unittest.TestCase):
         token, _ = close_idle_tab.task_gate(None, self.today)
         self.assertEqual(token, "task-unresolved")
 
+    def test_failed_lookup_refuses_instead_of_closing(self):
+        # ⚠️ `find_task` returns None on a grep TIMEOUT as well as on a genuine no-match.
+        # Reading that as an absent anchor would close a live, anchored tab on a transient
+        # read failure — the unreadable-vs-absent collapse the repo forbids everywhere else.
+        token, detail = close_idle_tab.task_gate(
+            None, self.today, SID, "/tmp/worktree", "task lookup failed (timed out)"
+        )
+        self.assertEqual(token, "task-unresolved")
+        self.assertIn("unproven", detail)
+
 
 if __name__ == "__main__":
     unittest.main()

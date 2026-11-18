@@ -139,7 +139,7 @@ def tab_gate(rec, idle, cards, cards_readable, children, held=None):
     return None
 
 
-def task_gate(task, today, session_id=None, cwd=None):
+def task_gate(task, today, session_id=None, cwd=None, lookup_error=None):
     """`(token, detail)` when the task is not this verb's population, else None.
 
     ⚠️ **The gate is inverted on purpose.** `close-worker.py` refuses a non-terminal task
@@ -160,6 +160,16 @@ def task_gate(task, today, session_id=None, cwd=None):
     tick — the same failure the reaper's empty-dir guard exists to prevent.
     """
     if task is None:
+        if lookup_error:
+            # ⚠️ **A failed SEARCH is not an absent anchor.** `find_task` returns None on a
+            # timeout or a grep error as well as on a genuine no-match, so closing here
+            # would kill a live anchored tab on a transient read — the unreadable-vs-absent
+            # collapse this repo forbids everywhere else.
+            return (
+                "task-unresolved",
+                "the task lookup did not complete, so absence is unproven — "
+                f"{lookup_error}",
+            )
         if session_id is None or cwd is None:
             return (
                 "task-unresolved",
@@ -271,7 +281,8 @@ def main(argv=None):
             )
             continue
 
-        bad = task_gate(close_worker.find_task(session_id, cwd), today, session_id, cwd)
+        task, lookup_error = close_worker.find_task_checked(session_id, cwd)
+        bad = task_gate(task, today, session_id, cwd, lookup_error)
         unanchored = bad is not None and bad[0] == "unanchored-closed"
         if bad is not None and not unanchored:
             exit_code = refuse(*bad)

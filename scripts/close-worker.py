@@ -492,7 +492,7 @@ def find_task(session_id, cwd, vault_root=None):
     for batch in (local, rest):
         if not batch:
             continue
-        own, handoff = _grep_task(session_id, batch)
+        own, handoff, _error = _grep_task(session_id, batch)
         if own is not None:
             return own
         if handed_off is None and handoff is not None:
@@ -500,11 +500,49 @@ def find_task(session_id, cwd, vault_root=None):
     return handed_off
 
 
+def find_task_checked(session_id, cwd, vault_root=None):
+    """`(task, error)` — `find_task`, with a failed SEARCH reported instead of collapsed.
+
+    ⚠️ **`find_task` returns `None` for two different facts**: no page claims the session,
+    and the grep that would have found one timed out or exited ≥ 2. A caller that treats
+    `None` as proof of an absent anchor must use this function instead — closing on an
+    unproven absence kills a live anchored session, the unreadable-vs-absent collapse this
+    module forbids everywhere else. `find_task` keeps its old signature for the callers
+    whose next step is a refusal, where collapsing to `None` fails closed.
+    """
+    if not session_id:
+        return None, None
+    dirs = task_dirs_for(cwd, vault_root)
+    if not dirs:
+        return None, None
+    local = local_task_dirs(cwd)
+    rest = [d for d in dirs if d not in local]
+    handed_off = None
+    error = None
+    for batch in (local, rest):
+        if not batch:
+            continue
+        own, handoff, err = _grep_task(session_id, batch)
+        if err:
+            error = err
+        if own is not None:
+            return own, None
+        if handed_off is None and handoff is not None:
+            handed_off = handoff
+    return handed_off, error
+
+
 def _grep_task(session_id, dirs, timeout=15):
-    """`(own, handed_off)` for one grep pass over `dirs`; either may be `None`.
+    """`(own, handed_off, error)` for one grep pass over `dirs`; each of the first two may
+    be `None`.
 
     Split out of `find_task` so the two passes share one matcher and the ownership rule
     (`claude_session_id` beats a `metrics_sessions` membership) stays in a single place.
+
+    ⚠️ **`error` is not decoration.** A timeout or a grep exit ≥ 2 returns no matches, which
+    is indistinguishable from "no task claims this session" unless the failure is carried
+    out separately — and a caller that reads the absence as proof closes a live anchored
+    session.
     """
     # ⚠️ **ripgrep when it exists, and the difference is not cosmetic.** `grep -rl` over the
     # 11 375-file `private-personal/25 Tasks` measured **19.6 s** on 2026-11-12 — past this
@@ -519,16 +557,19 @@ def _grep_task(session_id, dirs, timeout=15):
             else ["grep", "-rl", "--fixed-strings", session_id, *dirs])
     try:
         found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except Exception:
-        return None, None
+    except Exception as exc:
+        return None, None, f"task lookup failed ({exc})"
+    # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
+    if found.returncode not in (0, 1):
+        return None, None, f"task lookup failed (exit {found.returncode})"
     handed_off = None
     for path in sorted((found.stdout or "").splitlines()):
         fm = frontmatter(path)
         if (fm.get("claude_session_id") or "").strip() == session_id:
-            return (path, fm, False), None
+            return (path, fm, False), None, None
         if handed_off is None and session_id in metrics_session_ids(path):
             handed_off = (path, fm, True)
-    return None, handed_off
+    return None, handed_off, None
 
 
 def is_future(value, today):
