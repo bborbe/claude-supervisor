@@ -209,6 +209,21 @@ class ReceiptWindowTest(unittest.TestCase):
         self.assertEqual(payload["mode"], "receipt")
         self.assertEqual(payload["bytes"], 3072)
 
+    def test_the_carried_previous_pair_is_preferred(self):
+        """A round head carries the previous round's start AND end; that pair survives."""
+        import datetime as dt
+        utc = dt.timezone.utc
+        r = self.write("r2.json", json.dumps({
+            # the current round: just started, no end yet
+            "round_started_at": dt.datetime(2026, 11, 18, 12, 0, 0, tzinfo=utc).timestamp(),
+            # the completed one, carried forward
+            "previous_round_started_at": dt.datetime(2026, 11, 18, 10, 0, 0, tzinfo=utc).timestamp(),
+            "previous_round_ended_at": dt.datetime(2026, 11, 18, 10, 1, 0, tzinfo=utc).timestamp(),
+        }))
+        result = self.run_cli(self.transcript(), r)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3072 B", result.stdout)
+
     def test_a_receipt_without_an_end_is_an_error(self):
         result = self.run_cli(self.transcript(), self.receipt())
         self.assertEqual(result.returncode, 2)

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a completed round's window now survives the next round's start.** `--start` builds the receipt FRESH, so it silently dropped the `round_ended_at` that `--finish` had just written: the completed window existed only from one round's tail to the next round's head, which nothing can read. Measured 2026-11-18 — `--finish` had run, the very next `--start` wiped it, `round_ended_at` read `None` on every inspection, and the round stayed unmeasurable **with the fix already deployed**. `--start` now carries `previous_round_ended_at` beside `previous_round_started_at` — the same reasoning that already carried the start — and `round-context-delta.py --receipt` prefers that pair, falling back to the current one for receipts written before the end was carried. `previous_round_started_at → previous_round_ended_at` is the one window that IS a completed round. Change set: `scripts/manager-receipt.py`, `scripts/round-context-delta.py`, `scripts/tests/test_round_context_delta.py`, `CHANGELOG.md`.
+
 ## v0.344.3
 
 - fix: **`manager-liveness.py --check` reports a deliberately stood-down subject, so a stand-down reaches the notification path and not only `--state`.** `classify()` already returned `STOPPED` for a `.stopped` marker, but `check()` acted only on `STALE` / `INVALID`, so a stood-down manager was observable on demand and invisible to the report — the reason every forced-lapse probe was voided. A `STOPPED` subject is now emitted once its marker is older than `2 x` its own observed period (declared interval as the fallback), carries the `STOPPED` token with `age=`/`threshold=`, and re-emits with `retry=1` until delivered. A stand-down is not a lapse: the pending entry carries `kind="stopped"`, so a resume drops the episode rather than re-emitting `RECOVERED-PENDING`. Pinned by three new tests (silent before the bound, the line plus retry after it, and STOPPED-vs-STALE tokens).

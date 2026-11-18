@@ -155,15 +155,29 @@ def window_bytes(records: list[dict], start: float, end: float) -> int:
 
 
 def load_receipt(path: Path) -> tuple[float, float] | None:
-    """`(round_started_at, round_ended_at)` from a receipt, or None when either is absent."""
+    """A COMPLETED round window from a receipt, or None when the receipt holds none.
+
+    ⚠️ **The `previous_*` pair is preferred, and it is the one that survives.** A receipt
+    is rewritten at every round head, and the head carries the previous round's start and
+    end forward precisely so a finished window outlives the next round's `--start`. The
+    current pair is complete only in the gap between a round's tail and the next head —
+    measured 2026-11-18, that gap is not reliably observable, and reading only the current
+    pair reported `None` on a round that had in fact finished.
+
+    Falls back to the current pair for a receipt written before the end was carried.
+    """
     try:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    start, end = d.get("round_started_at"), d.get("round_ended_at")
-    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
-        return None
-    return float(start), float(end)
+    for start_key, end_key in (
+        ("previous_round_started_at", "previous_round_ended_at"),
+        ("round_started_at", "round_ended_at"),
+    ):
+        start, end = d.get(start_key), d.get(end_key)
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            return float(start), float(end)
+    return None
 
 
 def main(argv=None) -> int:
