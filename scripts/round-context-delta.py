@@ -170,9 +170,15 @@ def load_receipt(path: Path) -> tuple[float, float] | None:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    # ⚠️ **Current pair FIRST.** Both pairs complete is the ordinary state between a
+    # round's `--finish` and the next `--start`, and preferring the carried pair there
+    # would report the round BEFORE the one just finished. At a round head the current
+    # pair is incomplete by construction — the fresh `--start` dict carries no
+    # `round_ended_at` — so it falls through to the carried window, which is the case
+    # this fallback exists for.
     for start_key, end_key in (
-        ("previous_round_started_at", "previous_round_ended_at"),
         ("round_started_at", "round_ended_at"),
+        ("previous_round_started_at", "previous_round_ended_at"),
     ):
         start, end = d.get(start_key), d.get(end_key)
         if isinstance(start, (int, float)) and isinstance(end, (int, float)):

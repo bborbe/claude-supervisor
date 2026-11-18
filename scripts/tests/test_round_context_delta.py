@@ -224,6 +224,34 @@ class ReceiptWindowTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3072 B", result.stdout)
 
+    def test_the_current_pair_wins_when_both_are_complete(self):
+        """Both pairs complete is the ordinary post-finish state; the CURRENT round wins."""
+        import datetime as dt
+        utc = dt.timezone.utc
+        r = self.write("r3.json", json.dumps({
+            "round_started_at": dt.datetime(2026, 11, 18, 10, 0, 0, tzinfo=utc).timestamp(),
+            "round_ended_at": dt.datetime(2026, 11, 18, 10, 1, 0, tzinfo=utc).timestamp(),
+            # an OLDER carried window that must not win
+            "previous_round_started_at": dt.datetime(2026, 11, 18, 8, 0, 0, tzinfo=utc).timestamp(),
+            "previous_round_ended_at": dt.datetime(2026, 11, 18, 8, 5, 0, tzinfo=utc).timestamp(),
+        }))
+        result = self.run_cli(self.transcript(), r)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # 10:00-10:01 holds the 3072 B; the 08:00-08:05 window holds nothing
+        self.assertIn("3072 B", result.stdout)
+
+    def test_a_previous_start_without_an_end_falls_back_to_the_current_pair(self):
+        import datetime as dt
+        utc = dt.timezone.utc
+        r = self.write("r4.json", json.dumps({
+            "round_started_at": dt.datetime(2026, 11, 18, 10, 0, 0, tzinfo=utc).timestamp(),
+            "round_ended_at": dt.datetime(2026, 11, 18, 10, 1, 0, tzinfo=utc).timestamp(),
+            "previous_round_started_at": dt.datetime(2026, 11, 18, 8, 0, 0, tzinfo=utc).timestamp(),
+        }))
+        result = self.run_cli(self.transcript(), r)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3072 B", result.stdout)
+
     def test_a_receipt_without_an_end_is_an_error(self):
         result = self.run_cli(self.transcript(), self.receipt())
         self.assertEqual(result.returncode, 2)

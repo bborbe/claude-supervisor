@@ -1017,12 +1017,20 @@ def start(topic: str, branch: str = "") -> int:
     # `previous_round_started_at → previous_round_ended_at` the one window that IS a
     # completed round, mirroring the start pair exactly.
     previous = read_receipt(s)
-    old = previous.get("round_started_at")
     d = {"topic": topic, "round_started_at": time.time(), "fields": {}}
-    if old:
-        d["previous_round_started_at"] = old
     if previous.get("round_ended_at"):
+        # the round that just finished is the window to carry
+        d["previous_round_started_at"] = previous["round_started_at"]
         d["previous_round_ended_at"] = previous["round_ended_at"]
+    elif previous.get("previous_round_ended_at"):
+        # ⚠️ **An abandoned round must not destroy the last completed window.** A round
+        # that is `--start`ed and never `--finish`ed replaces a receipt that still holds
+        # the previous completed pair; carrying only `round_started_at` would drop it, so
+        # `start → finish → start → start` would lose the window this carry exists to keep.
+        d["previous_round_started_at"] = previous["previous_round_started_at"]
+        d["previous_round_ended_at"] = previous["previous_round_ended_at"]
+    elif previous.get("round_started_at"):
+        d["previous_round_started_at"] = previous["round_started_at"]
     write_atomic(path(s), json.dumps(d) + "\n")
     print(f"started {s}")
     return 0
