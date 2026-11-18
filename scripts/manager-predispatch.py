@@ -99,6 +99,63 @@ Exit codes (same three the loop gate uses)
       clause's reason on a tree whose digest had not moved — the clause permanently true,
       not intermittently. `ACTIONABLE_BUCKETS` therefore holds `ready-to-start` alone.
 
+      ⚠️ A FUTURE-DEFERRED row is subtracted from that clause, and it is the second trap of
+      the same shape. A `defer_date` still in the future is a deliberate park: the sweep
+      reader's deferred overlay repaints the cell and subtracts the row from the OFFER,
+      **never from the classification** (`agents/goal-sweep-reader.md` § bucket list), so a
+      `next` row carrying one keeps the `ready-to-start` key. Counting it made the
+      no-change verdict unreachable for any subject holding a single parked row — and the
+      frozen-tree predicate reads only mtime plus open `asked-of-you`, so it answered
+      FROZEN on the same tick. The round then started, both legs gated, `--save` never
+      ran, and the two answers stayed opposed for the whole life of the defer. Measured
+      2026-11-17 on the goal `Manager Token Overhead Falls and the Worker Share Rises`
+      (manager session `5b29b81a-e7c2-4cca-bd66-2b1b216151aa`, interval 900s):
+      `--print` -> `CHANGE digest differs` (exit 10) against `--predicate` -> `FROZEN`
+      (exit 0), the subject's only non-terminal content being the row deferred to
+      2026-11-23. The subtraction is by `deferred_names`, which uses the shared
+      `defer-date.py` so both stored shapes parse; an unparseable value is NOT deferred
+      (the safe direction: a replay, never a suppressed dispatch) and a value that has come
+      due is actionable again on the first tick after it expires.
+
+      ⚠️ The same clause reads the classification against the TRACKED SET, and that is a
+      third trap of the same shape: a stored entry naming a row that has since completed,
+      aborted, gone on hold, returned to the backlog, or left the tracked set is a snapshot
+      from an earlier tick — and a gated round never runs the sweep that would reclassify
+      it. Measured on the same subject: `bucket_sets["ready-to-start"]` still carried an
+      `aborted` row, so the clause stayed true after the deferred row was excluded.
+      `NOT_ACTIONABLE_STATUSES` and the missing-name drop are what make the clause answer
+      what the act leg could do now rather than what it could have done at the last sweep.
+
+      ⚠️ And the `digest_moved` clause is a SEPARATE deadlock path of the same shape, which
+      the actionable narrowing does not touch — the measured reason was `digest differs`,
+      not `actionable`. A gated round never reaches `--save`, so a digest left stale by the
+      last content change is never refreshed, and `--print` keeps answering CHANGE against
+      a gate answering FROZEN. `--predicate --persist` closes it by settling the stored
+      digest to the tree's current one on a FROZEN verdict — authorised by that verdict,
+      since a frozen tree renders the same table it last rendered.
+
+      ⚠️ And the settle reads the tree ONCE, through `gate_snapshot`: the digest it stores
+      is the digest of the very snapshot the FROZEN verdict was decided on. A settle that
+      re-read the tracked set after the verdict would bake a content change landing in
+      that window into the stored digest; the next `--print` would then compare equal and
+      never dispatch it — the same suppression this clause exists to remove, restored by
+      its own fix.
+
+      ⚠️ And the settle is authorised only over the FILE half of the digest. The digest
+      also hashes liveness death, stuck, hold and membership, none of which moves an mtime,
+      so a quiet tree can hold a worker that died or a hold that landed. Settling those in
+      would replay the stored table over a changed row and never dispatch it, so the
+      predicate carries a third conjunct: the stored sweep's `live_digest` must be
+      unchanged, and when it moved the verdict is NOT-FROZEN and the legs run. See
+      `live_digest_of` and `frozen_tree`.
+
+      ⚠️ And a quiet tree is not proof that the STORED TABLE is current: `quiet` only says
+      no mtime moved for ≥2 intervals. A content write that landed while the manager was
+      down is older than the window but newer than the render, so settling it away would
+      keep the pre-change table and `--print` would replay it forever. The fourth conjunct
+      is `render_postdates` — the record's own `recorded_at` must be at or after the newest
+      tracked mtime — and when it is not, the verdict is NOT-FROZEN and the sweep runs.
+
       ⚠️ The parked-set clause is a THIRD reason of the same shape, and it is the one that
       keeps the replay honest. `digest_of` hashes a DEATH-only liveness term, so a worker
       opening or closing a gate moves no digest input — while its row's Status cell really
@@ -665,6 +722,10 @@ def read_task(path: str) -> dict | None:
         "name": os.path.basename(path)[:-3],
         "status": fm_scalar(fm, "status"),
         "phase": fm_scalar(fm, "phase"),
+        # ⚠️ Raw scalar, parsed by the shared `defer-date.py` at the verdict — never here.
+        # `read_task` is a pure read and must not decide what an unparseable value means;
+        # `defer_state` answers `invalid`, which `deferred_names` treats as not-deferred.
+        "defer_date": fm_scalar(fm, "defer_date"),
         "session": fm_scalar(fm, "claude_session_id").strip("'\""),
         "sessions": session_id_set(fm),
         # ⚠️ The shared normaliser, never `fm_wikilinks`: that one returns only `[[...]]`
@@ -763,11 +824,26 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
 # mtime has moved for >= 2 cadence intervals (30 min at the 15-min default), and the
 # tick's content has already left the machine."
 #
-# Both conjuncts are required and they are DIFFERENT claims. The first reads the
+# Both runbook conjuncts are required and they are DIFFERENT claims. The first reads the
 # tracked set's mtimes. The second has no instrument in the runbook, so it is read
 # here: the round's own session ledger must carry no OPEN `asked-of-you`. An open one
 # is a question the operator has not answered — its content has NOT left the machine —
 # and gating over it would hide the one place they read it.
+#
+# ⚠️ A THIRD conjunct is required by `--persist`, and it is not in the runbook's
+# sentence because the runbook predates the settle: the stored sweep's non-file inputs
+# (`live_digest_of` — liveness death, stuck, hold, parked, membership) must be unchanged.
+# A quiet tree can hold a worker that died or a hold that landed; neither moves an mtime,
+# both move the digest, and settling past one would replay the stored table over a changed
+# row and never dispatch it. When it moved, the verdict is NOT-FROZEN so the legs run —
+# which is what makes the gate and the change gate agree on a death instead of
+# contradicting.
+#
+# ⚠️ A FOURTH conjunct is the render's currency (`render_postdates`): the stored table
+# must postdate every tracked write. `quiet` says no mtime moved for ≥2 intervals, NOT
+# that the table was rendered after the last write — a content write that landed while
+# the manager was down is older than the window but newer than the render, and settling
+# it away would keep the pre-change table and replay it forever.
 #
 # ⚠️ This is NOT the digest `--check` computes. That one hashes content and liveness
 # and deliberately excludes raw mtime; `round-quiet.md` states the two are "a
@@ -810,32 +886,202 @@ def open_asked_of_you(session_id: str = "") -> list[dict]:
     ]
 
 
+def gate_snapshot(vault: str, subject: str, now: float | None = None) -> dict:
+    """Resolve every input the verdict and a settled digest share, ONCE.
+
+    ⚠️ **The single-instant rule is a fail-closed fix, not tidiness.** `--predicate
+    --persist` used to decide FROZEN from one read of the tracked set and then re-read
+    the set to compute the digest it stored. A content change landing between those two
+    reads was baked into the stored digest, so the next `--print` compared equal and
+    never dispatched it — the exact suppression this gate exists to remove, reintroduced
+    by the fix for the stale-digest deadlock. Reading the tracked set, the registry, the
+    feed and the record once and deriving both answers from that one snapshot leaves no
+    such window: anything that moves afterwards is visible to the next reader, whose
+    fresh digest then differs and answers CHANGE.
+    """
+    now = time.time() if now is None else now
+    branch, members = resolve_subject(vault, subject)
+    tracked = resolve_tracked(vault, members)
+    # ONE read of the record: `prev` feeds the enrichment, and `stored`/`table` are the
+    # same read's stored render — a settle that re-read the file would write a record
+    # mixing this snapshot's digest with a newer table a concurrent `--save` had landed.
+    prev = load_state(subject)
+    prev_busy = prev.get("busy_since") or {}
+    stored = prev.get("digest") if isinstance(prev.get("digest"), str) else None
+    table = prev.get("table") if isinstance(prev.get("table"), str) else ""
+    recorded_at = prev.get("recorded_at") if isinstance(prev.get("recorded_at"), str) else ""
+    registry = read_registry()
+    enrich_liveness(tracked, registry, read_feed())
+    # The SAME enrichment `evaluate` applies before `digest_of`; without it the liveness
+    # term defaults to the death value for every row carrying a session id, and the
+    # settled digest could never match the one the next `--print` computes. The returned
+    # busy map is deliberately discarded: `--save` owns that clock (see `settle_digest`).
+    apply_stuck(tracked, registry, prev_busy, now)
+    return {
+        "branch": branch,
+        "tracked": tracked,
+        "prev": prev,
+        "prev_busy": prev_busy,
+        "stored": stored,
+        "table": table,
+        "recorded_at": recorded_at,
+        "digest": digest_of(tracked),
+        "live_digest": live_digest_of(tracked),
+        "now": now,
+    }
+
+
+def render_postdates(recorded_at: str, newest_mtime: float | None) -> bool:
+    """Whether the stored render was produced AFTER the newest tracked write.
+
+    `recorded_at` is the payload's own mtime, written by `--save` at render time
+    (`save_stored`), so it dates the TABLE, not the save. ⚠️ This is the guard the
+    critical review round named: `quiet` only says no mtime moved for ≥2 intervals — it
+    does not say the table was rendered after the last write. A write at T1, a manager
+    down until T3 (>2 intervals later), and a settle at T3 would store T3's digest beside
+    T0's table, and `--print` would then answer NOCHANGE and replay T0 forever, with the
+    T1 change never swept.
+
+    A record with no `recorded_at`, an unparseable one, or no tracked mtimes at all is
+    answered `False`/`True` respectively: the first is "cannot say" (fail-open — one
+    sweep), the second has nothing for a render to be stale against.
+    """
+    if newest_mtime is None:
+        return True
+    if not recorded_at:
+        return False
+    try:
+        stamp = datetime.fromisoformat(recorded_at)
+    except ValueError:
+        return False
+    return stamp.timestamp() >= newest_mtime
+
+
 def frozen_tree(vault: str, subject: str, now: float | None = None,
                 interval_seconds: int = CADENCE_INTERVAL_SECONDS,
-                intervals: int = FROZEN_INTERVALS) -> dict:
-    """The frozen-tree predicate's verdict, both conjuncts evaluated."""
+                intervals: int = FROZEN_INTERVALS,
+                snapshot: dict | None = None) -> dict:
+    """The frozen-tree predicate's verdict: four conjuncts, all required.
+
+    The two documented ones read the tree — no tracked file's mtime moved for ≥2 cadence
+    intervals, and the tick's content has left the machine (no open `asked-of-you`).
+    ⚠️ **The third is the settle's precondition, and it is not optional:** the stored
+    sweep's non-file inputs (`live_digest_of` — liveness death, stuck, hold, membership,
+    the parked set) must be unchanged. A tree can be quiet while a worker dies or a hold
+    lands, and those are digest inputs the mtime conjunct cannot see; settling the digest
+    past one would replay the stored table over a changed row and never dispatch it. When
+    they moved the verdict is NOT-FROZEN, so the legs run and the sweep re-renders. An
+    absent stored `live_digest` (a record from before the field) is "cannot say" and
+    answers the same way — one sweep, self-healed by its own `--save`.
+
+    ⚠️ **The fourth is the render's currency** (`render_postdates`): the stored table must
+    postdate every tracked write. Without it a content change that landed while the
+    manager was down is settled away — the digest advances past it while the table keeps
+    the pre-change render, and `--print` then answers NOCHANGE forever.
+
+    `snapshot` is `gate_snapshot`'s result. ⚠️ A caller that also settles the digest MUST
+    pass the snapshot its verdict was decided on — that is what keeps the two answers
+    describing a single instant. Omitted (a pure read, a test), the set is resolved here.
+    """
     now = time.time() if now is None else now
-    _, members = resolve_subject(vault, subject)
-    tracked = resolve_tracked(vault, members)
+    if snapshot is None:
+        snapshot = gate_snapshot(vault, subject, now=now)
+    tracked = snapshot["tracked"]
     mtimes = [t["mtime"] for t in tracked if t.get("mtime")]
     newest = max(mtimes) if mtimes else None
     window = intervals * interval_seconds
     quiet = newest is None or (now - newest) >= window
     asks = open_asked_of_you()
+    stored_live = snapshot["prev"].get("live_digest")
+    live_stable = isinstance(stored_live, str) and stored_live == snapshot["live_digest"]
+    render_current = render_postdates(snapshot["recorded_at"], newest)
     return {
-        "frozen": bool(quiet and not asks),
+        "frozen": bool(quiet and not asks and live_stable and render_current),
         "tracked": len(tracked),
         "newest_mtime": newest,
         "quiet_seconds": None if newest is None else int(now - newest),
         "window_seconds": window,
         "open_asks": [i.get("text", "") for i in asks],
+        "live_stable": live_stable,
+        "render_current": render_current,
     }
 
 
-def predicate(vault: str, subject: str) -> int:
-    """Print the verdict and its two reads; exit 0 only when frozen."""
-    v = frozen_tree(vault, subject)
+def settle_digest(subject: str, snapshot: dict) -> None:
+    """Write the snapshot's digest to the stored record, keeping the stored render.
+
+    Authorised ONLY by a FROZEN verdict on that same snapshot: the predicate has already
+    decided that no tracked file's mtime moved and that the tick's content left the
+    machine, so the cached table is still what the sweep would render. Without this, a
+    stale digest makes `--print` answer CHANGE on every tick while the legs gate — and a
+    gated round never reaches `--save` (`commands/steps/goal-sweep.md`: exit 0 dispatches
+    no reader and runs `--render-cached`, not the persist block), so the two answers stay
+    opposed for as long as the tree stays quiet. That is the second deadlock path,
+    distinct from the actionable clause's: the cited measurement prints `CHANGE digest
+    differs`, which is `digest_moved`.
+
+    ⚠️ **`snapshot` is REQUIRED and carries the digest itself; nothing is re-read here.**
+    A re-read at a later instant is the fail-closed window the reviewer named: a content
+    change landing after the FROZEN verdict would be baked into the stored digest, and
+    the next `--print` would then compare equal and silently never dispatch it. See
+    `gate_snapshot`.
+
+    ⚠️ It writes the PREVIOUS busy-since map, not the snapshot's freshly computed one.
+    The clock belongs to `--save`: settling a frozen tick with a map whose `since` values
+    were just minted would restart a busy worker's stuck clock on every gated tick.
+
+    Best-effort and silent on failure: the verdict belongs to the predicate, and a write
+    error must not turn FROZEN into NOT-FROZEN. The next gated tick retries.
+    """
+    # Both halves come from `gate_snapshot`'s ONE read of the record. Re-reading here
+    # would let a concurrent `--save` land in between, so this write would mix the
+    # snapshot's digest with a newer table and the older record's bucket sets.
+    table = snapshot["table"]
+    if not table.strip():
+        # No stored render to keep: nothing to settle, and inventing one would record a
+        # table the sweep never produced.
+        return
+    prev = snapshot["prev"]
+    stored = snapshot["stored"]
+    digest = snapshot["digest"]
+    if stored == digest:
+        return
+    try:
+        save_stored(
+            subject,
+            snapshot["branch"],
+            digest,
+            table,
+            snapshot["tracked"],
+            snapshot["prev_busy"],
+            bucket_sets=prev.get("bucket_sets"),
+            recorded_at=prev.get("recorded_at"),
+        )
+    except OSError:
+        return
+
+
+def predicate(vault: str, subject: str, persist: bool = False) -> int:
+    """Print the verdict and its two reads; exit 0 only when frozen.
+
+    ⚠️ **`persist` acts ONLY on a FROZEN verdict.** A gated tick moves nothing, so the
+    digest it computes is the one the next tick will compute too — and the round it just
+    short-circuited never reaches `--save`. Settling the stored digest here is what stops
+    `--print` answering CHANGE against a gate that answered FROZEN. On NOT-FROZEN the legs
+    run and the sweep's own `--save` writes the record, so nothing is touched.
+
+    ⚠️ **The verdict and a settled digest share ONE snapshot** (`gate_snapshot`), so a
+    change landing after the read is dispatched by the next `--print` instead of being
+    baked into the digest that would suppress it. ⚠️ **And FROZEN now requires the stored
+    sweep's live inputs to be unchanged** (`live_digest_of`): a death, stuck flip, hold or
+    membership change moves no mtime, and settling past one would suppress the very
+    dispatch the digest's liveness term exists to force.
+    """
+    snapshot = gate_snapshot(vault, subject)
+    v = frozen_tree(vault, subject, now=snapshot["now"], snapshot=snapshot)
     if v["frozen"]:
+        if persist:
+            settle_digest(subject, snapshot)
         print(
             f"FROZEN — newest tracked mtime {v['quiet_seconds']}s ago "
             f"(window {v['window_seconds']}s), 0 open asked-of-you, {v['tracked']} tracked"
@@ -848,6 +1094,12 @@ def predicate(vault: str, subject: str) -> int:
         )
     if v["open_asks"]:
         why.append(f"{len(v['open_asks'])} open asked-of-you")
+    if not v["live_stable"]:
+        why.append(
+            "the stored sweep's live inputs moved (death, stuck, hold, parked or membership)"
+        )
+    if not v["render_current"]:
+        why.append("the stored render predates a tracked write (or cannot be dated)")
     print(f"NOT-FROZEN — {'; '.join(why) or 'no tracked files'}")
     return 1
 
@@ -990,6 +1242,28 @@ def _declared_wait():
         spec.loader.exec_module(mod)
         _DECLARED_WAIT = mod
     return _DECLARED_WAIT
+
+
+_DEFER_DATE = None
+
+
+def _defer_date():
+    """Import defer-date.py — the shared `defer_date` reader.
+
+    ⚠️ **Shared, not re-derived.** Both stored shapes must parse (the quoted
+    `"YYYY-MM-DD"` and the unquoted RFC3339 datetime vault-cli writes), and the
+    local-midnight rule belongs to that module. `scripts/close-worker.py` and
+    `scripts/flagged-rows.py` read the same one; a private copy here is the drift the
+    repo's one-definition rule forbids.
+    """
+    global _DEFER_DATE
+    if _DEFER_DATE is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defer-date.py")
+        spec = importlib.util.spec_from_file_location("defer_date", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _DEFER_DATE = mod
+    return _DEFER_DATE
 
 
 _GOALS_DECLARATION = None
@@ -1758,6 +2032,43 @@ def digest_of(tracked: list[dict]) -> str:
     return h.hexdigest()
 
 
+def live_digest_of(tracked: list[dict]) -> str:
+    """The digest's NON-FILE half: liveness death, stuck, hold, and the member set.
+
+    ⚠️ **This exists because the frozen-tree predicate cannot see any of it.** Its two
+    documented conjuncts read mtimes and open `asked-of-you`; a worker dying, a session
+    being held, a stuck flip, or a row leaving the tracked set (a deletion moves no
+    surviving file's mtime) moves the digest and none of those. A `--persist` settle that
+    advanced the stored digest past such a change would replay the stored table over a row
+    whose state really changed and never dispatch it — the suppression the digest's
+    liveness term exists to force a dispatch for. So the predicate requires this half to
+    be unchanged since the stored sweep before it calls a tree frozen (see `frozen_tree`);
+    when it moved, the legs run and the sweep re-renders the row.
+
+    It is stored BESIDE the digest rather than folded into it, on the same reasoning
+    `parked` is: `digest_of` stays a pure function of the tracked set's rendered state,
+    and this is the predicate's own precondition.
+    """
+    h = hashlib.sha256()
+    for t in sorted(tracked, key=lambda x: x["name"]):
+        h.update(
+            f"{t['name']}|{liveness_change_term(t)}|{int(bool(t.get('stuck')))}"
+            f"|{int(is_held(t['session']))}\n".encode()
+        )
+    h.update(b"--members--\n")
+    for t in sorted(tracked, key=lambda x: x["name"]):
+        h.update(f"{t['name']}\n".encode())
+    # The parked set belongs here for the same reason the rest does, and it is the one
+    # that bites through the SAVE path: `save_stored` rewrites `parked` from whatever
+    # tracked set it is handed, so a settle that passed a live<->parked flip would store
+    # the new set against the OLD table — and `parked_replay_reason` would then find the
+    # sets equal and replay a table whose Status cell still shows the row live. Hashing it
+    # makes such a flip NOT-FROZEN, so the legs run and the cell is re-rendered.
+    for name in parked_names(tracked):
+        h.update(f"{name}\n".encode())
+    return h.hexdigest()
+
+
 # --------------------------------------------------------------------------- #
 # bounded stdin
 # --------------------------------------------------------------------------- #
@@ -2170,6 +2481,11 @@ def save_stored(
         "table": strip_links(table),
         "members": len(tracked),
         "busy_since": busy,
+        # The digest's non-file half, stored so the frozen-tree predicate can prove it has
+        # not moved before settling the digest past a quiet tree — see `live_digest_of`.
+        # A record written before this field existed carries no key, which the predicate
+        # reads as "cannot say": NOT-FROZEN, one sweep, self-healed by this same write.
+        "live_digest": live_digest_of(tracked),
         # The rows whose Status cell reads `⌛ waiting-on-human`. The digest is deliberately
         # DEATH-ONLY (see `liveness_change_term`), so a `live` <-> `parked` flip moves no
         # digest input -- and the exit-0 branch would then replay a table whose Status cell
@@ -2228,8 +2544,15 @@ def save_stored(
 # carrying an approval queue. See the module docstring's exit-code note.
 ACTIONABLE_BUCKETS = ("ready-to-start",)
 
+# Statuses under which a row cannot be acted on, whatever the stored classification says.
+# The classification is a snapshot of an earlier tick: a row that has since completed,
+# aborted, gone on hold or returned to the backlog still sits under `ready-to-start` in
+# the record, and counting it keeps the no-change verdict unreachable for as long as the
+# round is gated — because a gated round never runs the sweep that would reclassify it.
+NOT_ACTIONABLE_STATUSES = ("completed", "aborted", "hold", "backlog")
 
-def actionable_names(bucket_sets) -> list[str]:
+
+def actionable_names(bucket_sets, tracked: list[dict] | None = None) -> list[str]:
     """The rows the stored classification places in an actionable bucket, sorted.
 
     Read from the CALLER's own per-bucket half, because that is the only place a row's
@@ -2237,6 +2560,15 @@ def actionable_names(bucket_sets) -> list[str]:
     bucket concept. A missing or malformed half returns `[]` and changes no verdict — the
     gate then behaves exactly as it did before this clause existed, which is the safe
     direction: an absent classification costs a replay, never a wrong dispatch.
+
+    ⚠️ **`tracked` cross-checks the classification, and omitting it disables the check.**
+    The stored set is a snapshot. A row can complete, abort, go on hold, return to the
+    backlog, leave the tracked set, or acquire a future `defer_date` after it was
+    classified, and every one of those leaves the name under `ready-to-start` — so the
+    clause reports CHANGE on every tick, while a gated round never runs the sweep that
+    would reclassify it. Passing the tracked set drops exactly those entries, so the clause
+    answers what the act leg could do NOW rather than what it could have done at the last
+    sweep. A name absent from `tracked` is dropped too: it cannot be opened.
     """
     if not isinstance(bucket_sets, dict):
         return []
@@ -2245,7 +2577,49 @@ def actionable_names(bucket_sets) -> list[str]:
         rows = bucket_sets.get(bucket)
         if isinstance(rows, list):
             names.extend(n for n in rows if isinstance(n, str) and n.strip())
-    return sorted(set(names))
+    names = sorted(set(names))
+    if tracked is None:
+        return names
+    by_name = {t.get("name"): t for t in tracked}
+    deferred = deferred_names(tracked)
+    live: list[str] = []
+    for name in names:
+        row = by_name.get(name)
+        if row is None:
+            continue
+        if str(row.get("status") or "").strip().lower() in NOT_ACTIONABLE_STATUSES:
+            continue
+        if name in deferred:
+            continue
+        live.append(name)
+    return live
+
+
+def deferred_names(tracked: list[dict]) -> set:
+    """The rows whose `defer_date` names an instant still in the FUTURE.
+
+    A future defer is a deliberate park, not work the act leg can do. The sweep reader
+    keeps the row in its ordinary bucket — the overlay repaints the cell and subtracts it
+    from the OFFER, never from the classification — so without this subtraction one parked
+    row makes the `ready-to-start` clause permanently non-empty: the gate answers CHANGE on
+    every tick while the frozen-tree predicate answers FROZEN on the same tick, the round
+    starts, both legs gate, and nothing is read or acted on for the whole life of the defer.
+
+    ⚠️ An unparseable `defer_date` is NOT deferred. `defer_state` answers `invalid`, and
+    the safe direction is the pre-existing behaviour: the row stays actionable, costing a
+    replay rather than risking a suppressed dispatch. A value that has come due is `due`,
+    so the row is actionable again on the first tick after it expires.
+    """
+    mod = _defer_date()
+    now = mod.as_now()
+    names = set()
+    for row in tracked:
+        state, _detail = mod.defer_state(row.get("defer_date"), now)
+        if state == "deferred":
+            name = row.get("name")
+            if name:
+                names.add(name)
+    return names
 
 
 def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
@@ -2282,7 +2656,12 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     # render-truth check about a single cell has any business moving it. See the module
     # docstring's exit-code note.
     digest_moved = stored != digest
-    actionable = actionable_names(stored_bucket_sets)
+    # Cross-checked against the tracked set: an entry that names a row which is gone,
+    # terminal, or future-deferred is a snapshot from an earlier tick, not work the act leg
+    # can do now — see `actionable_names`. Without the cross-check one such entry keeps this
+    # clause permanently true on a gated round, which never runs the sweep that would
+    # reclassify it.
+    actionable = actionable_names(stored_bucket_sets, tracked)
     parked_reason = parked_replay_reason(prev.get("parked"), parked_names(tracked))
     changed = (
         fail_reason is not None
@@ -2797,10 +3176,22 @@ def main(argv: list[str]) -> int:
         "--predicate",
         action="store_true",
         help=(
-            "evaluate the frozen-tree predicate — BOTH conjuncts: no tracked file's "
-            "mtime moved for >= 2 cadence intervals, AND no open `asked-of-you` in this "
-            "session's ledger — printing FROZEN or NOT-FROZEN with its reads; exit 0 "
-            "only when frozen. This is not the digest `--check` computes"
+            "evaluate the frozen-tree predicate — all four conjuncts: no tracked file's "
+            "mtime moved for >= 2 cadence intervals, no open `asked-of-you` in this "
+            "session's ledger, the stored sweep's live inputs (death, stuck, hold, parked, "
+            "membership) unchanged, AND the stored render postdating every tracked write — "
+            "printing FROZEN or NOT-FROZEN with its reads; exit 0 only when frozen. This is "
+            "not the digest `--check` computes"
+        ),
+    )
+    ap.add_argument(
+        "--persist",
+        action="store_true",
+        help=(
+            "with --predicate: on a FROZEN verdict, rewrite the stored digest to the "
+            "tree's current one (keeping the stored table). A gated round never reaches "
+            "`--save`, so without this a stale digest keeps `--print` answering CHANGE "
+            "against a gate answering FROZEN"
         ),
     )
     mode.add_argument(
@@ -2862,8 +3253,14 @@ def main(argv: list[str]) -> int:
         print("--heal requires --compare-tracked", file=sys.stderr)
         return EXIT_USAGE
 
+    if args.persist and not args.predicate:
+        # `--persist` is not a mode: it modifies the predicate's FROZEN verdict. Pairing it
+        # with any other mode would read as a request to write from a read-only command.
+        print("--persist only applies with --predicate", file=sys.stderr)
+        return EXIT_USAGE
+
     if args.predicate:
-        return predicate(args.vault, args.subject)
+        return predicate(args.vault, args.subject, persist=args.persist)
 
     if args.content_keys:
         # The single home of the derivation clause (1) used to carry as prose. The leg is an
