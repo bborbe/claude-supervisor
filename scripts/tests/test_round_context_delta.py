@@ -91,17 +91,42 @@ class CliTest(unittest.TestCase):
             capture_output=True, text=True,
         )
 
-    def test_reports_each_round_and_a_median(self):
+    def test_reports_each_closed_round_and_a_median(self):
+        # Three fires = two CLOSED rounds; the trailing segment is dropped.
         lines = [json.dumps(fire(ts="t1")), json.dumps(assistant("a" * 2048)),
-                 json.dumps(fire(ts="t2")), json.dumps(assistant("b" * 1024))]
+                 json.dumps(fire(ts="t2")), json.dumps(assistant("b" * 1024)),
+                 json.dumps(fire(ts="t3")), json.dumps(assistant("c" * 512))]
         result = self.run_cli("\n".join(lines))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("round  1", result.stdout)
         self.assertIn("2 round(s)", result.stdout)
         self.assertIn("median", result.stdout)
 
-    def test_json_shape(self):
+    def test_the_trailing_open_round_is_dropped(self):
+        """Nothing closed it, so its bytes include everything after its marker."""
+        lines = [json.dumps(fire(ts="t1")), json.dumps(assistant("a" * 100)),
+                 json.dumps(fire(ts="t2")), json.dumps(assistant("b" * 100))]
+        result = self.run_cli("\n".join(lines))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1 round(s)", result.stdout)
+
+    def test_include_open_reports_it(self):
+        lines = [json.dumps(fire(ts="t1")), json.dumps(assistant("a" * 100)),
+                 json.dumps(fire(ts="t2")), json.dumps(assistant("b" * 100))]
+        result = self.run_cli("\n".join(lines), "--include-open")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 round(s)", result.stdout)
+
+    def test_a_single_marker_is_an_error_not_an_8mb_round(self):
+        # Measured 2026-11-18 on cfaf1455: one marker produced an 8508 KB "round".
         lines = [json.dumps(fire(ts="t1")), json.dumps(assistant("a" * 100))]
+        result = self.run_cli("\n".join(lines))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no CLOSED round", result.stderr)
+
+    def test_json_shape(self):
+        lines = [json.dumps(fire(ts="t1")), json.dumps(assistant("a" * 100)),
+                 json.dumps(fire(ts="t2")), json.dumps(assistant("b" * 50))]
         result = self.run_cli("\n".join(lines), "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)

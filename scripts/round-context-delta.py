@@ -97,7 +97,15 @@ def load(path: Path) -> list[dict]:
 
 
 def segment(records: list[dict], prefix: str) -> list[dict]:
-    """Rounds, each with the bytes added after its marker."""
+    """Rounds, each with the bytes added after its marker.
+
+    ⚠️ **The final round is marked `open`** — nothing closed it, so everything
+    after its marker (a later unrelated turn, a whole session's tail) is charged
+    to it. Measured 2026-11-18 on `cfaf1455`: one marker in the whole transcript
+    produced a single "round" of **8.5 MB**. A round is measured from its fire to
+    the next fire, so an unclosed one is not a measurement; `main` drops it unless
+    `--include-open` asks for it.
+    """
     rounds: list[dict] = []
     current = None
     for record in records:
@@ -114,6 +122,8 @@ def segment(records: list[dict], prefix: str) -> list[dict]:
         if record.get("isSidechain"):
             continue
         current["bytes"] += record_bytes(record)
+    if rounds:
+        rounds[-1]["open"] = True
     return rounds
 
 
@@ -124,12 +134,29 @@ def main(argv=None) -> int:
     parser.add_argument("--prompt-prefix", default="/supervisor:fleet-drive",
                         help="the round prompt a scheduler fire must start with")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of lines")
+    parser.add_argument(
+        "--include-open",
+        action="store_true",
+        help="also report the trailing round, which nothing closed — its bytes include "
+             "everything after its marker, so it is not a round measurement",
+    )
     args = parser.parse_args(argv)
 
     if not args.transcript.exists():
         print(f"transcript not found: {args.transcript}", file=sys.stderr)
         return 2
     rounds = segment(load(args.transcript), args.prompt_prefix)
+    if rounds and not args.include_open:
+        rounds = [r for r in rounds if not r.get("open")]
+        if not rounds:
+            print(
+                f"{args.transcript} has no CLOSED round — its only marker(s) were never "
+                f"followed by another fire, so the trailing segment includes everything "
+                f"after them and is not a round measurement. Re-run with --include-open "
+                f"to see it anyway.",
+                file=sys.stderr,
+            )
+            return 2
     if not rounds:
         print(
             f"no round markers found in {args.transcript} — a fire must carry "
