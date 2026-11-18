@@ -48,6 +48,14 @@ source left, and the stale-row rule above can never fire for it. Its transcript
 has been idle past `TRANSCRIPT_IDLE_SECONDS`. No transcript, a fresh one, or an unreadable
 endpoint keeps UNKNOWN.
 
+⚠️ **A registry entry that computes `alive: False` is ABSENT only while the session's transcript is
+also quiet.** `alive: False` describes the RECORD's pid — gone, or the number recycled onto another
+process — so a live session no longer represented by any record reads that way while it is still
+writing. A transcript written within `TRANSCRIPT_RECENT_SECONDS` (120 s) keeps UNKNOWN; a transcript
+that resolves to nothing keeps today's ABSENT. ⚠️ **Both ABSENT licences carry it** — the per-id
+`_absent_licensed` and the endpoint-down `_local_verdict` — on one shared constant and one shared
+resolver, so the two cannot drift apart.
+
 ⚠️ **ABSENT is licensed only while the endpoint's coverage of live sessions is COMPLETE, and
 that is a precondition this file cannot establish for itself — it is established PER ID on the
 one path that needs it.** Every verdict rests on the
@@ -182,6 +190,17 @@ _ID_MAX = 36
 # only a transcript idle past this threshold is evidence the process is gone. 15 minutes sits
 # well past any tool call a live session sits inside without writing a record.
 TRANSCRIPT_IDLE_SECONDS = 15 * 60
+
+# How recent a transcript write must be to disprove a registry record's `alive: False`.
+# ⚠️ **`alive: False` is a statement about the RECORD's pid, not the session.** `session-identity`
+# answers it when the pid is gone or is held by a different process (`_pid_identity`), so a record
+# that outlived its session plus a pid the OS has since recycled reads as death for a session that
+# is demonstrably still writing. Measured 2026-11-17: two live sessions read ABSENT at 11 s and
+# 34 s after a transcript write while the registry held them `busy` on a recycled pid. 120 s
+# covers both with room; the cost is that a genuinely exited session reads UNKNOWN for at most
+# 120 s after its last write, against a fleet round of 15 min — at most one round's delay on a
+# reap, and only for a session that exited less than two minutes ago.
+TRANSCRIPT_RECENT_SECONDS = 120
 
 
 def _projects_dir(projects_dir=None):
@@ -593,6 +612,15 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
     the answer is ABSENT only when `row` is such a record; no record (the per-id 404), or any
     unreadable one, keeps UNKNOWN.
 
+    ⚠️ **`alive: False` is a statement about the RECORD's pid, so a recent transcript write
+    disproves it.** `_pid_identity` answers `False` when the pid is gone or is held by a DIFFERENT
+    process, and a record that outlived its session leaves exactly that shape once the OS recycles
+    the number — while the session itself keeps writing its transcript. Measured 2026-11-17: two
+    live sessions read ABSENT at 11 s and 34 s after a transcript write, both held `busy` in the
+    registry on a recycled pid. So the last check before ABSENT is `_transcript_idle_seconds`:
+    inside `TRANSCRIPT_RECENT_SECONDS` the answer is UNKNOWN, and a transcript that resolves to
+    nothing (or is older) leaves today's ABSENT — the reaper's case, asserted independently.
+
     Returns `(ABSENT, "no session id matches <sid>", None)` — the original wording, byte for
     byte, so no caller's message parsing moves — or `(UNKNOWN, <why>, None)`.
     """
@@ -645,6 +673,21 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
             "endpoint %s — the endpoint's coverage of live sessions is "
             "incomplete, so ABSENT cannot be licensed (cause: %s)" % (non_dead[0], endpoint_state, cause)
         ), None
+    # ⚠️ **`alive: False` is a statement about the RECORD, not the session.** Every matched entry
+    # has a pid the OS no longer holds for it — which is exactly what a record that outlived its
+    # session looks like AFTER the pid number is recycled onto another process. So the last
+    # question before ABSENT is whether the session is still writing: a transcript written inside
+    # `TRANSCRIPT_RECENT_SECONDS` disproves death, and the record's pid is the stale half.
+    # ⚠️ **`idle is None` keeps today's answer.** A transcript that resolves to nothing is no
+    # evidence either way, so the genuinely-dead id whose transcript was cleaned up still reads
+    # ABSENT — the reaper keeps the one verdict it reclaims on (SC2 of the filing task).
+    idle = _transcript_idle_seconds(sid, projects_dir)
+    if idle is not None and idle <= TRANSCRIPT_RECENT_SECONDS:
+        return UNKNOWN, (
+            "%s is held by the identity registry as dead (alive: False) while its transcript "
+            "was written %ds ago — a live session whose record's pid was recycled reads this "
+            "way, so ABSENT cannot be licensed (cause: %s)" % (matched[0], int(idle), cause)
+        ), None
     return ABSENT, "no session id matches %s" % sid, None
 
 
@@ -679,7 +722,7 @@ def _headless_live_ids():
         return None
 
 
-def _local_verdict(sid, registry_dir=None, why=""):
+def _local_verdict(sid, registry_dir=None, why="", projects_dir=None):
     """`(verdict, message, row)` from the on-disk channels, for when the endpoint cannot be read.
 
     ⚠️ **This is the fallback half of the union and it may never license `ABSENT` from a
@@ -691,6 +734,15 @@ def _local_verdict(sid, registry_dir=None, why=""):
     The registry's three-state `alive` maps exactly as `_absent_licensed` maps it, on the same
     `alive is not False` predicate, so the two paths cannot disagree: `True` → LIVE, `None` →
     UNKNOWN, `False` → ABSENT (the registry HOLDS an entry and computes death).
+
+    ⚠️ **`alive: False` is a statement about the RECORD's pid, so a recent transcript write
+    disproves it — the same arm `_absent_licensed` carries.** `_pid_identity` answers `False`
+    when the pid is gone or is held by a DIFFERENT process, so a record that outlived its
+    session reads that way once the OS recycles the number, while the session keeps writing.
+    A transcript written within `TRANSCRIPT_RECENT_SECONDS` therefore keeps UNKNOWN here too;
+    one that resolves to nothing, or is older, leaves today's ABSENT. ⚠️ **One window, two
+    arms**: the constant and the resolver are shared with `_absent_licensed` deliberately, so
+    the two ABSENT licences cannot drift apart.
 
     The `row` returned is `None` on every branch: there is no heartbeat row to carry, and
     `_check`'s callers unpack three values.
@@ -746,6 +798,18 @@ def _local_verdict(sid, registry_dir=None, why=""):
             return UNKNOWN, (
                 "%s — %s computes dead, but the headless heartbeat store could not be read, so "
                 "ABSENT cannot be licensed" % (why, matched[0])
+            ), None
+        # ⚠️ **The record's death is disproved by a transcript written moments ago.** This is
+        # the second ABSENT licence in the file, so it carries the same guard `_absent_licensed`
+        # carries: a recycled pid on a record that outlived its session reads as death for a
+        # session that is demonstrably still writing. `idle is None` keeps today's ABSENT — a
+        # transcript that resolves to nothing is no evidence either way.
+        idle = _transcript_idle_seconds(sid, projects_dir)
+        if idle is not None and idle <= TRANSCRIPT_RECENT_SECONDS:
+            return UNKNOWN, (
+                "%s — %s computes dead, but its transcript was written %ds ago; a live session "
+                "whose record's pid was recycled reads this way, so ABSENT cannot be licensed"
+                % (why, matched[0], int(idle))
             ), None
         return ABSENT, "%s (identity registry reports the pid gone for %s)" % (
             why, matched[0]
@@ -844,6 +908,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, 
                 int(round((time.monotonic() - started) * 1000)),
                 _describe_read_failure(exc),
             ),
+            projects_dir=projects_dir,
         )
     if status != 200 or not isinstance(rows, list):
         # ⚠️ **Not ABSENT.** A 5xx, a 403, a body that is not JSON — none of them is the store
@@ -861,6 +926,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, 
                 status,
                 int(round((time.monotonic() - started) * 1000)),
             ),
+            projects_dir=projects_dir,
         )
 
     # The list carries every session the store has ever seen, live or stale — a stale row is
@@ -937,6 +1003,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, 
                 int(round((time.monotonic() - started) * 1000)),
                 _describe_read_failure(exc),
             ),
+            projects_dir=projects_dir,
         )
     if status == 200 and isinstance(row, dict):
         return _verdict_for(row, sid, registry_dir, projects_dir)
