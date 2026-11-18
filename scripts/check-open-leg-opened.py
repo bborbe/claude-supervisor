@@ -50,7 +50,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def verdict(selected: int, opened: int, resumed: int, jumped: int, refused: int) -> tuple[int, str]:
     if selected < 0 or opened < 0 or resumed < 0 or jumped < 0 or refused < 0:
-        return 2, "negative count — not a verdict"
+        return 2, "❌ negative count — not a verdict"
+    # Cross-validation: the hand-back's four counts partition the selected rows
+    # (`docs/handback-contract.md`: opened + resumed + jumped + refused == selected). A set that
+    # does not partition cannot be adjudicated — one of them was misread.
+    if opened + resumed + jumped + refused != selected:
+        return 2, ("❌ counts do not partition the selection — opened %d + resumed %d + jumped %d "
+                   "+ refused %d != selected %d, so one was misread"
+                   % (opened, resumed, jumped, refused, selected))
     if selected == 0:
         return 0, "open leg: selected 0 — nothing to open"
     reached = opened + resumed + jumped

@@ -25,7 +25,7 @@ delegate rule's carve-out).
 
    The plugin prefix is required — a bare `fleet-open-actor` resolves to a personal
    `~/.claude/agents/` copy. The agent (Sonnet) runs `open-queue.py --json` once, writes the
-   rendered block to this round's payload, runs every `selected[].action` verbatim through
+   rendered block to this round's payload, runs every selected row through `/supervisor:open` on its `selected[].name` and
    `/supervisor:open`, and hands back the verdicts. It owns the one-invocation rule, the `--vault`
    rule, the never-compose rule, the block's three shapes and the "workers only, never a manager"
    boundary — read them in `agents/fleet-open-actor.md`; this step does not restate them.

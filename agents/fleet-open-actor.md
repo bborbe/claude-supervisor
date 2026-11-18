@@ -1,6 +1,6 @@
 ---
 name: fleet-open-actor
-description: Perform the fleet round's open leg — run `open-queue.py --json` once, write its rendered block to this round's payload, run every `selected[].action` verbatim so each admitted row opens through `/supervisor:open`, and return the ≤ 1 KB verdict hand-back. Dispatched by router row 16 of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only execution is not a run of it.
+description: Perform the fleet round's open leg — run `open-queue.py --json` once, write its rendered block to this round's payload, run every selected row through `/supervisor:open` using its `selected[].name` so each admitted row opens, and return the ≤ 1 KB verdict hand-back. Dispatched by router row 16 of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only execution is not a run of it.
 model: sonnet
 tools: Read, Bash, Skill, Write, mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
 allowed-tools: Bash(python3:*), Bash(mkdir:*), Bash(mv:*), mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
@@ -50,18 +50,20 @@ without it the command falls back to the wezterm route, which opens a tab whatev
 
 <constraints>
 - **One invocation, two fields.** `--json` carries both `render` (the block) and
-  `selected[].action` (each row's ready-to-run command). **Never run the leg twice**: a second read
-  is a different tick's queue, so the block and the actions could name different rows.
+  `selected[].name` (each row's task title). **Never run the leg twice**: a second read
+  is a different tick's queue, so the block and the rows could name different tasks.
 - **`--vault` is load-bearing.** Task titles are not namespaced across vaults
   (`commands/open.md`), and without it `/supervisor:open` resolves the vault from the session cwd —
   so a row read from `<vault>` can open a same-named task in a different vault, or be refused as
   not-found. The population and the action must name one vault.
-- **Never compose the command from the printed name — take the `action` string from `--json`.** A
-  row name is a task-file stem and the vault is worker-writable, so a `"` in it breaks naive
-  quoting and a `$(…)` or backtick executes in this session's shell. `open-queue.py` emits each
-  selected row's action already `shlex.quote`d (`selected[].action`), the same shape
-  `next-focus.py` uses for its `action` field. Carry it verbatim into `args` (§ 3) — never a shell
-  line, never a retyped name.
+- **Take the name from `selected[].name`; never carry `selected[].action` into `Skill`.** A row
+  name is a task-file stem and the vault is worker-writable, so a `"` in it breaks naive quoting
+  and a `$(…)` or backtick would execute **in a shell** — but `Skill` runs no shell, so shell
+  quoting is the wrong encoding here. `open-queue.py` emits `action` already `shlex.quote`d for a
+  consumer that does run one; carrying that string into `args` delivers the escape sequence
+  literally (`sweep-gate.py'"'"'s Home …`), `vault-cli` is asked for a task by that name, and the
+  round reports `SESSION UNREADABLE`. Read `name` (§ 3), pass it unquoted, and leave `action`
+  untouched for the consumers that need it.
 - **Nothing else**: no batch helper, no in-line `spawn_agent` (that tool is held for `resume=`
   alone — `docs/fleet-surface.md` § Spawn a worker item 6), no reordering.
 - **Never open a row the leg skipped.** `open-queue.py` prints a reason per skipped row and those
@@ -254,7 +256,7 @@ rank, no gate description — those live in this file, `scripts/open-queue.py` a
 <success_criteria>
 - `open-queue.py --json` was invoked exactly once this round, with `--vault`.
 - The block at `render=` is `render` from that JSON, byte-for-byte, and the round can print it.
-- Every `selected[].action` was invoked in order through `Skill` as its own `skill` + `args` split
+- Every selected row's `name` was invoked in order through `Skill` as its own `skill` + `args` split
   (§ 3) — no row opened by hand, no action composed from a printed name.
 - Every row opened through the **headless** create path (`spawn_agent`), never the wezterm
   fallback: a tab is not an opened worker, and a fallback run reports `opened=` for tabs.

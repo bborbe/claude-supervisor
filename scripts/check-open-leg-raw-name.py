@@ -58,6 +58,19 @@ def main() -> None:
         fail("agents/fleet-open-actor.md does not warn against taking the name from "
              "`selected[].action` — the shell-quoted form is what produced `SESSION UNREADABLE`")
 
+    # 2b. The OLD instruction must be gone from every other part of the file. A body that says
+    #     `name` in § 3 while its constraints still say `action` sends an agent back to the bug —
+    #     a presence-only guard passes straight through that contradiction (caught in review).
+    for stale in (
+        "take the `action` string from `--json`",
+        "Never compose the command from the printed name",
+        "run every `selected[].action` verbatim",
+        "Every `selected[].action` was invoked",
+    ):
+        if stale in body:
+            fail("agents/fleet-open-actor.md still instructs the OLD behaviour (%r) — an agent "
+                 "following it reproduces SESSION UNREADABLE even though § 3 was rewritten" % stale)
+
     # 3. The instruction keeps the producer's quoting in place for shell consumers.
     if "do not unquote the producer" not in body:
         fail("agents/fleet-open-actor.md no longer says the producer must not be unquoted — "
