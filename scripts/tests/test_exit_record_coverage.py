@@ -154,7 +154,7 @@ class TestLiveCoverage(unittest.TestCase):
 
     PANE_MAP = {"7": {"title": "✳ Fleet Manager"}}
 
-    def _run(self, lines_by_pane, now=NOW):
+    def _run(self, lines_by_pane, now=NOW, pane_map=None):
         import tempfile
         saved = erc._record_module
         with tempfile.TemporaryDirectory() as directory:
@@ -163,9 +163,38 @@ class TestLiveCoverage(unittest.TestCase):
                     handle.write("".join(line + "\n" for line in lines))
             try:
                 erc._record_module = lambda: _TempStore(directory)
-                return erc.live_coverage(MGR, self.PANE_MAP, now=now)
+                return erc.live_coverage(MGR, pane_map or self.PANE_MAP, now=now)
             finally:
                 erc._record_module = saved
+
+    def test_a_retitled_tab_resolves_through_the_production_wrapper(self):
+        """⚠️ The regression the earlier `TestSessionJoin` cases could not catch.
+
+        `live_coverage()` narrows the store read to the panes the TITLE join resolved
+        before `coverage()` runs, so a retitled tab's log was never opened and the
+        session fallback scanned a dict that could not contain the answer. Driving
+        `coverage()` directly with a full `records` dict hid that completely: the
+        fallback looked fine and did nothing in production. This test goes through the
+        wrapper, so it fails whenever the narrowing is unconditional again.
+        """
+        out = self._run({"7": [spawn(DEAD, session="aaaaaaaa-0000")]},
+                        pane_map={"3": {"title": "✳ Something Else Entirely"}})
+        self.assertEqual(len(out["unknown"]), 0)
+        self.assertEqual(len(out["unrecorded"]), 1)
+        self.assertEqual(out["unrecorded"][0]["pane"], "7")
+
+    def test_a_covered_manager_is_reported_as_recorded(self):
+        """`recorded` is the keeper's watch list — the pane that has NOT failed yet.
+
+        Without this assertion the second fix is untested: the keeper could stop
+        unioning `recorded` into its watch set and every other test here would stay
+        green, while the keeper went back to watching only the panes already broken.
+        """
+        out = self._run({"7": [spawn(LIVE), heartbeat(pid=LIVE)]})
+        self.assertEqual((out["unknown"], out["unrecorded"]), ([], []))
+        self.assertEqual(len(out["recorded"]), 1)
+        self.assertEqual(out["recorded"][0]["pane"], "7")
+        self.assertEqual(out["recorded"][0]["session_id"], "aaaaaaaa-0000")
 
     def test_live_spawn_in_the_store_reads_as_recorded(self):
         out = self._run({"7": [spawn(LIVE)]})

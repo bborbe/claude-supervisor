@@ -148,10 +148,12 @@ def resolve_pane_by_session(session_id, records, alive):
     if len(pool) == 1:
         return pool[0]
     newest = {pane: last_seen(records[pane], alive) for pane in pool}
-    stamps = [stamp for stamp in newest.values() if stamp is not None]
-    if not stamps:
+    if any(stamp is None for stamp in newest.values()):
+        # A missing stamp is a TIE, not a loss: dropping it would let a stamped stale
+        # pane beat the unstamped current one. The writer always stamps, so this is
+        # theoretical — which is why it is stated rather than assumed away.
         return None
-    top = max(stamps)
+    top = max(newest.values())
     winners = [pane for pane, stamp in newest.items() if stamp == top]
     return winners[0] if len(winners) == 1 else None
 
@@ -382,8 +384,19 @@ def live_coverage(managers, pane_map, now=None):
     # record by the pane it resolved, so a file for any other pane can never be
     # consulted. Resolving here costs one extra pass over the pane titles (tens of
     # panes against a handful of managers) and saves opening every file in the store.
+    #
+    # ⚠️ **The narrowing is conditional, and that condition is load-bearing.** When any
+    # manager fails the title join, its `pane-<id>.log` is exactly the file that would
+    # resolve it — `coverage()`'s session fallback reads the session id out of that log.
+    # Narrowing to the resolved panes first would leave the fallback scanning a dict that
+    # cannot contain the answer, so the row would land in `unknown` anyway and the whole
+    # fallback would be a no-op on the only path production uses. Measured 2026-11-18:
+    # every manager failed the title join, so this read was the difference between a
+    # watch set of 0 and of 12. The full read happens only in that failure case; the
+    # all-resolved case keeps the cheap narrowed read.
     resolved = {resolve_pane(name, panes) for name in managers.values()}
-    records = read_records(panes={p for p in resolved if p is not None})
+    records = read_records(
+        panes=None if None in resolved else {p for p in resolved if p is not None})
     alive = _record_module().alive
     return coverage(managers, panes, records, alive,
                     stale=stale_panes(records, alive, now or datetime.now(timezone.utc)))
