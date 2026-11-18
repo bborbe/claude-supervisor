@@ -8,7 +8,15 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.339.0
+
+- feat: **`scripts/round-context-delta.py` measures a fleet round's context cost from the transcript, so "≤ 3 KB per round" is a reading rather than an estimate.** The 2026-11-17 breakdown was computed once by hand and never reproduced; the task that depends on it could only name "the same breakdown script" and nothing could run it. The script segments a transcript at the scheduler's own markers (`scheduledFireId` / `scheduledTaskId` on a fire whose prompt starts with the round name) and reports each round's byte delta — main-thread text only, with `isSidechain` records excluded because a sub-agent's text lives in its own transcript and reaches the manager as one hand-back message, which *does* count. ⚠️ **Three shapes would make the measurement lie, and each is pinned by a test:** text before the first marker is setup and never charged to round 1; a transcript with no markers exits **2**, never a zero dressed as a clean reading; and a fire whose prompt names something else (`/supervisor:goal-drive`) is not a round boundary. Measured on the predecessor `fbad5082`: **7 rounds, median 40.0 KB, max 531.5 KB** — the baseline the ≤ 3 KB target is set against. Change set: `scripts/round-context-delta.py`, `scripts/tests/test_round_context_delta.py`, `CHANGELOG.md`.
+
+## v0.338.2
+
+- fix: **`session-liveness.py` answers ABSENT for a session whose heartbeat row has expired**, so an old session can be resumed. With no identity-registry entry and no usable heartbeat row (404, or a row with `live` and `age_seconds` null), the verdict stayed UNKNOWN forever — `flagged-rows.py` mapped it to `degraded`, which never resumes — because the stale-row rule of #954 needs a row to exist and the store drops rows after a retention window. ABSENT is now licensed when the transcript (`<config dir>/projects/*/<id>.jsonl`, newest match) has been idle over 15 minutes (`TRANSCRIPT_IDLE_SECONDS`), which disproves "spawned moments ago"; no transcript, a fresh one, or an unreadable endpoint keeps UNKNOWN, and the message names the evidence. Change set: `scripts/session-liveness.py`, `scripts/tests/test_session_liveness.py`, `docs/fleet-surface.md`, `CHANGELOG.md`.
+
+## v0.338.1
 
 - fix: **a failed sweep now says why it failed.** The failure path caught `TimeoutExpired / ValueError / OSError` and printed one generic line, so the reason was thrown away — and four separate theories about the same failure (a blocking read, the enumeration's cost, host load, the interpreter) were all plausible and all wrong for want of the actual error. It now logs the return code and the subprocess's stderr on a non-zero exit, the timeout value on a timeout, the exception on a start failure, and the first bytes of stdout when it is not JSON. No behaviour change beyond the message.
 
