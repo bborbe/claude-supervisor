@@ -28,6 +28,7 @@ import json
 import os
 import socket
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -104,8 +105,29 @@ class SessionLiveness(unittest.TestCase):
         # let 1900 real spawn records decide a fixture's verdict — the isolation rule unchanged,
         # only its shape.
         self.ledger_rows = []
+        # Transcripts are found under `$CLAUDE_CONFIG_DIR/projects`; isolated like the stores above
+        # so the machine's real transcripts cannot turn a fixture's UNKNOWN into ABSENT.
+        self.config = os.path.join(self.tmp.name, "config")
+        os.makedirs(os.path.join(self.config, "projects", "-some-project"))
+        self._prior_config_env = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.config
+
+    def transcript(self, session_id, idle_seconds, project="-some-project"):
+        """A transcript for `session_id`, last written `idle_seconds` ago."""
+        directory = os.path.join(self.config, "projects", project)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "%s.jsonl" % session_id)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        then = time.time() - idle_seconds
+        os.utime(path, (then, then))
+        return path
 
     def tearDown(self):
+        if self._prior_config_env is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._prior_config_env
         if self._prior_cache_env is None:
             os.environ.pop("SUPERVISOR_START_CACHE", None)
         else:
@@ -308,6 +330,63 @@ class SessionLiveness(unittest.TestCase):
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
+
+    def test_no_registry_entry_no_heartbeat_row_and_an_idle_transcript_is_absent(self):
+        # The expired-row shape: the endpoint dropped the row after its retention window, so the
+        # stale-row rule cannot fire. A transcript idle past the threshold disproves "spawned
+        # moments ago". Both the 404 shape and the all-null 200 shape are the same fact.
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 7 * 24 * 3600)
+        with self.fixture([]) as fx:
+            rc, out = self.check(sid, fx.url)
+            rc_prefix, _ = self.check("fe0f08d3", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("transcript idle for 10080 minutes", out)
+        self.assertIn("no heartbeat row", out)
+        self.assertEqual(rc_prefix, ABSENT)
+        with self.fixture([row(sid, live=None, age_seconds=None)]) as fx:
+            rc_null, out_null = self.check(sid, fx.url)
+        self.assertEqual(rc_null, ABSENT)
+        self.assertIn("transcript idle", out_null)
+
+    def test_the_newest_of_several_transcripts_decides(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 7 * 24 * 3600, project="-old")
+        self.transcript(sid, 30, project="-new")
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_a_fresh_transcript_keeps_unknown(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 60)
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_no_transcript_keeps_unknown(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_an_unreachable_or_erroring_endpoint_keeps_unknown_despite_an_idle_transcript(self):
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.transcript(sid, 7 * 24 * 3600)
+        rc_dead, _ = self.check(sid, dead_url())
+        self.assertEqual(rc_dead, UNKNOWN)
+        with self.fixture([], list_status=500) as fx:
+            rc_err, _ = self.check(sid, fx.url)
+        self.assertEqual(rc_err, UNKNOWN)
+
+    def test_a_registry_entry_keeps_unknown_despite_an_idle_transcript(self):
+        # Unchanged behaviour: a non-dead registry entry means the session may be live.
+        sid = "fe0f08d3-bef2-464d-b179-44df6ca7e7ea"
+        self.plant(sid)
+        self.transcript(sid, 7 * 24 * 3600)
+        with self.fixture([]) as fx:
+            rc, _ = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
 
     def test_no_registry_entry_and_a_fresh_heartbeat_is_not_absent(self):
         # A fresh record is `live: true` — the session is stamping, so it is LIVE, never ABSENT.

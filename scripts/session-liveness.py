@@ -37,6 +37,13 @@ moments ago has none YET. The endpoint's record tells them apart: a `live: false
 measured `age_seconds` (older than the endpoint's own window) is ABSENT, while no record at all
 (the per-id 404) keeps UNKNOWN. See `_absent_licensed`.
 
+⚠️ **A session with no registry entry AND no heartbeat row is ABSENT only on an idle transcript.**
+The endpoint keeps heartbeat rows for a limited time, so a session quiet for days has neither
+source left, and the stale-row rule above can never fire for it. Its transcript
+(`<config dir>/projects/*/<sid>.jsonl`, newest match) disproves "spawned moments ago" when it
+has been idle past `TRANSCRIPT_IDLE_SECONDS`. No transcript, a fresh one, or an unreadable
+endpoint keeps UNKNOWN.
+
 ⚠️ **ABSENT is licensed only while the endpoint's coverage of live sessions is COMPLETE, and
 that is a precondition this file cannot establish for itself — it is established PER ID on the
 one path that needs it.** Every verdict rests on the
@@ -97,6 +104,7 @@ disagreeing about what an id argument means.
 """
 import argparse
 import errno
+import glob
 import importlib.util
 import json
 import os
@@ -128,6 +136,44 @@ CAUSES = (CAUSE_NOT_REGISTERED, CAUSE_EXPIRED, CAUSE_KEY_MISMATCH)
 # A full session id is a UUID, so its hyphens sit at these offsets and nowhere else.
 _UUID_SEPARATORS = frozenset((8, 13, 18, 23))
 _ID_MAX = 36
+
+# How long a session's transcript must have been idle before "spawned moments ago" is disproved.
+# ⚠️ **A fresh transcript keeps UNKNOWN.** A session that is writing its transcript is live, so
+# only a transcript idle past this threshold is evidence the process is gone. 15 minutes sits
+# well past any tool call a live session sits inside without writing a record.
+TRANSCRIPT_IDLE_SECONDS = 15 * 60
+
+
+def _projects_dir(projects_dir=None):
+    """Where transcripts live: `<config dir>/projects`, config dir = `$CLAUDE_CONFIG_DIR` or `~/.claude`."""
+    if projects_dir is not None:
+        return projects_dir
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(config, "projects")
+
+
+def _transcript_idle_seconds(sid, projects_dir=None, now=None):
+    """Seconds since the newest `<projects>/*/<sid>.jsonl` was written, or `None` when none exists.
+
+    `sid` may be a prefix, so it is matched as a file-name prefix; glob metacharacters and path
+    separators in it are refused, so a hostile id cannot widen the match. Several matches (one id
+    resumed from two cwds, or a prefix shared by two sessions) use the NEWEST mtime: any recent
+    write is a live writer, so the ambiguity can only keep UNKNOWN.
+    """
+    if not sid or any(c in sid for c in "*?[]/\\"):
+        return None
+    pattern = os.path.join(glob.escape(_projects_dir(projects_dir)), "*", sid + "*.jsonl")
+    newest = None
+    for path in glob.glob(pattern):
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None else max(newest, mtime)
+    if newest is None:
+        return None
+    return max(0.0, (time.time() if now is None else now) - newest)
+
 
 # The attention store, resolved exactly as the rest of the plugin resolves it: the same
 # variable and default `who-needs-me.py`, `attention-board.py` and `attention-ask.py` carry,
@@ -396,7 +442,7 @@ def _get_json_with_retry(url, timeout=_HTTP_TIMEOUT):
                 raise
 
 
-def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
+def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, projects_dir=None):
     """`(verdict, message, row)` for one id argument — `_check` guarded so it never crashes.
 
     ⚠️ **An exception escaping here would exit 1, which is this file's ABSENT code, so no
@@ -414,7 +460,7 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     about a live session still pays no identity probe.
     """
     try:
-        return _check(session_id, endpoint, timeout, registry_dir)
+        return _check(session_id, endpoint, timeout, registry_dir, projects_dir)
     except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
         return UNKNOWN, "session-liveness could not complete the check for %r: %s: %s" % (
             (session_id or "").strip(),
@@ -439,8 +485,18 @@ def _stale_heartbeat_row(row):
     return isinstance(age, (int, float)) and not isinstance(age, bool) and age > 0
 
 
+def _empty_heartbeat_row(row):
+    """True when a 200 per-id row carries neither a `live` flag nor an `age_seconds`.
+
+    The store keeps heartbeat rows for a limited time; an expired one can answer 200 with every
+    field null. That is "the endpoint holds no usable record", the same fact as a 404.
+    """
+    return isinstance(row, dict) and row.get("live") is None and row.get("age_seconds") is None
+
+
 def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it",
-                     cause=CAUSE_NOT_REGISTERED, row=None):
+                     cause=CAUSE_NOT_REGISTERED, row=None, no_heartbeat_row=False,
+                     projects_dir=None):
     """`(verdict, message, None)` for an id the endpoint holds NO row for — the ABSENT licence.
 
     ⚠️ **The three-tuple is `_check`'s contract, and the `None` row is part of it.** `_check`
@@ -515,6 +571,18 @@ def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it
             # The exited shape: Claude Code deleted the registry entry on exit, and the endpoint
             # still holds a record it calls not live. Nothing here is "spawned moments ago".
             return ABSENT, "no session id matches %s" % sid, None
+        # ⚠️ **The expired-row shape.** No registry entry and the endpoint's row has expired
+        # (404 or all-null), so neither source tells "exited long ago" from "spawned moments
+        # ago". The session's own transcript does: one idle past the threshold disproves the
+        # "moments ago" caveat. No transcript, or a fresh one, keeps UNKNOWN. A false ABSENT puts
+        # two processes on one session, which is why every condition is required.
+        if no_heartbeat_row:
+            idle = _transcript_idle_seconds(sid, projects_dir)
+            if idle is not None and idle > TRANSCRIPT_IDLE_SECONDS:
+                return ABSENT, (
+                    "no session id matches %s (licensed by: no identity registry entry, no "
+                    "heartbeat row, transcript idle for %d minutes)" % (sid, int(idle // 60))
+                ), None
         # ⚠️ **The startup shape, and the whole point of this branch.** A session spawned
         # moments ago is absent from the registry until it is written; an id that no entry
         # matches is therefore a measurement this probe cannot make, not a session it can call
@@ -576,7 +644,7 @@ def is_session_id(value):
     return True
 
 
-def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
+def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, projects_dir=None):
     """`(verdict, message, row)` for one id argument, from the endpoint alone.
 
     ⚠️ **The list route is fetched FIRST, and that is a cost fix, not a taste.** The per-id
@@ -671,7 +739,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # The exact-match fast path: a full id is one dict lookup, and the prefix scan is skipped.
     exact = next((k for k in by_id if k.lower() == sid), None)
     if exact is not None:
-        return _verdict_for(by_id[exact], sid, registry_dir)
+        return _verdict_for(by_id[exact], sid, registry_dir, projects_dir)
     matches = sorted(sid_ for sid_ in by_id if sid_.lower().startswith(sid))
     if len(matches) > 1:
         # 12 chars, not 8: the caller already passed a prefix long enough to collide, so
@@ -682,7 +750,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             ", ".join(m[:12] for m in matches),
         ), None
     if len(matches) == 1:
-        return _verdict_for(by_id[matches[0]], sid, registry_dir)
+        return _verdict_for(by_id[matches[0]], sid, registry_dir, projects_dir)
 
     # The list was readable and matched nothing. Confirm against the per-id route before
     # licensing ABSENT — the one verdict a caller acts on by starting a second writer.
@@ -705,9 +773,9 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             _describe_read_failure(exc),
         ), None
     if status == 200 and isinstance(row, dict):
-        return _verdict_for(row, sid, registry_dir)
+        return _verdict_for(row, sid, registry_dir, projects_dir)
     if status == 404:
-        return _absent_licensed(sid, registry_dir)
+        return _absent_licensed(sid, registry_dir, no_heartbeat_row=True, projects_dir=projects_dir)
     return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s after %d ms" % (
         status,
         sid,
@@ -715,7 +783,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     ), None
 
 
-def _verdict_for(row, sid, registry_dir=None):
+def _verdict_for(row, sid, registry_dir=None, projects_dir=None):
     """`(verdict, message, row)` for a single heartbeat row. UNKNOWN when `live` is unusable.
 
     ⚠️ **A not-live CLUSTER row is UNKNOWN while the local reachability marker is stale.** The
@@ -753,6 +821,13 @@ def _verdict_for(row, sid, registry_dir=None):
                 ), row
         verdict, why, _ = _absent_licensed(
             full, registry_dir, "serves a stale `live: false` row for it", CAUSE_EXPIRED, row
+        )
+        return verdict, why, row
+    if _empty_heartbeat_row(row):
+        # An expired row served with every field null: the same fact as a 404 — the endpoint
+        # holds no usable record. See `_empty_heartbeat_row`.
+        verdict, why, _ = _absent_licensed(
+            full, registry_dir, no_heartbeat_row=True, projects_dir=projects_dir
         )
         return verdict, why, row
     return UNKNOWN, (
