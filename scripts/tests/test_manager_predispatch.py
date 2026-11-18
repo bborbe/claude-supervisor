@@ -722,6 +722,74 @@ class TestFrozenSettle(Base):
         rc, out = self.check("ATopic")
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
 
+    def test_persist_settles_nothing_when_the_record_has_no_table(self):
+        """A record with no stored render cannot be settled — and inventing one would
+        record a table the sweep never produced. The verdict stays FROZEN and exits 0;
+        the record is left exactly as it was."""
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.age_the_tree()
+        self.save("ATopic")
+        path = self.m.state_path("ATopic")
+        rec = json.loads(self.read_state("ATopic"))
+        del rec["table"]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        before = self.read_state("ATopic")
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FROZEN", out)
+        self.assertEqual(self.read_state("ATopic"), before)
+        self.assertNotIn("table", json.loads(self.read_state("ATopic")))
+
+    def test_a_worker_death_on_a_quiet_tree_is_not_frozen(self):
+        """The settle's third conjunct: a death moves no mtime, so mtime alone would call
+        the tree frozen and settle the digest past it — replaying the stored table over a
+        row whose worker is gone, and never dispatching the sweep that would re-render it.
+
+        The two gates must AGREE here: `--print` sees the digest move (CHANGE), so the
+        predicate has to answer NOT-FROZEN rather than start a round that does nothing.
+        """
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        # No role map: `is_held` must not shell out to a real WezTerm from a fixture.
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
+        sid = "sid-death-under-test"
+        self.task("AGoalTask", sid=sid, goals="AGoal")
+        self.registry(sid, status="idle")
+        self.age_the_tree()
+        self.save("ATopic")  # recorded while the worker is LIVE
+        os.unlink(os.path.join(self.m.REGISTRY_DIR, "1.json"))
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        self.assertIn("live inputs moved", out)
+        # And nothing was settled: the change is still owed.
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("digest differs", out)
+
+    def test_a_hold_set_on_a_quiet_tree_is_not_frozen(self):
+        """Same shape, the other non-mtime input: a hold landing after the stored sweep."""
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        self.m.HOLDS_PATH = os.path.join(self.tmp, "holds.json")
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
+        sid = "sid-hold-under-test"
+        self.task("AGoalTask", sid=sid, goals="AGoal")
+        self.registry(sid, status="idle")
+        self.age_the_tree()
+        self.save("ATopic")
+        with open(self.m.HOLDS_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "holds": {sid: {"reason": "operator"}}}, fh)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        rc, out = self.predicate("--persist")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT-FROZEN", out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+
     def test_a_change_landing_between_the_verdict_and_the_digest_is_still_dispatched(self):
         """The fail-closed window: the digest must describe the verdict's OWN snapshot.
 
@@ -3878,13 +3946,26 @@ class TestFrozenTree(Base):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"session_id": self.sid, "items": items}, fh)
 
+    def settled(self, seconds=4 * 3600):
+        """Age the tree, then record it — the third conjunct needs a stored sweep.
+
+        The live-input half (`live_digest_of`) is stored by `--save`, so a fixture that
+        never saved has no baseline and the predicate answers NOT-FROZEN by design
+        (fail-open: one sweep). Ageing FIRST is load-bearing — `stuck` is derived from
+        the mtime, so a record written before the ageing would carry a different `stuck`
+        term and make the fixture's own verdict depend on that.
+        """
+        self.age(seconds)
+        self.save("ATopic")
+
     def test_quiet_tree_with_no_open_asks_is_frozen(self):
-        self.age(4 * 3600)
+        self.settled()
         v = self.m.frozen_tree(self.vault, "ATopic")
         self.assertTrue(v["frozen"], v)
+        self.assertTrue(v["live_stable"], v)
 
     def test_a_recently_moved_tracked_file_is_not_frozen(self):
-        self.age(4 * 3600)
+        self.settled()
         self.write("25 Tasks/ATask.md", TASK.format(sid="", progress=""))
         v = self.m.frozen_tree(self.vault, "ATopic")
         self.assertFalse(v["frozen"], v)
@@ -3893,21 +3974,21 @@ class TestFrozenTree(Base):
     def test_an_open_asked_of_you_blocks_the_gate_even_on_a_quiet_tree(self):
         # The conjunct that mtime alone cannot see: the tree is frozen, but a question
         # the operator has not answered is still the manager's live context.
-        self.age(4 * 3600)
+        self.settled()
         self.ledger([{"kind": "asked-of-you", "state": "open", "text": "ship it?"}])
         v = self.m.frozen_tree(self.vault, "ATopic")
         self.assertFalse(v["frozen"], v)
         self.assertEqual(v["open_asks"], ["ship it?"])
 
     def test_a_closed_asked_of_you_does_not_block(self):
-        self.age(4 * 3600)
+        self.settled()
         self.ledger([{"kind": "asked-of-you", "state": "closed", "text": "answered"}])
         self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
 
     def test_other_ledger_kinds_do_not_block(self):
         # Only `asked-of-you` is a question awaiting an answer; `pushed` and `asked-of-me`
         # close on their task file and carry nothing the operator still owes.
-        self.age(4 * 3600)
+        self.settled()
         self.ledger([
             {"kind": "pushed", "state": "open", "text": "filed a task"},
             {"kind": "asked-of-me", "state": "open", "text": "do the thing"},
@@ -3917,8 +3998,25 @@ class TestFrozenTree(Base):
     def test_a_missing_ledger_does_not_block(self):
         # Unreadable is `[]`, never fail-closed: a session that never used the ledger
         # asked the operator nothing, and blocking there would freeze the gate forever.
-        self.age(4 * 3600)
+        self.settled()
         self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
+
+    def test_a_record_without_a_stored_live_digest_is_not_frozen(self):
+        """A record from before the field cannot say the live inputs held — fail-open.
+
+        One sweep, and its own `--save` writes the field; answering FROZEN here would
+        settle a digest over a baseline that was never recorded.
+        """
+        self.age(4 * 3600)
+        self.save("ATopic")
+        path = self.m.state_path("ATopic")
+        rec = json.loads(self.read_state("ATopic"))
+        del rec["live_digest"]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertFalse(v["frozen"], v)
+        self.assertFalse(v["live_stable"], v)
 
 
 if __name__ == "__main__":

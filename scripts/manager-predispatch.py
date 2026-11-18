@@ -141,6 +141,14 @@ Exit codes (same three the loop gate uses)
       never dispatch it — the same suppression this clause exists to remove, restored by
       its own fix.
 
+      ⚠️ And the settle is authorised only over the FILE half of the digest. The digest
+      also hashes liveness death, stuck, hold and membership, none of which moves an mtime,
+      so a quiet tree can hold a worker that died or a hold that landed. Settling those in
+      would replay the stored table over a changed row and never dispatch it, so the
+      predicate carries a third conjunct: the stored sweep's `live_digest` must be
+      unchanged, and when it moved the verdict is NOT-FROZEN and the legs run. See
+      `live_digest_of` and `frozen_tree`.
+
       ⚠️ The parked-set clause is a THIRD reason of the same shape, and it is the one that
       keeps the replay honest. `digest_of` hashes a DEATH-only liveness term, so a worker
       opening or closing a gate moves no digest input — while its row's Status cell really
@@ -809,11 +817,19 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
 # mtime has moved for >= 2 cadence intervals (30 min at the 15-min default), and the
 # tick's content has already left the machine."
 #
-# Both conjuncts are required and they are DIFFERENT claims. The first reads the
+# Both runbook conjuncts are required and they are DIFFERENT claims. The first reads the
 # tracked set's mtimes. The second has no instrument in the runbook, so it is read
 # here: the round's own session ledger must carry no OPEN `asked-of-you`. An open one
 # is a question the operator has not answered — its content has NOT left the machine —
 # and gating over it would hide the one place they read it.
+#
+# ⚠️ A THIRD conjunct is required by `--persist`, and it is not in the runbook's
+# sentence because the runbook predates the settle: the stored sweep's non-file inputs
+# (`live_digest_of` — liveness death, stuck, hold, membership) must be unchanged. A quiet
+# tree can hold a worker that died or a hold that landed; neither moves an mtime, both
+# move the digest, and settling past one would replay the stored table over a changed row
+# and never dispatch it. When it moved, the verdict is NOT-FROZEN so the legs run — which
+# is what makes the gate and the change gate agree on a death instead of contradicting.
 #
 # ⚠️ This is NOT the digest `--check` computes. That one hashes content and liveness
 # and deliberately excludes raw mtime; `round-quiet.md` states the two are "a
@@ -887,6 +903,7 @@ def gate_snapshot(vault: str, subject: str, now: float | None = None) -> dict:
         "prev": prev,
         "prev_busy": prev_busy,
         "digest": digest_of(tracked),
+        "live_digest": live_digest_of(tracked),
         "now": now,
     }
 
@@ -895,7 +912,18 @@ def frozen_tree(vault: str, subject: str, now: float | None = None,
                 interval_seconds: int = CADENCE_INTERVAL_SECONDS,
                 intervals: int = FROZEN_INTERVALS,
                 snapshot: dict | None = None) -> dict:
-    """The frozen-tree predicate's verdict, both conjuncts evaluated.
+    """The frozen-tree predicate's verdict: three conjuncts, all required.
+
+    The two documented ones read the tree — no tracked file's mtime moved for ≥2 cadence
+    intervals, and the tick's content has left the machine (no open `asked-of-you`).
+    ⚠️ **The third is the settle's precondition, and it is not optional:** the stored
+    sweep's non-file inputs (`live_digest_of` — liveness death, stuck, hold, membership)
+    must be unchanged. A tree can be quiet while a worker dies or a hold lands, and those
+    are digest inputs the mtime conjunct cannot see; settling the digest past one would
+    replay the stored table over a changed row and never dispatch it. When they moved the
+    verdict is NOT-FROZEN, so the legs run and the sweep re-renders. An absent stored
+    `live_digest` (a record from before the field) is "cannot say" and answers the same
+    way — one sweep, self-healed by its own `--save`.
 
     `snapshot` is `gate_snapshot`'s result. ⚠️ A caller that also settles the digest MUST
     pass the snapshot its verdict was decided on — that is what keeps the two answers
@@ -910,13 +938,16 @@ def frozen_tree(vault: str, subject: str, now: float | None = None,
     window = intervals * interval_seconds
     quiet = newest is None or (now - newest) >= window
     asks = open_asked_of_you()
+    stored_live = snapshot["prev"].get("live_digest")
+    live_stable = isinstance(stored_live, str) and stored_live == snapshot["live_digest"]
     return {
-        "frozen": bool(quiet and not asks),
+        "frozen": bool(quiet and not asks and live_stable),
         "tracked": len(tracked),
         "newest_mtime": newest,
         "quiet_seconds": None if newest is None else int(now - newest),
         "window_seconds": window,
         "open_asks": [i.get("text", "") for i in asks],
+        "live_stable": live_stable,
     }
 
 
@@ -981,7 +1012,10 @@ def predicate(vault: str, subject: str, persist: bool = False) -> int:
 
     ⚠️ **The verdict and a settled digest share ONE snapshot** (`gate_snapshot`), so a
     change landing after the read is dispatched by the next `--print` instead of being
-    baked into the digest that would suppress it.
+    baked into the digest that would suppress it. ⚠️ **And FROZEN now requires the stored
+    sweep's live inputs to be unchanged** (`live_digest_of`): a death, stuck flip, hold or
+    membership change moves no mtime, and settling past one would suppress the very
+    dispatch the digest's liveness term exists to force.
     """
     snapshot = gate_snapshot(vault, subject)
     v = frozen_tree(vault, subject, now=snapshot["now"], snapshot=snapshot)
@@ -1000,6 +1034,10 @@ def predicate(vault: str, subject: str, persist: bool = False) -> int:
         )
     if v["open_asks"]:
         why.append(f"{len(v['open_asks'])} open asked-of-you")
+    if not v["live_stable"]:
+        why.append(
+            "the stored sweep's live inputs moved (death, stuck, hold or membership)"
+        )
     print(f"NOT-FROZEN — {'; '.join(why) or 'no tracked files'}")
     return 1
 
@@ -1932,6 +1970,35 @@ def digest_of(tracked: list[dict]) -> str:
     return h.hexdigest()
 
 
+def live_digest_of(tracked: list[dict]) -> str:
+    """The digest's NON-FILE half: liveness death, stuck, hold, and the member set.
+
+    ⚠️ **This exists because the frozen-tree predicate cannot see any of it.** Its two
+    documented conjuncts read mtimes and open `asked-of-you`; a worker dying, a session
+    being held, a stuck flip, or a row leaving the tracked set (a deletion moves no
+    surviving file's mtime) moves the digest and none of those. A `--persist` settle that
+    advanced the stored digest past such a change would replay the stored table over a row
+    whose state really changed and never dispatch it — the suppression the digest's
+    liveness term exists to force a dispatch for. So the predicate requires this half to
+    be unchanged since the stored sweep before it calls a tree frozen (see `frozen_tree`);
+    when it moved, the legs run and the sweep re-renders the row.
+
+    It is stored BESIDE the digest rather than folded into it, on the same reasoning
+    `parked` is: `digest_of` stays a pure function of the tracked set's rendered state,
+    and this is the predicate's own precondition.
+    """
+    h = hashlib.sha256()
+    for t in sorted(tracked, key=lambda x: x["name"]):
+        h.update(
+            f"{t['name']}|{liveness_change_term(t)}|{int(bool(t.get('stuck')))}"
+            f"|{int(is_held(t['session']))}\n".encode()
+        )
+    h.update(b"--members--\n")
+    for t in sorted(tracked, key=lambda x: x["name"]):
+        h.update(f"{t['name']}\n".encode())
+    return h.hexdigest()
+
+
 # --------------------------------------------------------------------------- #
 # bounded stdin
 # --------------------------------------------------------------------------- #
@@ -2344,6 +2411,11 @@ def save_stored(
         "table": strip_links(table),
         "members": len(tracked),
         "busy_since": busy,
+        # The digest's non-file half, stored so the frozen-tree predicate can prove it has
+        # not moved before settling the digest past a quiet tree — see `live_digest_of`.
+        # A record written before this field existed carries no key, which the predicate
+        # reads as "cannot say": NOT-FROZEN, one sweep, self-healed by this same write.
+        "live_digest": live_digest_of(tracked),
         # The rows whose Status cell reads `⌛ waiting-on-human`. The digest is deliberately
         # DEATH-ONLY (see `liveness_change_term`), so a `live` <-> `parked` flip moves no
         # digest input -- and the exit-0 branch would then replay a table whose Status cell
@@ -3034,9 +3106,10 @@ def main(argv: list[str]) -> int:
         "--predicate",
         action="store_true",
         help=(
-            "evaluate the frozen-tree predicate — BOTH conjuncts: no tracked file's "
-            "mtime moved for >= 2 cadence intervals, AND no open `asked-of-you` in this "
-            "session's ledger — printing FROZEN or NOT-FROZEN with its reads; exit 0 "
+            "evaluate the frozen-tree predicate — all three conjuncts: no tracked file's "
+            "mtime moved for >= 2 cadence intervals, no open `asked-of-you` in this "
+            "session's ledger, AND the stored sweep's live inputs (death, stuck, hold, "
+            "membership) unchanged — printing FROZEN or NOT-FROZEN with its reads; exit 0 "
             "only when frozen. This is not the digest `--check` computes"
         ),
     )
