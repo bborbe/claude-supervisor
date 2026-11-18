@@ -75,7 +75,7 @@ The `.decision` file carries `round=`, `written_at=`, `status=` (`ok` / `unread`
 
 ## Where the full payload goes
 
-The paths are siblings under one directory, keyed by the subject slug — the subject lowercased with non-alphanumerics collapsed to `-`. They are separate files rather than fields of one record because they hold different things and can legitimately disagree; that disagreement is the point.
+The paths are siblings under one directory, keyed by the subject slug — the subject lowercased with non-alphanumerics collapsed to `-`. They are separate files rather than fields of one record because they hold different things and can legitimately disagree; that disagreement is the point. ⚠️ **One row below is keyed by ROUND, not by subject** — the hand-back signal, whose name is the round id — and it is the only exception to this section's keying.
 
 | Written by | Path | Holds |
 |---|---|---|
@@ -85,6 +85,9 @@ The paths are siblings under one directory, keyed by the subject slug — the su
 | the caller, from the drive leg's `Audit` block | `~/.claude/state/manager-predispatch/<slug>.verdicts.json` | the drive leg's per-row audit, cached so the next round does not re-audit cold |
 | `scripts/round-readings.py` | `~/.claude/state/manager-receipts/<slug>.readings` | the four verdict families, one record per tracked row — the document the sweep reader refuses to render without |
 | `agents/goal-spawn-reader.md` | `~/.claude/state/manager-predispatch/<slug>.spawn` | the per-row spawn decision — each gate it read, the reason it held, and the call shape the caller executes |
+| `manager-receipt.py --handback --branch fleet` (run by `agents/fleet-round.md` § 5) | `~/.claude/state/fleet-handback/<round>.round` | **the round's completion signal, not a reading** — its PRESENCE says the delegate returned, and its absence while the receipt is open is what `--start` / `--finish` call *in flight*. Nothing reads the body. |
+
+⚠️ **The `<round>.round` file is the one artifact here that is a signal rather than a payload.** Every other row carries something a reader consumes; this one is consumed by its existence alone, which is why it is written by the delegate itself at the end of its turn. ⚠️ **Its name comes from the round id the delegate was DISPATCHED with, not from the current receipt** (`--handback --round <id>`): a delegate that outlives a forced close would otherwise write its successor's file and let that successor's tail close early, recording a window shorter than the round it names. A delegate that dies without writing it leaves a round that must be closed with `--finish --force --reason` — and only after its turn is shown to be gone, because age alone does not prove that.
 
 ⚠️ **The store is the producer, not the sweep-gate snapshot.** `~/.claude/state/sweep-gate-loop/<vault>/<subject>.snapshot.json` is a different file on a different cadence, and it carries no bucket concept — a per-bucket set is never obtainable from it. The rule and its measurement have one home: `docs/fleet-surface.md` § Session end.
 

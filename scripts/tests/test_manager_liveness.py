@@ -95,6 +95,31 @@ class Liveness(unittest.TestCase):
         # A fresh arm reads OK — the state `scripts/answer-path-check.py` requires to pass.
         self.assertEqual(self.m.classify(fleet, time.time())[0], "OK")
 
+    def test_the_fleet_bound_survives_the_ring_rolling(self):
+        # A ring-recomputed maximum forgets a long gap once it ages out of the 12-arm
+        # window, and the limit falls back to the ordinary cadence — the false STALE
+        # returns hours after the fix. The persisted mark is what keeps the bound. The
+        # control at the end proves the same truncated ring WITHOUT the mark drops.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Fleet Manager", "fleet", 900)
+        slug = self.m.slug("Fleet Manager", "fleet")
+        arms = self.m.path(slug, "arms")
+        rows, t = [], 1795000000
+        for i in range(12):
+            rows.append(t)
+            t += 3000 if i == 5 else 900
+        with open(arms, "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{e} 900\n" for e in rows))
+        # One 3000 s gap: the mark is written and the period is capped at 2 x median.
+        self.assertEqual(self.m.observed_period(slug), 1800)
+        # Age that gap out of the ring — only the rows after it survive.
+        with open(arms, "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{e} 900\n" for e in rows[6:]))
+        self.assertEqual(self.m.observed_period(slug), 1800)
+        # Control: the identical truncated ring, mark removed, drops to the cadence.
+        os.remove(self.m.path(slug, "hwm"))
+        self.assertEqual(self.m.observed_period(slug), 900)
+
     def test_an_unknown_branch_is_still_refused(self):
         with self.assertRaises(ValueError):
             self.m.slug("Fleet Manager", "workers")

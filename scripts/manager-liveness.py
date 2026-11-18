@@ -635,9 +635,7 @@ def write_high_water(s: str, seconds: float) -> None:
     behaviour, never break a liveness read.
     """
     try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(path(s, "hwm"), "w", encoding="utf-8") as fh:
-            fh.write(f"{int(seconds)}\n")
+        write_atomic(path(s, "hwm"), f"{int(seconds)}\n")
     except OSError:
         pass
 
