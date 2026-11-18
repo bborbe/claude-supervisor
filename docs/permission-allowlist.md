@@ -205,8 +205,10 @@ that admits them and for why `make` as a whole stays excluded.
 
 ## How a manager applies it
 
-Read the park's `permission_tier` (server workers: the request field; wrapper-backed workers: the
-tier the attention watcher records on the held gate). Never re-derive it from the command text.
+Read the park's `permission_tier` (server workers: the request field; wrapper-backed workers:
+`scripts/gate-answer-check.py`, which runs this classifier over the wrapper's full tool input
+**and** the card payload and keeps the stricter — the store card itself carries no tier). Never
+re-derive it by eye from the command text.
 
 1. **`operator` → escalate. Stop.** Never answer it, whatever the brief says.
 2. **`allowlist` → `allow`**, quoting the entry.
@@ -232,7 +234,23 @@ allow hides the gate. When the rubric does not clearly hold, escalate.
 ### Releasing a wrapper-backed gate
 
 A wrapper-backed worker (a `cc-*` launcher child, `mode: headless`) is parked inside
-`claude-wrapper`, and **only the wrapper can release it**:
+`claude-wrapper`, and **only the wrapper can release it**. A manager reaches it through the
+**store card**, and that is the path `agents/gate-answerer.md` uses:
+
+```
+python3 scripts/attention-answer.py answer <store item id> --by <arm> --decision allow
+```
+
+The `claude-wrapper` daemon polls the store and settles the child's park with the card's
+`decision` (`pkg/board.go`, `BoardDelivery`, carrier `claude-wrapper:board`), then writes the
+delivery report `attention-answer.py` waits on — `ANSWERED` + `DELIVERY: delivered` only when it
+landed, `RECORDED` + `NOT_DELIVERED`/`UNCONFIRMED` (exit 3) when it did not. It settles only a
+`permission` card carrying `allow`/`deny`, whose `producer_id` is the parked child, whose session
+is `headless`, and which does not predate the park it would settle. Measured 2026-11-18: of the last 60
+answered permission cards in `GET /api/1.0/attention/history`, 8 carry a `delivered` report from
+`claude-wrapper:board`.
+
+The wrapper's own endpoint is the lower-level contract:
 
 ```
 POST /api/1.0/sessions/<session-id>/answer   {"request_id": "<id>", "behavior": "allow"|"deny"}
@@ -245,15 +263,99 @@ log or the feed.** Those print *store item ids*, a different namespace, and pass
 `/answer` returns `409 no pending request`, which reads exactly like "already answered". This
 plugin ships no caller; a manager's own one should validate both id shapes and fail loudly on a
 non-2xx. `GET /api/1.0/sessions/<session-id>/question/<request_id>` reads one pending request.
-⚠️ **Never answer a wrapper-backed gate through the attention store's `/attention/{id}/answer`** —
-a store answer on a headless permission card records the answer and releases nothing, so the
-worker stays parked while the board reads it as answered.
+⚠️ **A store answer is delivered only when its report says so.** An earlier version of this page
+said a store answer on a headless permission card releases nothing; that predates the daemon's
+board delivery. Read the delivery line, never the POST: `RECORDED` means the verdict is stored and
+the worker may still be parked.
 
-### When the manager does not act
+### The instant path, and when the manager does not act
 
-The attention watcher holds a `manager`-tier gate off the operator's board only while its owning
-manager is live, and only for a bounded wait (default 10 minutes). After that the gate posts to the
-board **saying so on its face** — naming the owning manager and that the hand-off wait expired — so
-the operator reads it as a missed hand-off, not a fresh question.
+**No gate is held off the board.** A wrapper-backed park posts its card immediately — the running
+attention-controller registers no manager-hold producer (`main.go`: *"until then manager gates
+post immediately"*), so an earlier claim here of a 10-minute hand-off hold described a design, not
+the controller. The manager's answer therefore has to come fast or the operator answers first.
+
+The fast path: every manager tier keeps its gate feed `Monitor` armed continuously and, on each
+`hst:<item-id>` line, dispatches `supervisor:gate-answerer` in the background in that same turn
+(`commands/steps/attention-watcher.md`). The answerer runs `scripts/gate-answer-check.py`, applies
+the rubric above to what passed, and answers the card `allow` — or leaves it. A card it leaves
+(`operator` tier, held, not this manager's worker, no readable brief, any clause it cannot verify)
+stays on the board as the operator's call; the answerer never denies.
+
+The check also refuses, mechanically: a `--self` that is not the running session's own
+`CLAUDE_CODE_SESSION_ID`, or is not a session id at all; a `role: human` session; any tool outside
+`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`, `NotebookRead` (an `mcp__*` call, `WebFetch` or
+`Agent` reaches something the classifier cannot read); a card whose tool differs from the park's; a
+card older than its park, or either timestamp missing; any input cut at the 2000-char display cap;
+a `Write`/`Edit`/`MultiEdit` whose target is outside the worker's cwd and `/tmp`, or under
+`~/.claude`; and a `Bash` call that runs unseen code — an interpreter handed a file, a module or
+stdin, any non-shell inline program, a shell `-c` body that is not itself allowlist-tier, a path
+script, an unspaced `bash<x.sh`, and the launchers `xargs`, `find -exec`, `env -S`, `uv run`/`npx`
+and `git -c alias.*`/`!`. `make`, package-manager scripts and `go run` stay `manager` tier on
+purpose (they build the worker's own worktree; clause (a) still applies). Each manager keeps a
+ledger of the items it checked (`~/.claude/state/gate-answer/<session>.json`; env overrides are
+honoured only under `~/.claude/state`), so a feed re-arm never judges a card twice.
+
+⚠️ **`--answer --expect <hash>` binds the judgment to the re-check, not the answer to the park.**
+The store answer carries no `request_id` its carrier honours: claude-wrapper's
+`BoardDelivery.answerFor` settles the producer's CURRENT park, refusing only a card created more
+than 5 s before it. A worker that parks a new call between the re-check and the daemon's poll can
+receive the allow. The end-to-end binding needs the request id carried through — the store's answer
+route already accepts `request_id`; `board.go` must compare it with the park's before settling.
+
+⚠️ **A permission answer's delivery can still claim the operator's voice.** Two carriers race on an
+answered permission card. claude-wrapper's board delivery settles the park with the bare verdict
+(`pkg/board.go`: `Answer{Behavior: decision}`, no text). attention-controller's watcher can carry
+the same card first: for a pane-less session it hands the card to its headless arm, which writes a
+turn opening *"The operator answered on the attention board."* with `allow` as the answer. Measured
+2026-11-18 over the last 60 answered permission cards: of the 11 delivered to headless sessions, 7
+were carried by `watcher:attention-watcher` and 4 by `claude-wrapper:board`. The verdict is right
+either way; the attribution in that turn is the controller's to fix.
+
+## A worker's closer pick — the second row the answerer takes (DISABLED)
+
+⚠️ **Gated off: `PICK_ANSWERING_ENABLED = False` in `scripts/gate-answer-check.py`, which returns
+`skip` — `pick answering disabled until carriers render manager voice` — for every `message` card.**
+Every carrier that delivers a card answer renders it as the operator's: attention-controller's
+pane carrier types `Operator answer, via attention board:` (`pkg/pane-carrier.go`
+`deliverPrefix`), its headless arm opens *"The operator answered on the attention board."*
+(`pkg/headless-answer.go` `AnswerTurnText`), and claude-wrapper's message arm prefixes
+`Operator answer, via supervisor:` (`pkg/board.go` `messageAnswer`). A manager's pick would
+therefore reach the worker as the operator's own answer. Turn the flag on only after those three
+carriers render a manager's answer in its own voice. The row below is the design that flag
+enables, kept so it can be measured apart from the permission row when it ships.
+
+A separate row from the permission tiers above, so the two are measured apart: a permission
+answer is a `permission` card carrying `decision: allow`; a pick answer is a `message` card whose
+`answer` is text starting `Manager answer, via supervisor:`. Both carry `answered_by:
+supervisor:gate-answerer`, and the pick also writes `answerer_kind: manager` on the worker's
+answer marker, so neither is counted as the operator's.
+
+| Card | Answered with | Answered when |
+|---|---|---|
+| `answer_mechanism: message`, `interrupt_class: pick`, `producer_kind: session`, not a hook menu | its **one** recommended option (`recommended: true`, or a label carrying `(recommended`), as `Manager answer, via supervisor: <label>` | the worker is this manager's own or adopted, carries no operator hold, has exactly one brief, and the recommended option is work that brief already names and does not change its scope |
+
+**Always left for the operator**, whatever the recommendation — `scripts/gate-answer-check.py`'s
+`PICK_DENY`, matched over the payload, the context and every option label: prod or a deploy, a
+merge or release (a tag, a publish), a delete, a force push, secrets or credentials, a live trade,
+a TDR, any `approve:`. Also left: an `approve`-class card, a pick with no recommended option or
+with several, a hook menu (an `AskUserQuestion` modal — answered by keystroke, never by text), a
+pick whose producer is not a worker session, and any pick whose scope the answerer cannot tie to
+a line of the task file. *Not scope-changing* means what rubric clause (c) above means, plus: it
+does not abort, complete, hold or defer the task.
+
+When enabled, the answer would go through the same store-card path — `gate-answer-check.py
+--answer`, which re-checks and then runs `attention-answer.py answer <id> --answer-text "Manager
+answer, via supervisor: <label>" --answerer manager`. ⚠️ **Today that call is refused twice over:**
+`attention-answer.py` refuses `--answer-text` while `PICK_ANSWERING_ENABLED` is false, refuses
+`--answerer manager` and the `supervisor:gate-answerer` arm under any answerer (every carrier
+would voice the text as the operator's), and `--answerer` has no default. Enabling picks needs both
+the carrier fix and lifting that refusal. The attention-controller carries it (carrier
+`watcher:attention-watcher`: typed into a tab worker's pane, or a resumed turn into a headless
+one); measured 2026-11-18, of the store history's 21 answered pick cards 17 carry a `delivered`
+report from that carrier (1 `failed`, 3 none). ⚠️ **Known gap, outside this repo:** the controller's headless turn
+opens with *"The operator answered on the attention board."* (`pkg/headless-answer.go`
+`AnswerTurnText`) whoever answered. The answer line itself carries the manager prefix, so the
+provenance is still on the record; the header is the controller's to fix.
 
 Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.

@@ -50,6 +50,7 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | skill `supervising-workers` | when to spawn a worker instead of doing the work yourself |
 | `/supervisor:goal-spawn` `/supervisor:fleet-workers` `/supervisor:goal-answer` `/supervisor:goal-drain` | the operator surface |
 | agent `goal-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
+| agent `gate-answerer` | answers a headless worker's permission card, or a worker's closer `pick —` card with its one recommended option, within seconds — dispatched in the background on every `hst:` gate-feed line, checked by `scripts/gate-answer-check.py`, never an `operator`-tier gate or an operator-only pick |
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
 | `/supervisor:who-needs-my-help` | the full sweep in one pass — what every live session is parked on and why, the operator-bound gates handed over with jump links and recommended answers, and the blockers that keep recurring root-caused. Report-only: it answers no gate and drives no modal |
 | `/supervisor:attention-next` | what's next on the attention stack — answer an item in chat, delivered to the session that asked |
