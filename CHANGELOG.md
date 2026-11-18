@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.340.0
 
 - feat: **`round-readings.py` reads the who-needs-me answer from the service instead of spawning the script.** The second of the per-tick spawn sites: a manager round re-ran `who-needs-me.py --section needs-you --all` through `subprocess.run`, paying a fresh interpreter plus 2 788 lines of parsing to re-derive data the `attention-controller` already holds. It now reads `GET /api/1.0/who-needs-me` and spawns nothing. ⚠️ **`--all` disappears with the render.** The 20-row cap was the reason that flag was mandatory; the payload carries every open item, so a gated row can no longer fall past a cap and read as a false `clear`. ⚠️ **The retry semantics and the failure shape are unchanged**: one retry on a failed read, one on an event-log answer, then `state: unread` / `partial` with the source NAMED — a fallback read still cannot certify a row clear. `parse_feed` stays as the render-side reference the parity tests hold the JSON mapping against; it is no longer on the production path. Change set: `scripts/round-readings.py`, `scripts/tests/test_round_readings.py`, `CHANGELOG.md`.
 
