@@ -165,6 +165,24 @@ class Liveness(unittest.TestCase):
         self.assertNotIn("RECOVERED-PENDING", out)
         self.assertNotIn("STOPPED", out)
 
+    def test_a_lapse_owed_then_stood_down_then_resumed_is_not_recovered_pending(self):
+        # The blocking case: a subject whose LAPSE report is still owed is stood down
+        # inside the ack window, then resumed. The STOPPED branch must NORMALISE the
+        # reused lapse entry to kind="stopped" (fresh crossing), so the resume drops it
+        # rather than emitting RECOVERED-PENDING for a deliberate stand-down.
+        self.arm("Manager Layer", 300, age=2 * 300 + 61)  # genuinely lapsed, report owed
+        self.assertEqual(self.check()[0], 10)
+        self.stop_with_age("Manager Layer", age=2 * 300 + 61)  # stood down while owed
+        rc, out = self.check()
+        self.assertEqual(rc, 10)
+        self.assertTrue(out.startswith("STOPPED goal--manager-layer "), out)
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 300, resume=True)
+        rc, out = self.check()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("RECOVERED-PENDING", out)
+        self.assertNotIn("STOPPED", out)
+
     def test_rearm_preserves_stop_marker(self):
         # ⚠️ THE DEFECT THIS FILE EXISTS TO PIN. An arm is a READING — every round takes
         # one — so an arm that cleared the marker made measuring a stand-down the act

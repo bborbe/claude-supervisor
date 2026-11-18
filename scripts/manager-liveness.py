@@ -1787,21 +1787,6 @@ def stood_down_age(s: str, now: float):
         return None
 
 
-def declared_interval(s: str):
-    """The interval recorded in this subject's cadence file, or None.
-
-    The fallback for `observed_period()` when the arm history is too short to measure:
-    a subject armed once and then stopped has no observed cadence, but its declared
-    interval is still its own period.
-    """
-    p, _legacy = resolve(s, "cadence")
-    try:
-        with open(p, encoding="utf-8") as fh:
-            return int(fh.read().strip())
-    except (OSError, ValueError):
-        return None
-
-
 def check(now: float = None) -> int:
     now = time.time() if now is None else now
     try:
@@ -1873,7 +1858,13 @@ def check(now: float = None) -> int:
             threshold = 2 * period if period else None
             if age is not None and threshold is not None and age > threshold:
                 still.add(s)
-                if s in pending and pending[s]["detected_at"] < last_arm(s):
+                # ⚠️ **Always NORMALISE to a stopped episode — never reuse an owed LAPSE
+                # entry.** A subject can lapse (its report still owed) and then be stood
+                # down inside the ack window; reusing that entry would print the
+                # stand-down with the lapse's `crossing=` and leave `kind=None`, so the
+                # later resume would emit `RECOVERED-PENDING` — the very "a stand-down is
+                # not a lapse" invariant this branch exists to hold.
+                if s in pending and pending[s].get("kind") != "stopped":
                     del pending[s]
                 if s not in pending and (s not in notified or notified[s] < last_arm(s)):
                     pending[s] = {
@@ -1892,9 +1883,16 @@ def check(now: float = None) -> int:
                         pending[s],
                     )
                     turned_stale = True
-            elif s in pending and pending[s].get("kind") == "stopped":
-                # The subject has not yet passed its bound, or the marker moved: drop a
-                # stopped episode that is no longer reportable rather than leave it owed.
+            elif (
+                s in pending
+                and pending[s].get("kind") == "stopped"
+                and pending[s].get("emits", 0) == 0
+            ):
+                # Drop only an UN-EMITTED stopped episode that is no longer reportable.
+                # An episode already emitted and still awaiting ack is kept, so a marker
+                # mtime reset (a repeated `--stop` rewrites the file) cannot silence a
+                # delivery that is still owed — it resumes as a `retry=1`, not a new
+                # crossing.
                 del pending[s]
         elif s in pending:
             if pending[s].get("kind") == "stopped":
