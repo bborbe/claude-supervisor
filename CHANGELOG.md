@@ -8,9 +8,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the round delegate's wait is now bounded by an exit code, not by prose.** `manager-receipt.py --budget --branch fleet` prints the time left in the round and exits **14** once it is spent (`period + SLACK`, the same limit the manager's `--check` uses, imported from `manager-liveness.py`). On 14 the delegate dispatches no further leg and hands back with every unreturned leg `not-run`. ⚠️ **The prose it replaces had already failed:** `agents/fleet-round.md` said "a leg still in flight is `not-run`" and `CHANGELOG v0.344.2` recorded *waiting is not a verdict*, yet the delegate polled five minutes and then five more — which is what pushed round `1795010135` past its 450 s limit and produced the 14-minute overlap the in-flight gate exists to remove. A rule a model can re-read and override is not a bound; a non-zero exit is. The brake cannot interrupt a leg already running — nothing can — but it is what stops the SECOND wait, and the second wait is what made the round long. Change set: `scripts/manager-receipt.py`, `scripts/tests/test_manager_receipt.py`, `agents/fleet-round.md`, `CHANGELOG.md`.
+
 ## v0.349.1
 
 - fix: permission-tier treats only unquoted, unescaped `{a,b}` as brace expansion; quoted braces (`--jq '{a: .x, b: .y}'`, JSON literals) no longer classify `unverifiable`
+
 
 ## v0.349.0
 
