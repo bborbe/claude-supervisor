@@ -282,7 +282,35 @@ the rubric above to what passed, and answers the card `allow` — or leaves it. 
 (`operator` tier, held, not this manager's worker, no readable brief, any clause it cannot verify)
 stays on the board as the operator's call; the answerer never denies.
 
-## A worker's closer pick — the second row the answerer takes
+The check also refuses, mechanically: a `--self` that is not the running session's own
+`CLAUDE_CODE_SESSION_ID`; a `role: human` session; any tool outside `Bash`, `Write`, `Edit`,
+`MultiEdit`, `Read`, `NotebookRead` (an `mcp__*` call, `WebFetch` or `Agent` reaches something the
+classifier cannot read); a card older than its park, or either timestamp missing; a cut `Bash`
+command; a `Bash` call that runs a script file. Each manager keeps a ledger of the items it checked
+(`~/.claude/state/gate-answer/<session>.json`), so a feed re-arm never judges a card twice, and
+`--answer --expect <hash>` answers only the exact call that was judged.
+
+⚠️ **A permission answer's delivery can still claim the operator's voice.** Two carriers race on an
+answered permission card. claude-wrapper's board delivery settles the park with the bare verdict
+(`pkg/board.go`: `Answer{Behavior: decision}`, no text). attention-controller's watcher can carry
+the same card first: for a pane-less session it hands the card to its headless arm, which writes a
+turn opening *"The operator answered on the attention board."* with `allow` as the answer. Measured
+2026-11-18 over the last 60 answered permission cards: of the 11 delivered to headless sessions, 7
+were carried by `watcher:attention-watcher` and 4 by `claude-wrapper:board`. The verdict is right
+either way; the attribution in that turn is the controller's to fix.
+
+## A worker's closer pick — the second row the answerer takes (DISABLED)
+
+⚠️ **Gated off: `PICK_ANSWERING_ENABLED = False` in `scripts/gate-answer-check.py`, which returns
+`skip` — `pick answering disabled until carriers render manager voice` — for every `message` card.**
+Every carrier that delivers a card answer renders it as the operator's: attention-controller's
+pane carrier types `Operator answer, via attention board:` (`pkg/pane-carrier.go`
+`deliverPrefix`), its headless arm opens *"The operator answered on the attention board."*
+(`pkg/headless-answer.go` `AnswerTurnText`), and claude-wrapper's message arm prefixes
+`Operator answer, via supervisor:` (`pkg/board.go` `messageAnswer`). A manager's pick would
+therefore reach the worker as the operator's own answer. Turn the flag on only after those three
+carriers render a manager's answer in its own voice. The row below is the design that flag
+enables, kept so it can be measured apart from the permission row when it ships.
 
 A separate row from the permission tiers above, so the two are measured apart: a permission
 answer is a `permission` card carrying `decision: allow`; a pick answer is a `message` card whose

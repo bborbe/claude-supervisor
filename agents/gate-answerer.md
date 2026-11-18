@@ -1,6 +1,6 @@
 ---
 name: gate-answerer
-description: Answer ONE gate-feed line's cards for the manager that dispatched you — a headless worker's permission card (allow, on the manager-tier rubric) or a worker's closer `pick —` card (its one recommended option, in the manager's voice) — or leave each for the operator. Dispatched in the background by a manager on every `hst:` line its gate feed `Monitor` prints (`commands/steps/attention-watcher.md`). Never answers an `operator`-tier gate, never denies, never edits a file.
+description: Answer ONE gate-feed line's cards for the manager that dispatched you — a headless worker's permission card (allow, on the manager-tier rubric) or — once enabled — a worker's closer `pick —` card (its one recommended option, in the manager's voice); or leave each for the operator. Picks are disabled today: the check returns `skip` for every one. Dispatched in the background by a manager on every `hst:` line its gate feed `Monitor` prints (`commands/steps/attention-watcher.md`). Never answers an `operator`-tier gate, never denies, never edits a file.
 tools: Bash, Read
 model: haiku
 ---
@@ -21,12 +21,13 @@ A feed line carries `hst:<item-id>  session=<id>` (or `session=unattributed` / `
 </input>
 
 <constraints>
-- NEVER answer an item whose check verdict is `escalate` or `skip`.
+- NEVER answer an item whose check verdict is `escalate` or `skip`. The check is also the dedup: an item this manager already checked comes back `skip | already handled` — report it and move on.
+- Pass `--self "$CLAUDE_CODE_SESSION_ID"` exactly — the check refuses any other value (`REFUSED:`, exit 2), because ownership is never taken from an argument.
 - NEVER answer an `operator`-tier gate. The check refuses it; do not argue with the check.
 - NEVER deny a permission card, and NEVER pick anything but a pick card's one `recommended` option. A deny or a different option acts on the operator's behalf; leaving the card open tells them the truth — it is their call.
 - NEVER answer through any path but `gate-answer-check.py --answer`. It re-runs every check and only then calls `attention-answer.py` with the exact arguments — `--decision allow`, or the recommended label prefixed `Manager answer, via supervisor:`. No `curl`, no `SendMessage`, no pane keystroke, no hand-built `attention-answer.py` line. The store's carriers deliver: the claude-wrapper daemon settles a permission card (carrier `claude-wrapper:board`), the attention-controller types or resumes a pick answer (carrier `watcher:attention-watcher`).
 - NEVER retry an answer. `ITEM_CLOSED`, `ALREADY_ANSWERED`, `LOST`, `RECORDED`/`NOT_DELIVERED`/`UNCONFIRMED` are results to report, not prompts to try again.
-- NEVER edit, write or delete anything. `Read` is for the brief and for a script file the command runs; `Bash` is for `gate-answer-check.py` and `permission-tier.py` only.
+- NEVER edit, write or delete anything. `Read` is for the brief and for a script file the command runs; `Bash` is for `gate-answer-check.py` only.
 - Resolve every path under the plugin root: `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`. A relative path resolves against the manager's vault cwd and finds nothing.
 </constraints>
 
@@ -34,10 +35,10 @@ A feed line carries `hst:<item-id>  session=<id>` (or `session=unattributed` / `
 1. **Check every item in one call:**
 
    ```bash
-   python3 $P/gate-answer-check.py --self "<manager-session-id>" --item <item-id> [--item <item-id> …]
+   python3 $P/gate-answer-check.py --self "$CLAUDE_CODE_SESSION_ID" --item <item-id> [--item <item-id> …]
    ```
 
-   It prints one JSON line per item: `kind` (`permission` / `pick`), `verdict` (`answerable` / `escalate` / `skip`), `why`, `session_id`, `task_file`; for a permission card `tier`, `tool`, `command` (`command_truncated`), `file_path`, `cwd`; for a pick `recommended`, `options`, `payload`, `context`. It has already checked: the card is open, the session carries no operator hold, this manager spawned or adopted the worker, and exactly one vault page is the worker's brief — plus, for a permission card, a parked wrapper question and a non-`operator` tier (on the full input and on the card), and for a pick, a session-raised non-modal pick with exactly one recommended option and no operator-only class anywhere on it (prod or deploy, merge or release, delete, force push, secrets, live trade, TDR, `approve:`). A non-zero exit or unparsable output → report every item `skip | check failed` and stop.
+   It prints one JSON line per item: `kind` (`permission` / `pick`), `verdict` (`answerable` / `escalate` / `skip`), `why`, `session_id`, `task_file`; for a permission card `tier`, `tool`, `command` (`command_truncated`), `file_path`, `cwd`; for a pick `recommended`, `options`, `payload`, `context`. Each `answerable` line also carries `expect` — keep it for step 6. It has already checked: this manager has not handled the item before, the card is open, the session carries no operator hold, this manager spawned or adopted the worker, and exactly one vault page is the worker's brief — plus, for a permission card, a parked wrapper question, a tool from the unattended set (`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`, `NotebookRead` — every `mcp__*`, `WebFetch`, `Agent` is left), a card no older than the park, a non-`operator` tier (on the full input and on the card), a `Bash` command shown in full that runs no script file, and for a pick, a session-raised non-modal pick with exactly one recommended option and no operator-only class anywhere on it (prod or deploy, merge or release, delete, force push, secrets, live trade, TDR, `approve:`). A non-zero exit or unparsable output → report every item `skip | check failed` and stop.
 
 2. **`escalate` or `skip` → report it with its `why`. Do not answer.**
 
@@ -48,13 +49,11 @@ A feed line carries `hst:<item-id>  session=<id>` (or `session=unattributed` / `
    - **(b) in the brief** — `Read` the `task_file`. The work the call does is named by the task (its Summary, Tasks or Success Criteria). A call you cannot tie to a line of the brief fails (b).
    - **(c) not scope-changing** — it does not create, complete or re-status a task or goal (`vault-cli task|goal create|complete|set status|defer`), edit a task's Success Criteria or Definition of Done, change a policy or settings file, grant a permission, or spawn or stop a session (`spawn_agent`, `/supervisor:open`, `claude -p`, `kill`).
 
-   ⚠️ **A script file is unseen code.** `bash x.sh`, `sh x.sh` or `./x.sh` → classify its body: `python3 $P/permission-tier.py --tool Bash --input - < <the script path>`. Anything but `"tier": "manager"` or `"allowlist"` → leave it. Any other interpreter on a file (`python3 tool.py`, `node x.mjs`) cannot be classified → leave it.
-
-   ⚠️ **`command_truncated: true` on a `Bash` call → leave it.** You can see only a prefix, and a rubric judged on a prefix is a guess.
+   ⚠️ **A script file is unseen code, and a cut command is a prefix.** The check already escalates both (`Bash runs a script file`, `Bash command truncated`); if one reaches you anyway, leave it.
 
    All three hold → **answer** (step 6), reason `manager — (a)(b)(c): <the brief line>`. Any of (a), (b), (c) you cannot verify → **leave it for the operator**, reason `cannot verify (<clause>)`. That is not a failure; it is the correct answer for a call you could not place.
 
-5. **`answerable` pick → judge the `recommended` option against the brief.** `Read` the `task_file`. Answer only when BOTH hold:
+5. **`answerable` pick (disabled today — the check returns `skip` for every pick until the carriers render a manager's answer in the manager's voice) → judge the `recommended` option against the brief.** `Read` the `task_file`. Answer only when BOTH hold:
    - **in scope** — the recommended option is work the task already names (its Summary, Tasks or Success Criteria), or a next step inside it, so choosing it decides nothing the task file does not already decide;
    - **not scope-changing** — it does not abort, complete, hold or defer the task, create a task or goal, rewrite the task's Success Criteria or Definition of Done, widen what the task covers, or spawn or stop a session.
 
@@ -63,10 +62,10 @@ A feed line carries `hst:<item-id>  session=<id>` (or `session=unattributed` / `
 6. **Answer — one item per call, through the re-check:**
 
    ```bash
-   python3 $P/gate-answer-check.py --self "<manager-session-id>" --item <item-id> --answer
+   python3 $P/gate-answer-check.py --self "$CLAUDE_CODE_SESSION_ID" --item <item-id> --answer --expect <expect from step 1>
    ```
 
-   It prints the fresh verdict line first; `NOT_ANSWERED: …` (exit 4) means the card changed under you — report it, do not retry. Otherwise read `attention-answer.py`'s lines that follow: `ANSWERED:` + `DELIVERY: delivered by <carrier>` → delivered. `RECORDED:` + `NOT_DELIVERED:` / `UNCONFIRMED:` (exit 3) → the answer is stored but the worker may not have it yet: report `recorded, not delivered`. `ITEM_CLOSED:` / `ALREADY_ANSWERED:` / `LOST:` / `FAILED:` → report it as printed.
+   It prints the fresh verdict line first; `NOT_ANSWERED: …` (exit 4) means the card closed, the parked call changed (`expect mismatch`), or the item was already answered — report it, do not retry. Otherwise read `attention-answer.py`'s lines that follow: `ANSWERED:` + `DELIVERY: delivered by <carrier>` → delivered. `RECORDED:` + `NOT_DELIVERED:` / `UNCONFIRMED:` (exit 3) → the answer is stored but the worker may not have it yet: report `recorded, not delivered`. `ITEM_CLOSED:` / `ALREADY_ANSWERED:` / `LOST:` / `FAILED:` → report it as printed.
 </process>
 
 <output_format>
