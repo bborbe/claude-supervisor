@@ -34,7 +34,7 @@ argument-hint: "[--interval <N>m] (default 15m; repeats by default)"
 ---
 Fleet-drive — **the round**: once over the fleet, runnable by hand. The show is `/supervisor:fleet-status`.
 
-⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once** and never re-invoked.
+⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once**.
 
 ⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep in a worker collapses both roles silently: it keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
@@ -49,7 +49,7 @@ goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
 ⚠️ **Carve-out: 5b, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
-them — it prints a count it was told, not one it measured.
+them.
 
 ## Router
 
@@ -72,7 +72,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 10 | Escalate | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/escalate.md` |
 | 11 | Needs-input batch + relay | the hand-back reports `blocked` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
-| 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
+| 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Readings | every tick — take all seven readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 | 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
@@ -82,7 +82,9 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
-⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends.
+⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**; a second sweep duplicates sends.
+
+⚠️ **The manager's round:** rows 0, 2–6, 12, 15, 16, 16b, 18 run in `supervisor:fleet-round`; 1, 7, 8, 9, 10, 11, 13, 14, 17, 19, 20 stay here — `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`.
 
 ## INLINE — the hard rules
 

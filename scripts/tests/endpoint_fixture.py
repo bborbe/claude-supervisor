@@ -33,6 +33,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PATH = "/api/1.0/session-heartbeat"
 LEDGER_PATH = "/api/1.0/session-ledger"
+#: The who-needs-me data endpoint — the route `gate-owner-filter.py` reads by DEFAULT
+#: since 2026-11-17. Served here so the filter's poll loop can be exercised without a
+#: live board and, more importantly, without spawning `who-needs-me.py` per poll: a
+#: suite that left the default in place would spawn the real script on every poll of
+#: every case, which is the cost the migration removes.
+FEED_PATH = "/api/1.0/who-needs-me"
 
 
 def row(session_id, live=True, source="mcp-timer", state="idle", age_seconds=1):
@@ -133,6 +139,13 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, found)
             return
+        if path == FEED_PATH:
+            # ⚠️ A 404 here is the "route absent" answer, not a quiet fleet — the
+            # filter must end its loop non-zero on it, and a fixture that answered
+            # `{"items": []}` by default could not express that case at all.
+            store.feed_reads += 1
+            self._send(store.feed_status, store.feed_payload())
+            return
         if path == LEDGER_PATH:
             self._send(store.ledger_status, store.ledger_rows)
             return
@@ -175,6 +188,11 @@ class FixtureEndpoint:
     def __init__(self, rows=None, list_status=200, ledger_rows=None, ledger_status=200, list_raw=None):
         self.rows = list(rows or [])
         self.list_status = list_status
+        # The who-needs-me route: absent (404) unless a case plants a feed, so a suite
+        # that never migrated cannot silently start depending on it.
+        self.feed_items = []
+        self.feed_status = 404
+        self.feed_reads = 0
         # A non-JSON body — the "unparseable" failure shape the reader's diagnostics must name.
         # See `_Handler.do_GET`.
         self.list_raw = list_raw
@@ -212,6 +230,32 @@ class FixtureEndpoint:
         self.ledger_rows.append(row)
         if isinstance(row, dict) and row.get("session_id"):
             self.ledger_by_id[row["session_id"]] = row
+
+    def set_feed(self, items, status=200):
+        """Plant the who-needs-me route's answer, and mark it as present.
+
+        Called per case against the RUNNING server, like `add_ledger_row`: the payload
+        is built per request, so a case can plant a different feed between polls
+        without rebuilding the server.
+        """
+        self.feed_items = list(items)
+        self.feed_status = status
+
+    def feed_payload(self):
+        """The response body for `FEED_PATH` — the service's own envelope shape.
+
+        `sources` is present because a reader that reports a partial read needs the
+        per-source block to report from; a fixture that omitted it would make every
+        case look like a fully healthy board.
+        """
+        return {
+            "source": "store",
+            "sources": {"store": "ok", "registry": "ok", "panes": "ok"},
+            "generated_at": "2026-11-17T00:00:00Z",
+            "items": self.feed_items,
+            "sessions": [],
+            "panes": [],
+        }
 
     @property
     def url(self):

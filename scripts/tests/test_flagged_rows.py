@@ -403,6 +403,44 @@ class DegradedOwner(unittest.TestCase):
         self.assertEqual(self.branch(role="human", live="none")[0], "direct")
 
 
+class ExitedSessionResumes(unittest.TestCase):
+    """An EXITED worker resolves to `resume`, end to end through the real liveness probe.
+
+    Claude Code deletes the registry entry when a session exits, so the probe sees no entry
+    and only the heartbeat endpoint's record. After #952 that read UNKNOWN and every such row
+    was `degraded`; measured 2026-11-17, 21 of 21 flagged rows with a session, none `resume`.
+    The probe runs as a subprocess exactly as the daemon's tick runs it.
+    """
+
+    SID = "4b8275b0-1111-2222-3333-444455556666"
+
+    def probe(self, rows):
+        import endpoint_fixture
+        with tempfile.TemporaryDirectory() as registry, \
+                endpoint_fixture.FixtureEndpoint(rows) as fx, \
+                unittest.mock.patch.dict(os.environ, {
+                    "ATTENTION_STORE_URL": fx.url,
+                    "SUPERVISOR_SESSIONS_DIR": registry,
+                }):
+            return fr.liveness_of(self.SID)
+
+    def branch(self, live):
+        return fr.resolve_branch("task", "agent", self.SID, live, None, None,
+                                 page("role: agent"), owner=None, owner_live=None,
+                                 registry_ok=True)
+
+    def test_an_exited_session_with_a_stale_record_resolves_to_resume(self):
+        import endpoint_fixture
+        live = self.probe([endpoint_fixture.row(self.SID, live=False, age_seconds=24646)])
+        self.assertEqual(live, "ABSENT")
+        self.assertEqual(self.branch(live)[0], "resume")
+
+    def test_a_session_with_no_record_still_never_resumes(self):
+        live = self.probe([])
+        self.assertEqual(live, "UNKNOWN")
+        self.assertNotEqual(self.branch(live)[0], "resume")
+
+
 class RowGate(unittest.TestCase):
     """SC1–SC2 at the ROW level: the emitted row, not just the branch function.
 
@@ -1318,6 +1356,99 @@ class ProbeTimeoutTest(unittest.TestCase):
         # The daemon kills a read at 25 minutes. A per-probe bound near that would let
         # a handful of slow probes reproduce the very kill this guard exists to stop.
         self.assertLessEqual(fr.PROBE_TIMEOUT, 60)
+
+
+class ParallelProbeTest(unittest.TestCase):
+    """One run's liveness probes: each distinct sid once, concurrently, under one deadline."""
+
+    SID = "616a52dd-833b-475b-889f-ee1580c73c37"
+
+    def test_each_distinct_sid_is_probed_exactly_once(self):
+        seen = []
+
+        def live(sid):
+            seen.append(sid)
+            return "LIVE"
+
+        # The same sid as row, owner and subject reaches the pre-pass three times.
+        with unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+            out = fr.probe_all(["a", "a", "b", None, "a", "b"])
+        self.assertEqual(["a", "b"], sorted(seen))
+        self.assertEqual({"a": "LIVE", "b": "LIVE"}, out)
+
+    def test_row_owner_and_subject_read_the_shared_result_without_probing(self):
+        ctx = {"liveness_cache": {}, "no_liveness": False, "fleet_sid": self.SID,
+               "sid_verdicts": {self.SID: "ABSENT"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            page_path = os.path.join(tmp, "A Goal.md")
+            write(page_path, "---\nclaude_session_id: %s\n---\n" % self.SID)
+            with unittest.mock.patch.object(fr, "liveness_of",
+                                            side_effect=AssertionError("probed")), \
+                 unittest.mock.patch.object(fr, "subject_page", return_value=page_path):
+                self.assertEqual("ABSENT", fr.row_liveness(ctx, self.SID))
+                self.assertFalse(fr.subject_liveness(ctx, "v", "goal", "A Goal"))
+                self.assertFalse(fr.fleet_liveness(ctx))
+
+    def test_probes_overlap_in_time_and_respect_the_worker_bound(self):
+        import threading
+        import time
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0}
+
+        def live(sid):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time.sleep(0.05)
+            with lock:
+                state["now"] -= 1
+            return "LIVE"
+
+        with unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+            out = fr.probe_all(["s%d" % i for i in range(20)], workers=4)
+        self.assertEqual(20, len(out))
+        self.assertGreater(state["peak"], 1)
+        self.assertLessEqual(state["peak"], 4)
+
+    def test_the_total_deadline_yields_unknown_never_absent(self):
+        import time
+
+        def live(sid):
+            time.sleep(0.5)
+            return "ABSENT"
+
+        with unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+            out = fr.probe_all(["a", "b", "c", "d"], workers=1, deadline=0.1)
+        self.assertEqual({"a", "b", "c", "d"}, set(out))
+        self.assertNotIn("ABSENT", out.values())
+        self.assertEqual({"UNKNOWN"}, set(out.values()))
+
+    def test_row_output_is_unchanged_by_prefetching(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "Live Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent\n"
+                   "claude_session_id: %s" % self.SID))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+
+        def ctx(extra):
+            base = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+                    "no_liveness": False, "no_pane": True, "managers": set(),
+                    "topic_map": {}, "mode_default": "interactive", "normalised": [],
+                    "subjects": {}, "liveness_cache": {}, "fleet_sid": None}
+            base.update(extra)
+            return base
+
+        path = os.path.join(tasks, "Live Task.md")
+        with unittest.mock.patch.object(fr, "liveness_of", return_value="LIVE"):
+            sequential, _ = fr.row_for("v", cfg, "task", path, ctx({}))
+            c = ctx({})
+            pending, _ = fr.row_prepare("v", cfg, "task", path, c)
+            c["sid_verdicts"] = fr.probe_all(pending.sids())
+            prefetched = pending.finish()
+        self.assertEqual(sequential, prefetched)
+        self.assertIn(self.SID, c["sid_verdicts"])
 
 
 class PageCacheTest(unittest.TestCase):

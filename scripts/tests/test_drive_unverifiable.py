@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 import io
 
@@ -801,6 +802,49 @@ class TestDuplicateEntries(Replay):
         row = self.ledger_entries()["aaaaaaaa"]
         self.assertEqual(row["reprobe_verdict"], "needs-step-4")
         self.assertEqual(row["reprobe_probe"], "stub")
+
+
+class ResolvePane(unittest.TestCase):
+    """The session→pane join, read from the service rather than spawned.
+
+    ⚠️ **An ambiguous prefix must resolve to "", never the first match.** Two sessions
+    sharing a prefix are not interchangeable, and a guessed pane links the operator to
+    the wrong tab — the rule the spawned resolver carried, preserved here.
+    """
+
+    @staticmethod
+    def _response(payload):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        return response
+
+    def test_a_single_match_resolves_its_pane(self):
+        payload = {"sessions": [
+            {"session_id": "deadbeef-1", "pane": "10"},
+            {"session_id": "cafebabe-2", "pane": "11"},
+        ]}
+        with mock.patch("urllib.request.urlopen",
+                        return_value=self._response(payload)):
+            self.assertEqual(drive_unverifiable.resolve_pane("deadbeef"), "10")
+
+    def test_an_ambiguous_prefix_resolves_to_nothing(self):
+        payload = {"sessions": [
+            {"session_id": "deadbeef-1", "pane": "10"},
+            {"session_id": "deadbeef-2", "pane": "11"},
+        ]}
+        with mock.patch("urllib.request.urlopen",
+                        return_value=self._response(payload)):
+            self.assertEqual(drive_unverifiable.resolve_pane("deadbeef"), "")
+
+    def test_a_session_with_no_pane_resolves_to_nothing(self):
+        payload = {"sessions": [{"session_id": "deadbeef-1", "pane": ""}]}
+        with mock.patch("urllib.request.urlopen",
+                        return_value=self._response(payload)):
+            self.assertEqual(drive_unverifiable.resolve_pane("deadbeef"), "")
+
+    def test_an_unreadable_service_resolves_to_nothing(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("refused")):
+            self.assertEqual(drive_unverifiable.resolve_pane("deadbeef"), "")
 
 
 if __name__ == "__main__":
