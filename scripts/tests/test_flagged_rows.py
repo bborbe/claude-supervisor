@@ -181,14 +181,36 @@ class RoleResolution(unittest.TestCase):
         self.assertEqual(self.normalised(root), [])
 
 
+class ParkedFor(unittest.TestCase):
+    """`parked_for` reads one session's log, once per run, and never live state in a fixture."""
+
+    def test_no_wait_disables_the_read(self):
+        self.assertFalse(fr.parked_for({"no_wait": True}, "s1"))
+
+    def test_a_sessionless_row_is_never_parked(self):
+        self.assertFalse(fr.parked_for({}, None))
+
+    def test_the_answer_is_cached_per_run(self):
+        calls = []
+        original = fr.declared_wait.declared_wait
+        fr.declared_wait.declared_wait = lambda sid: calls.append(sid) or True
+        try:
+            ctx = {}
+            self.assertTrue(fr.parked_for(ctx, "s1"))
+            self.assertTrue(fr.parked_for(ctx, "s1"))
+        finally:
+            fr.declared_wait.declared_wait = original
+        self.assertEqual(calls, ["s1"])
+
+
 class BranchPartition(unittest.TestCase):
     """The ordered predicate list — first match wins, so the set is a partition."""
 
     def branch(self, kind="task", role="agent", sid=None, live="none", pane=None,
-               chain_live=None, block=None, owner=None, owner_live=None):
+               chain_live=None, block=None, owner=None, owner_live=None, parked=False):
         return fr.resolve_branch(kind, role, sid, live, pane, chain_live,
                                  block or page("role: agent"),
-                                 owner=owner, owner_live=owner_live)
+                                 owner=owner, owner_live=owner_live, parked=parked)
 
     def test_unknown_outranks_everything(self):
         for verdict in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
@@ -202,6 +224,37 @@ class BranchPartition(unittest.TestCase):
 
     def test_sessionless_human_is_direct_not_create(self):
         self.assertEqual(self.branch(role="human", live="none", sid=None)[0], "direct")
+
+    def test_parked_outranks_resume(self):
+        # The criterion's own case: a row whose last closer declared an external wait
+        # must never read `resume`, or the tick reopens it on every pass.
+        self.assertEqual(self.branch(live="ABSENT", sid="s1", parked=True)[0], "parked")
+
+    def test_parked_outranks_create(self):
+        self.assertEqual(self.branch(live="none", sid=None, parked=True)[0], "parked")
+
+    def test_a_live_row_is_never_parked(self):
+        # A LIVE row is OPEN. Folding it into `parked` would drop a session that exists
+        # out of coverage's numerator, so jump and skip stay in front of the predicate.
+        self.assertEqual(
+            self.branch(live="LIVE", sid="s1", pane="p1", parked=True)[0], "jump")
+        self.assertEqual(self.branch(live="LIVE", sid="s1", parked=True)[0], "skip")
+
+    def test_parked_does_not_outrank_an_unanswerable_probe(self):
+        for verdict in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
+            self.assertEqual(
+                self.branch(live=verdict, sid="s1", parked=True)[0], "unknown", verdict)
+
+    def test_parked_does_not_outrank_a_manager_row(self):
+        branch, refused = self.branch(live="ABSENT", sid="s1", parked=True,
+                                      block=page("role: manager"))
+        self.assertEqual(branch, "skip")
+        self.assertEqual(refused, ["manager-row"])
+
+    def test_parked_does_not_outrank_open_manager(self):
+        self.assertEqual(
+            self.branch(kind="goal", live="ABSENT", sid="s1", chain_live=False,
+                        parked=True)[0], "open-manager")
 
     def test_manager_row_is_skip_in_every_reachable_state(self):
         block = page("role: manager")

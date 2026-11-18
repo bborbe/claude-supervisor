@@ -145,6 +145,10 @@ class ResolverAgreesWithSchema(unittest.TestCase):
         for name in ("owner_live", "session_id", "pane", "window_id"):
             self.assertEqual(validate(fixture_row(**{name: None}), load_schema()), [], name)
 
+    def test_the_parked_branch_is_accepted(self):
+        # A branch the resolver can emit must validate, or real output fails the schema.
+        self.assertEqual(validate(fixture_row(branch="parked"), load_schema()), [])
+
 
 class BrokenRowsAreRejected(unittest.TestCase):
     """The validator discriminates — each case breaks exactly one thing."""
