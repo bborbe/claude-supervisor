@@ -333,12 +333,29 @@ def notify(dedup_key, payload, options, context=""):
         argv += ["--option", option]
     try:
         out = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as err:
+        log(f"notify failed: {err}")
         return None
     for line in (out.stdout or "").splitlines():
         if line.startswith("ITEM_ID:"):
             return line.split(":", 1)[1].strip() or None
+    log(f"notify failed: exit {out.returncode}; {_post_failure_detail(out)}")
     return None
+
+
+def _post_failure_detail(out):
+    """The last line `attention-ask.py` printed, so a failed post names its own reason.
+
+    ⚠️ `notify()` used to return `None` here without looking at `out.returncode` and without
+    logging anything, so a store 503 was indistinguishable from a success with no id. The
+    reason was captured and then discarded — see the 2026-11-19 six-hour lapse, where 73
+    `lapse reported for` lines carried no card while the store answered 503.
+    """
+    for stream in (out.stderr, out.stdout):
+        text = (stream or "").strip()
+        if text:
+            return text.splitlines()[-1]
+    return "no output"
 
 
 def _load_episodes():
@@ -840,14 +857,21 @@ def main(argv):
         [FRESH_OPTION, "acknowledge"] if fresh else ["acknowledge"], context=detail,
     )
     note = " (stop state unreadable)" if stood is None else ""
-    if item:
-        lapse["reported"] = item
-        lapse["reported_day"] = lapse_day
-        if not save_lapse(lapse):
-            # The card is up; only the "already reported" marker failed to persist. The next tick
-            # re-posts under the same dedup key, so the board still holds one card. Logged so a
-            # persistently unwritable state is visible rather than inferred.
-            note += " (reported-marker not persisted; next tick re-posts under the same key)"
+    if not item:
+        # The card could not be posted — the store refused it or was unreachable. Reporting
+        # `reported` here is what made a six-hour lapse silent: the verdict said "reported"
+        # while no card existed, and the operator was never told. Fail loudly instead, and
+        # leave the lapse unmarked so the next tick retries.
+        report("cannot-tell", f"stale for {int(held)}s — lapse NOT reported: notify failed, "
+                              f"will retry next tick{note}", now)
+        return 1
+    lapse["reported"] = item
+    lapse["reported_day"] = lapse_day
+    if not save_lapse(lapse):
+        # The card is up; only the "already reported" marker failed to persist. The next tick
+        # re-posts under the same dedup key, so the board still holds one card. Logged so a
+        # persistently unwritable state is visible rather than inferred.
+        note += " (reported-marker not persisted; next tick re-posts under the same key)"
     report("reported", f"stale for {int(held)}s — lapse reported for {who}{card(item)}{note}", now)
     return 1
 

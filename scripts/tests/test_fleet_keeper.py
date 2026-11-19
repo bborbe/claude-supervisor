@@ -930,7 +930,7 @@ class NotifyArgvTest(unittest.TestCase):
         self.assertIn("REFUSED", out.stdout + out.stderr)
 
 
-class NotifyParseTest(unittest.TestCase):
+class NotifyParseTest(KeeperBase):
     def test_it_reads_the_item_id_line(self):
         done = subprocess.CompletedProcess([], 0, stdout="ITEM_ID: abc123\nPOLL: x\n", stderr="")
         with mock.patch.object(fk.subprocess, "run", return_value=done):
@@ -940,6 +940,49 @@ class NotifyParseTest(unittest.TestCase):
         done = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
         with mock.patch.object(fk.subprocess, "run", return_value=done):
             self.assertIsNone(_REAL_NOTIFY("k", "p", ["acknowledge"]))
+
+
+class NotifyFailureLoudTest(KeeperBase):
+    """SC3 — a lapse whose card cannot be posted must never read as reported.
+
+    Measured 2026-11-19: 73 `lapse reported for` lines with no card while the attention
+    store answered 503 for six hours. `notify()` swallowed the failure and the keeper
+    printed the verdict anyway, so the one thing it exists to do never happened.
+    """
+
+    FAILED = subprocess.CompletedProcess(
+        [], 1, stdout="", stderr="FAILED: store returned 503 for the push -- unavailable\n",
+    )
+
+    def test_a_failed_post_names_its_reason_in_the_keeper_log(self):
+        fk.notify = _REAL_NOTIFY
+        with mock.patch.object(fk.subprocess, "run", return_value=self.FAILED):
+            self.assertIsNone(fk.notify("k", "payload", ["acknowledge"]))
+        logged = (pathlib.Path(fk.KEEPER_LOG).read_text()
+                  if os.path.exists(fk.KEEPER_LOG) else "")
+        self.assertIn("notify failed", logged)
+        self.assertIn("503", logged)
+
+    def test_a_lapse_whose_card_fails_never_reports_cardless(self):
+        fk.notify = _REAL_NOTIFY
+        with mock.patch.object(fk.subprocess, "run", return_value=self.FAILED):
+            verdict = self.stale_run(T0, 40)
+        self.assertEqual("cannot-tell", verdict)
+        logged = pathlib.Path(fk.KEEPER_LOG).read_text()
+        cardless = [ln for ln in logged.splitlines()
+                    if "lapse reported for" in ln and "(card " not in ln]
+        self.assertEqual([], cardless, "a lapse line with no card is the six-hour silent path")
+        self.assertIn("notify failed", logged)
+
+    def test_the_retry_still_posts_once_the_store_answers(self):
+        """Positive control: the fix must not turn a transient outage into a permanent one."""
+        fk.notify = _REAL_NOTIFY
+        with mock.patch.object(fk.subprocess, "run", return_value=self.FAILED):
+            self.stale_run(T0, 40)
+        ok = subprocess.CompletedProcess([], 0, stdout="ITEM_ID: item-x\n", stderr="")
+        with mock.patch.object(fk.subprocess, "run", return_value=ok):
+            verdict = self.tick(T0 + 41 * MIN)[1][0]
+        self.assertEqual("reported", verdict)
 
 
 if __name__ == "__main__":
