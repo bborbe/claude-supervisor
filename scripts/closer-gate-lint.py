@@ -128,6 +128,11 @@ DECISION_ALLOW, DECISION_BLOCK = "allow", "block"
 # again on the continued turn's `Stop`. Bounded — see `_retry_verdict`.
 RETRY_REASON = "blocked-retry"
 
+# ⚠️ Sentinel for "this record predates the `ends` field". A pre-fix record carries no
+# `ends`, and comparing its `None` against a real line would read as CHANGED and release a
+# closer that was never corrected. Absent means "cannot tell" — fall back to `closer` alone.
+NO_ENDS = object()
+
 # `approve:` / `review:` are the two gate verbs the closer contract defines. `you run:` is
 # deliberately not here — a command the operator must execute is not a step the model may
 # simply perform.
@@ -723,6 +728,14 @@ def _retry_verdict(payload, environ, verdict, card_probe=None):
         return verdict(0, "stop-hook-active", closer=closer)
     if previous.get("closer") != closer:
         return verdict(0, "stop-hook-active", closer=closer)
+    # ⚠️ The observable is part of "unchanged", not decoration. A continued turn that keeps
+    # `👤 You:` byte-identical and fixes ONLY its `⏰ Ends:` line has done the work the block
+    # asked for; comparing `closer` alone re-blocked it and left a cosmetic reword of a
+    # correct line as the only escape. Absent `ends` on an older record means "cannot tell"
+    # — never "changed" — so the pre-fix behaviour is preserved there.
+    prev_ends = previous.get("ends", NO_ENDS)
+    if prev_ends is not NO_ENDS and prev_ends != record.get("ends"):
+        return verdict(0, "stop-hook-active", closer=closer)
     code2, _unused, retry = verdict(2, RETRY_REASON, verb=record.get("verb"),
                                     matched=record.get("matched"), closer=closer,
                                     cls=record.get("class"), phrase=record.get("phrase"))
@@ -747,6 +760,9 @@ def evaluate(payload, environ=None, card_probe=None):
     """
     environ = os.environ if environ is None else environ
     session_id = payload.get("session_id") if isinstance(payload, dict) else None
+    # ⚠️ Bound BEFORE `verdict` is defined: the early returns (kill switch, no transcript
+    # path) run before the scan, and a closure read of an unassigned name raises NameError.
+    ends = None
 
     def verdict(code, reason, verb=None, matched=None, closer=None, cls=None, phrase=None):
         return code, _message(reason, verb, matched) if code else "", {
@@ -757,6 +773,11 @@ def evaluate(payload, environ=None, card_probe=None):
             "verb": verb,
             "matched": matched,
             "closer": (closer or "")[:200] or None,
+            # ⚠️ Recorded so the retry branch can tell a CORRECTED `⏰ Ends:` from a
+            # re-emitted one. Without it a continued turn that fixes only its observable
+            # compares equal on `closer` and is re-blocked as `blocked-retry` — the fix
+            # reads as invisible and the only escape is rewording a line that was right.
+            "ends": (ends or "")[:200] or None,
             "class": cls,
             "phrase": (phrase or "")[:200] or None,
         }
