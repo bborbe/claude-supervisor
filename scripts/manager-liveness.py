@@ -610,23 +610,22 @@ def period_floor_applies(spans, declared: int) -> bool:
     return not any(iv == declared and gap < declared / 2 for gap, iv in spans)
 
 
-def read_high_water(s: str, max_age: float) -> float:
+def read_high_water(s: str) -> float:
     """The persisted high-water mark for a subject, or 0.0 when unusable.
 
-    ⚠️ Three ways a mark must NOT be honoured, each a way it could pin the limit for
-    ever instead of bounding it:
+    ⚠️ **There is deliberately NO expiry timer.** An earlier version expired the mark
+    by mtime, and because the file is only rewritten when the mark grows, a stable mark
+    aged out while still in use — the bound then dropped back to the p90 shortly after
+    the ring rolled, which is the exact regression the mark exists to prevent. Decay is
+    handled by the `2 x median` cap applied on every read instead: as the subject's own
+    median falls, the cap falls with it, and a mark seeded by an outage cannot hold the
+    limit up.
 
-    - **Expired.** A mark older than `max_age` (`ARMS_KEEP` observed periods) describes
-      a cadence this manager may no longer run. Without this, one outage or a
-      stop/resume keeps the limit at the cap indefinitely.
-    - **Non-finite or non-positive.** `float("nan")` parses happily and then poisons
-      every comparison, so a corrupt `.hwm` would crash or silently disable `--state`.
-    - **Unreadable.** A missing or malformed file means "no mark yet", never an error.
+    A non-finite or non-positive value is discarded rather than honoured: `nan` parses
+    happily and then poisons every comparison, silently disabling `--state`.
     """
     p = path(s, "hwm")
     try:
-        if max_age > 0 and (time.time() - os.stat(p).st_mtime) > max_age:
-            return 0.0
         with open(p, encoding="utf-8") as fh:
             val = float(fh.read().strip())
     except (OSError, ValueError):
@@ -752,17 +751,18 @@ def observed_period(s: str):
         # ⚠️ Seed only from a population with NO idle gap in it. A ring that straddles
         # an outage carries that outage as a span, and seeding the mark from it would
         # pin the limit at the cap for ever — the mark would then cause the over-wide
-        # limit the p90 was chosen to avoid. The mark also expires (`read_high_water`),
-        # so a stop/resume or one long outage cannot hold the bound up indefinitely.
+        # limit the p90 was chosen to avoid. Decay is the `2 x median` cap below, applied
+        # on every read: as the median falls the cap falls, so the mark cannot pin the
+        # bound. There is no timer — a timer would age out a mark that is still in use,
+        # which is the regression this mark exists to prevent.
         clean = not any(g > IDLE_GAP_SECONDS for g, _ in spans)
         ring_max = max(gaps) if clean else 0.0
-        max_age = ARMS_KEEP * max(med, declared or 0)
-        mark = read_high_water(s, max_age)
+        mark = read_high_water(s)
         seed = min(ring_max, 2.0 * med) if ring_max else 0.0
         if seed > mark:
             write_high_water(s, seed)
             mark = seed
-        period = mark or p90
+        period = max(mark, ring_max) or p90
     else:
         period = p90
     if declared and period_floor_applies(spans, declared):
