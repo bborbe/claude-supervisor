@@ -620,5 +620,122 @@ class CutoffDocumentationTest(unittest.TestCase):
         self.assertIn(closure.DOD_REQUIRED_AS_OF, text)
 
 
+def _with_measurement(sc_boxes, dod_boxes, block):
+    """A goal page plus a raw `## Final measurement` block."""
+    return _page(sc_boxes, dod_boxes) + f"\n## Final measurement\n\n{block}\n"
+
+
+def _closure(page, kind="goal"):
+    names = [n for n, _ in closure.SECTIONS[kind]]
+    body = closure.strip_fences(page)
+    return closure.closure_of(
+        closure.read_status(page),
+        {n: closure.section_of(body, n) for n in names},
+        closure.dod_exempt(kind, closure.read_created(page)),
+        closure.read_measurement(body),
+        closure.sc_labels(body),
+    )
+
+
+class FinalMeasurementTest(unittest.TestCase):
+    """The page's own recorded measurement, and the basis it produces.
+
+    The defect this pins: every box ticked on an earlier window used to read a
+    bare `CLOSE` while the goal's own final measurement missed its bars. The
+    reader must read the recorded block, name the basis in its verdict, and fail
+    CLOSED on a block it cannot read.
+    """
+
+    TICKED = "- [x] **SC1** a\n- [x] **SC2** b"
+    ONE_OPEN = "- [x] **SC1** a\n- [ ] **SC2** b"
+
+    def test_no_block_is_the_box_only_case(self):
+        self.assertEqual(_closure(_page(self.TICKED, "- [x] c")), ("CLOSE", "boxes"))
+
+    def test_all_met_block_confirms_the_close(self):
+        block = ("- SC1 bar = 10 min measured = 6.7 min verdict = MET\n"
+                 "- SC2 bar = 0 measured = 0 verdict = MET")
+        self.assertEqual(
+            _closure(_with_measurement(self.TICKED, "- [x] c", block)),
+            ("CLOSE", "measurement"),
+        )
+
+    def test_not_met_block_opens_regardless_of_boxes(self):
+        block = ("- SC1 bar = 10 min measured = 6.7 min verdict = MET\n"
+                 "- SC2 bar = 0 measured = 2 verdict = NOT MET")
+        self.assertEqual(
+            _closure(_with_measurement(self.TICKED, "- [x] c", block)),
+            ("OPEN", "measurement"),
+        )
+
+    def test_unparseable_block_fails_closed(self):
+        self.assertEqual(
+            _closure(_with_measurement(self.TICKED, "- [x] c", "- SC1 looks fine to me")),
+            ("OPEN", "measurement"),
+        )
+
+    def test_missing_criterion_id_fails_closed(self):
+        # SC2 is uncovered — the block cannot vouch for every criterion.
+        block = "- SC1 bar = 10 min measured = 6.7 min verdict = MET"
+        self.assertEqual(
+            _closure(_with_measurement(self.TICKED, "- [x] c", block)),
+            ("OPEN", "measurement"),
+        )
+
+    def test_duplicate_criterion_id_fails_closed(self):
+        # A block naming SC1 twice cannot vouch for SC2 — it must be exactly once each.
+        block = ("- SC1 bar = 10 min measured = 6.7 min verdict = MET\n"
+                 "- SC1 bar = 10 min measured = 6.7 min verdict = MET")
+        self.assertEqual(
+            _closure(_with_measurement(self.TICKED, "- [x] c", block)),
+            ("OPEN", "measurement"),
+        )
+
+    def test_unlabelled_scs_fail_closed(self):
+        # No `SCn` label on the SC lines means the block cannot be checked against them.
+        block = "- SC1 bar = 0 measured = 0 verdict = MET"
+        self.assertEqual(
+            _closure(_with_measurement("- [x] a", "- [x] c", block)),
+            ("OPEN", "measurement"),
+        )
+
+    def test_open_box_beats_a_fully_met_block(self):
+        block = ("- SC1 bar = 10 min measured = 6.7 min verdict = MET\n"
+                 "- SC2 bar = 0 measured = 0 verdict = MET")
+        self.assertEqual(
+            _closure(_with_measurement(self.ONE_OPEN, "- [x] c", block)),
+            ("OPEN", "boxes"),
+        )
+
+    def test_terminal_page_stays_terminal(self):
+        page = _with_measurement(self.TICKED, "- [x] c",
+                                 "- SC1 bar = 0 measured = 1 verdict = NOT MET")
+        page = page.replace("status: in_progress", "status: completed", 1)
+        self.assertEqual(_closure(page), ("TERMINAL", ""))
+
+
+class VerdictLineTest(unittest.TestCase):
+    """The printed verdict line names its basis — SC2's observable."""
+
+    def _run(self, page):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "goal.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(page)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                closure.main(["goal-closure-read.py", "--kind", "goal", path])
+            return out.getvalue()
+
+    def test_box_only_and_measurement_confirmed_closes_differ(self):
+        box_only = self._run(_page("- [x] **SC1** a", "- [x] c"))
+        measured = self._run(_with_measurement(
+            "- [x] **SC1** a", "- [x] c",
+            "- SC1 bar = 0 measured = 0 verdict = MET",
+        ))
+        self.assertIn("VERDICT: CLOSE (basis: boxes)", box_only)
+        self.assertIn("VERDICT: CLOSE (basis: measurement)", measured)
+
+
 if __name__ == "__main__":
     unittest.main()
