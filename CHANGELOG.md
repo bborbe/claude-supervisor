@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.356.2
 
 - fix: **a live manager auto-adopts a dead-spawner gate, so a non-routine permission is answered at the fast path instead of the manager's next turn.** `gate-answer-check.py` escalated every gate whose spawner was not the answering session, so a gate routed away from a dead manager waited for a turn — or timed out at 15 min — which is the p90 tail this closes. Adoption is bounded to a dead spawner (a registry `live_ids()` read; an unreadable registry escalates, never adopts) and runs the full rubric, so a production-touching or `operator`-tier prompt is still refused. Change set: `scripts/gate-answer-check.py`, `scripts/tests/test_gate_answer_check.py`.
 
