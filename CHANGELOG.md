@@ -8,7 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.14
+
+- fix: **`commands/steps/act.md` separates the two slash commands it names — one the delegate may run, one it may not.** PR 7 of the seven-PR lever-(b) order. Row 8's act step files a task with `/vault-cli:create-task` and spawns with `/supervisor:open`; **the first is legal for the delegate now that it holds `Skill`, the second never is** — `/supervisor:open` is a manager-only verb (`docs/session-tiers.md`) and a worker must not run it. The step now says so, **conditionally on the reader**: create-task runs here either way; a spawn stays a spawn **while the manager still owns row 8** (today), and becomes a **route** — task and readiness rendered, the manager opens it — the moment the row moves to the delegate. ⚠️ **Row 8 has not moved yet** — the four-place move is its own change, landing last. ⚠️ **This is the last of the six step files (the seventh PR is the contract row); the move is what makes any of them live.** Change set: `commands/steps/act.md`, `CHANGELOG.md`.
+
+## v0.352.13
 
 - fix: **`session-liveness --check` marks a live session that carries no identity-registry entry as `UNREGISTERED`.** The heartbeat reader answered `LIVE` while every registry-keyed verb (`restart-precheck.py`, `close-worker.py`, `send_agent_message`) refused the same session with `unknown-session-id` — measured 2026-11-19 on session `616a52dd`, alive, `busy`, pane-less, holding no `~/.claude/sessions/*.json` entry, `--check` = LIVE, both verbs refusing. The split is now visible in the verdict instead of having to be re-derived by joining the two sources. Two regression tests: the marker fires when the entry is absent, and stays silent for a registered live control.
 
