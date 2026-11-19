@@ -84,12 +84,23 @@ class EvaluateTest(unittest.TestCase):
         self.stub("STALE", "LIVE")
         self.assertTrue(cm.evaluate(self.vault, "goal", "backlog-goal")["card"])
 
-    def test_a_declared_execution_goal_under_a_dead_topic_manager_still_cards(self):
-        """A topic owns the goal even with its manager down, so the fleet leg does not cover it."""
+    def test_a_declared_execution_goal_under_a_dead_topic_manager_is_covered(self):
+        """The 2026-11-18 ruling: a dead topic manager is restarted by no round, so the fleet
+        leg takes its declared goal managers — and the census must not card a row it keeps."""
         self.kept_goal("Declared Goal")
         self.topic("Dead Topic", ["Declared Goal"], sid="dead0000-0000-0000-0000-000000000000")
         cm.cadence_state = lambda name, branch: "STALE"
         cm.session_state = lambda sid: "ABSENT" if sid.startswith("dead") else "LIVE"
+        row = cm.evaluate(self.vault, "goal", "declared-goal")
+        self.assertFalse(row["card"], row["reason"])
+        self.assertIn("fleet round", row["reason"])
+
+    def test_a_declared_execution_goal_under_a_live_topic_manager_still_cards(self):
+        """The other direction: a live topic manager keeps its own goals, so nothing here covers it."""
+        self.kept_goal("Declared Goal")
+        self.topic("Live Topic", ["Declared Goal"], sid="live0000-0000-0000-0000-000000000000")
+        cm.cadence_state = lambda name, branch: "STALE"
+        cm.session_state = lambda sid: "LIVE"
         row = cm.evaluate(self.vault, "goal", "declared-goal")
         self.assertTrue(row["card"], row["reason"])
 

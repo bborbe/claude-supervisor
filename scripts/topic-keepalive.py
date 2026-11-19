@@ -41,6 +41,17 @@ The first line of stdout is the verdict, one token:
   leave           deliberately stopped — do nothing
   cannot-tell     the probe could not decide; report, never act
   crash-loop      the resume cap is spent; stop restarting and escalate once
+  claimed         another writer holds this session's resume claim; this writer skips
+  claim-taken     `--claim-resume` won the claim; act, then record with `--record-resume`
+
+⚠️ **`claimed` is the double-writer guard, and it is the only check that covers a RACE.**
+The live check refuses a session already running, and the cap refuses a spent retry budget;
+neither refuses two writers that both read `ABSENT` (or `cannot-tell`) for one
+`claude_session_id` before the first resume registers. The guard is split across the two
+roles on purpose: the deciding probe only READS the claim (`claim_state`, never a write), and
+the acting step takes it with `--claim-resume`, an `O_EXCL` create, so exactly one writer
+wins. `--record-resume` releases it once the session reads LIVE, and `CLAIM_TTL` expires it,
+so a resume that never landed cannot block its own retry.
 
 ⚠️ **`open` / `open-unflagged` (no recorded id) and `resume` (recorded id, session dead)
 must never collapse** — the first is an open, the second a keep-alive resume. Why that
@@ -59,6 +70,7 @@ so a manager restart survives it and the autocommit daemon is never in the loop.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -193,6 +205,98 @@ def state_path(vault: str, subject: str, branch: str = "goal") -> str:
     return p
 
 
+#: A claim outlives one resume attempt, not two. Past it the claim is stale and must not
+#: block a retry — otherwise a resume that never landed becomes a permanent block.
+CLAIM_TTL = RESUME_WINDOW  # seconds
+
+
+def _claim_token(sid: str) -> str:
+    """The session id as a filename component, never as a path.
+
+    ⚠️ A `claude_session_id` is page content, so it is untrusted input: `../../settings` would
+    otherwise escape the state directory. Anything outside the safe set is hashed, so the name
+    stays stable and collision-resistant without ever carrying a separator.
+    """
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", sid or ""):
+        return sid
+    return "sha256-" + hashlib.sha256((sid or "").encode("utf-8")).hexdigest()[:16]
+
+
+def claim_path(vault: str, subject: str, sid: str, branch: str = "goal") -> str:
+    """Where a session's resume claim lives. Beside the ledger, so one seam redirects both.
+
+    ⚠️ Derived from `state_path` and not from `resume_path` on purpose: `state_path` is the
+    seam the tests redirect, so a claim written during a test can never reach the real store.
+    """
+    return f"{state_path(vault, subject, branch)}.{_claim_token(sid)}.claim"
+
+
+def claim_state(vault: str, subject: str, sid: str, now: float,
+                branch: str = "goal") -> str | None:
+    """Read-only: is a FRESH claim held for this session? The reason, or `None`.
+
+    ⚠️ **Never writes.** A stale claim reports as absent and is left for the actor's
+    `--claim-resume` to clear — a deciding probe must not mutate state, or the fleet leg's
+    documented "decides, never acts" contract stops being true and a probe could block the
+    resume it was merely inspecting.
+    """
+    p = claim_path(vault, subject, sid, branch)
+    try:
+        age = now - os.path.getmtime(p)
+    except OSError:
+        return None
+    if age >= CLAIM_TTL:
+        return None
+    return f"another writer claimed it {int(max(age, 0))}s ago"
+
+
+def take_claim(vault: str, subject: str, sid: str, now: float,
+               branch: str = "goal") -> str | None:
+    """Claim the right to resume `sid`. `None` on a win, else the reason it was refused.
+
+    `O_EXCL` is the whole guard: the create is atomic, so of two writers racing on one
+    `claude_session_id` exactly one wins. The live check and the resume cap each refuse
+    BEFORE this point, and neither covers the race that matters — both legs reading `ABSENT`
+    or `cannot-tell` for the same goal manager before the first resume registers.
+    """
+    p = claim_path(vault, subject, sid, branch)
+    try:
+        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        try:
+            age = now - os.path.getmtime(p)
+        except OSError:
+            return "a claim exists and its age cannot be read"
+        if age < CLAIM_TTL:
+            return f"another writer claimed it {int(max(age, 0))}s ago"
+        # Expired. ⚠️ `rename`, not `unlink`: rename is atomic and exactly one writer can take
+        # the stale slot. Unlinking would let two writers both clear it — the second deleting
+        # the claim the first had just created — and then both would resume.
+        stale = f"{p}.stale.{os.getpid()}.{int(now)}"
+        try:
+            os.rename(p, stale)
+        except OSError:
+            return "a concurrent writer reclaimed the expired claim"
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
+        try:
+            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            return "a concurrent writer re-claimed it"
+    os.close(fd)
+    return None
+
+
+def release_claim(vault: str, subject: str, sid: str, branch: str = "goal") -> None:
+    """Drop the claim for a session that now reads LIVE — the resume it guarded landed."""
+    try:
+        os.unlink(claim_path(vault, subject, sid, branch))
+    except OSError:
+        pass
+
+
 def flagged_path(vault: str, subject: str, branch: str = "goal") -> str:
     """Where the "this subject was flagged while running" marker lives. Pure — creates nothing.
 
@@ -318,6 +422,10 @@ def main(argv: list[str]) -> int:
                                   "`24 Goals` / `23 Topics`; read it from `vault-cli config list`)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
                     help="record a resume that the liveness instrument confirmed LIVE")
+    ap.add_argument("--claim-resume", metavar="SESSION_ID",
+                    help="claim the right to resume a session BEFORE acting on it; refuses "
+                         "when another writer already holds a fresh claim, so two rounds "
+                         "that both decided `resume` cannot both act")
     ap.add_argument("--receipt", metavar="TOPIC",
                     help="the topic round's receipt subject: a `resume` / `restart` verdict "
                          "is also recorded there as owed (`manager-receipt.py "
@@ -340,7 +448,21 @@ def main(argv: list[str]) -> int:
             print(f"resume {a.record_resume} is not LIVE; the cap is not armed against a retry")
             return 1
         record(path, load_resumes(path), now, a.record_resume)
+        release_claim(vault, a.subject, a.record_resume, a.branch)
         print("recorded")
+        return 0
+
+    # The ACTOR's half of the double-writer guard: take the claim, then act. The deciding
+    # probe only reads it (`claim_state`), so a read-only check never blocks a real resume.
+    if a.claim_resume:
+        refusal = take_claim(vault, a.subject, a.claim_resume, now, a.branch)
+        if refusal:
+            print("claimed")
+            print(f"⚠️ {a.subject} — a resume of {a.claim_resume} is already claimed "
+                  f"({refusal}); this writer skips")
+            return 1
+        print("claim-taken")
+        print(f"claim taken for {a.claim_resume}; act, then record it with --record-resume")
         return 0
 
     goal_page = None
@@ -452,7 +574,15 @@ def main(argv: list[str]) -> int:
         # repaired the same way. `UNARMED`/`UNREADABLE` are `cannot-tell` and jump instead —
         # a session that never armed needs `/supervisor:goal-loop`, and restarting it would
         # kill a healthy manager on no evidence.
+        # The session reads LIVE — any claim a previous resume took has served its purpose,
+        # and `--record-resume` releases it. A probe never writes, so nothing is unlinked here.
         if loop in ("STALE", "INVALID"):
+            refusal = claim_state(vault, a.subject, sid, now, a.branch)
+            if refusal:
+                print("claimed")
+                print(f"⚠️ {a.subject} — a restart of {sid} is already claimed "
+                      f"({refusal}); this writer skips")
+                return 1
             print("restart")
             print(f"/supervisor:restart {sid}  (cadence {loop})")
             if a.receipt:
@@ -467,6 +597,12 @@ def main(argv: list[str]) -> int:
     if spent >= RESUME_CAP:
         print("crash-loop")
         print(f"⚠️ MANAGER CRASH-LOOP: {a.subject} — {spent} resumes in 30 min; stop restarting")
+        return 1
+    refusal = claim_state(vault, a.subject, sid, now, a.branch)
+    if refusal:
+        print("claimed")
+        print(f"⚠️ {a.subject} — a resume of {sid} is already claimed ({refusal}); "
+              f"this writer skips")
         return 1
     print("resume")
     print(f'session {sid} is ABSENT (cadence {loop}); resume with '
