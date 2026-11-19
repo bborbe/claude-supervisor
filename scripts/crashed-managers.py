@@ -351,12 +351,6 @@ FLEET_KEPT_STATUS = "in_progress"
 FLEET_KEPT_PHASE = "execution"
 
 
-#: Topic-manager session verdicts that mean no round will restart it, so its declared goals
-#: fall to the fleet tier. `LIVE` is the only covered state — a live topic manager with a
-#: lapsed loop is restarted by the same round's § 1, and then resumes its own goals.
-UNKEPT_TOPIC_VERDICTS = ("resume", "cannot-tell")
-
-
 def unkept_topics(vault: str, topics_dir: str | None = None) -> dict[str, str]:
     """`topic name → verdict` for every topic whose manager no round will restart.
 

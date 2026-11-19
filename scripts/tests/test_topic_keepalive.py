@@ -351,6 +351,27 @@ class KeepAliveTest(unittest.TestCase):
         rc, again = self.run_keepalive(live="ABSENT")
         self.assertEqual("resume", again[0])
 
+    def test_an_unsafe_session_id_never_escapes_the_state_dir(self):
+        # The id is page content, so it is untrusted: a separator would otherwise name a path.
+        self.page()
+        p = self.k.claim_path(str(self.vault), "A Goal", "../../etc/passwd")
+        self.assertNotIn("etc/passwd", p)
+        self.assertTrue(p.startswith(str(self.state)), p)
+        self.assertTrue(p.endswith(".claim"), p)
+
+    def test_a_stale_claim_is_reclaimed_and_leaves_no_leftover(self):
+        self.page()
+        self.k.state_path(str(self.vault), "A Goal")
+        claim = self.k.claim_path(str(self.vault), "A Goal", "sid-1")
+        with open(claim, "w", encoding="utf-8") as fh:
+            fh.write("0")
+        os.utime(claim, (0, 0))
+        rc, out = self.run_actor("--claim-resume")
+        self.assertEqual(0, rc)
+        self.assertEqual("claim-taken", out[0])
+        self.assertTrue(os.path.exists(claim))
+        self.assertEqual([n for n in os.listdir(self.state) if ".stale." in n], [])
+
     # --- the write half -------------------------------------------------------
 
     def test_a_resume_that_did_not_take_does_not_arm_the_cap(self):

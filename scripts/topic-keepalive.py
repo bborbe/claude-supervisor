@@ -70,6 +70,7 @@ so a manager restart survives it and the autocommit daemon is never in the loop.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -209,13 +210,25 @@ def state_path(vault: str, subject: str, branch: str = "goal") -> str:
 CLAIM_TTL = RESUME_WINDOW  # seconds
 
 
+def _claim_token(sid: str) -> str:
+    """The session id as a filename component, never as a path.
+
+    ⚠️ A `claude_session_id` is page content, so it is untrusted input: `../../settings` would
+    otherwise escape the state directory. Anything outside the safe set is hashed, so the name
+    stays stable and collision-resistant without ever carrying a separator.
+    """
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", sid or ""):
+        return sid
+    return "sha256-" + hashlib.sha256((sid or "").encode("utf-8")).hexdigest()[:16]
+
+
 def claim_path(vault: str, subject: str, sid: str, branch: str = "goal") -> str:
     """Where a session's resume claim lives. Beside the ledger, so one seam redirects both.
 
     ⚠️ Derived from `state_path` and not from `resume_path` on purpose: `state_path` is the
     seam the tests redirect, so a claim written during a test can never reach the real store.
     """
-    return f"{state_path(vault, subject, branch)}.{sid}.claim"
+    return f"{state_path(vault, subject, branch)}.{_claim_token(sid)}.claim"
 
 
 def claim_state(vault: str, subject: str, sid: str, now: float,
@@ -256,11 +269,18 @@ def take_claim(vault: str, subject: str, sid: str, now: float,
             return "a claim exists and its age cannot be read"
         if age < CLAIM_TTL:
             return f"another writer claimed it {int(max(age, 0))}s ago"
-        # Expired: a resume that never landed must not block its own retry.
+        # Expired. ⚠️ `rename`, not `unlink`: rename is atomic and exactly one writer can take
+        # the stale slot. Unlinking would let two writers both clear it — the second deleting
+        # the claim the first had just created — and then both would resume.
+        stale = f"{p}.stale.{os.getpid()}.{int(now)}"
         try:
-            os.unlink(p)
+            os.rename(p, stale)
         except OSError:
-            return "an expired claim could not be cleared"
+            return "a concurrent writer reclaimed the expired claim"
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
         try:
             fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
