@@ -10,11 +10,12 @@ When: every tick — after the re-arm (row 1), before the read half
 
 ⚠️ **The round's machine half runs in ONE delegate.** Dispatch `supervisor:fleet-round`
 **once**, passing the round id, this session's id, the vault and the absolute tasks dir. The
-delegate reads the step files, runs rows 0, 2–6, 12, 15, 16, 16b and 18 — dispatching the
-existing sweep, keep-alive, readings and open legs — persists the round, and returns the ≤ 1 KB
-verdict plus the artifact paths. You keep rows 7, 8, 9, 10, 11, 13, 14, 17, 19 and 20: the
-provenance acts, the cause check, the operator questions, the watchers, the voice, the round
-tail and the render. The split, and why the manager no longer reads the step files, is
+delegate reads the step files, runs rows 0, 2–10, 12, 15, 16, 16b, 18 and 20 — dispatching the
+existing sweep, keep-alive, readings and open legs, taking the provenance acts, the cause check
+and the escalation, and writing the render to `<round>.render` — persists the round, and returns
+the ≤ 1 KB verdict plus the artifact paths. You keep rows 1, 11, 13, 14, 17 and 19: the re-arm,
+the operator questions, the watchers, the voice and the round tail, and you print the render
+file **after** that tail. The split, and why the manager no longer reads the step files, is
 `agents/fleet-round.md`.
 
 ⚠️ **The verdict is CHECKED, not trusted — run the gate before you read a single count.**
@@ -45,13 +46,19 @@ already holds. A delegate that overruns twice is a defect to report, not a third
 
 ⚠️ **Row 19 (the tail) runs after the delegate returns, never before.** It judges the `re-arm`
 epoch and the receipt **you** wrote — an arm that has not landed yet reads `skipped: re-arm` on
-a round that armed perfectly — and it must run before the render, or a skip it finds cannot
-reach the block the operator reads.
+a round that armed perfectly. ⚠️ **The render file is already written by then** (row 20 is the
+delegate's), so the tail cannot reach inside it: a skip it finds must be stated **in the tail's
+own output, printed after the render file**, never assumed to appear in the block. That is the
+order this line enforces — tail, then print.
 
-⚠️ **Row 7 reads the delegate's `parks=` file.** The delegate runs row 5d and hands back
-`parks-answered` / `parks-routed` / `parks-escalated` plus the `parks=` path; the routed parks
-there are yours to answer, and nothing else carries them. A round that skips that read leaves a
-class-C question to the 15-minute timeout.
+⚠️ **Row 7 is the delegate's now, and it reads its own `parks=` file.** The delegate runs
+row 5d and hands back `parks-answered` / `parks-routed` / `parks-escalated` plus the `parks=`
+path; row 7 routes what it finds there and **you** answer it at row 11, because a headless
+delegate must not speak in the operator's voice. ⚠️ **The routed parks and a routed row-8 spawn
+are the two material sources row 11 batches besides the attention feed's `BLOCKED` set** —
+`commands/steps/needs-input.md` names them, and the render's Needs-input item carries them, so
+nothing routes to a row that never reads it. Nothing else carries those parks, so a round that
+skips the read leaves a class-C question to the 15-minute timeout.
 
 ⚠️ **The digest path is the delegate's to derive, never yours to pass.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, written by the sweep reader the
