@@ -907,8 +907,26 @@ def parse_started(rec):
         return None
 
 
+def manager_loop_prompt(branch, subject):
+    """The loop command a manager resume carries as its first turn.
+
+    A manager's loop is one-shot per re-arm, so a resume that relies on the pane
+    wake to type `/supervisor:<branch>-loop` arms nothing when the guard refuses
+    or the pane is slow — measured 2026-11-19: 2 of 5 resumed panes never passed
+    `pane-wake-guard.py` within 90 s and their loop was never armed. Carrying the
+    command as the resume prompt arms it on the first turn with no keystroke.
+
+    `branch` is `fleet`, `goal` or `topic`; a fleet manager's loop takes no
+    subject. The result is a RAW prompt — `resume_command` escapes it for the
+    double-quoted `bash -lc` string.
+    """
+    if branch == "fleet":
+        return "/supervisor:fleet-loop"
+    return f'/supervisor:{branch}-loop "{subject}"'
+
+
 def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
-                   wezterm="wezterm"):
+                   wezterm="wezterm", resume_prompt=None):
     """The resume recipe, copied from `commands/open.md` Step 3.1.
 
     ``fresh_prompt`` set → a NEW session is started through the same launcher, cwd and exit
@@ -994,7 +1012,10 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
         + trap
         + (f'"{script}" -n "{bash_dq_escape(title)}" "{bash_dq_escape(fresh_prompt)}"'
            if fresh_prompt
-           else f'"{script}" --resume {sid} -n "{bash_dq_escape(title)}" "/color {chip}"')
+           else f'"{script}" --resume {sid} -n "{bash_dq_escape(title)}" '
+                f'"{bash_dq_escape(resume_prompt)}"'
+                if resume_prompt
+                else f'"{script}" --resume {sid} -n "{bash_dq_escape(title)}" "/color {chip}"')
     )
     argv = [wezterm, "cli", "spawn"]
     if cwd:
@@ -1645,7 +1666,11 @@ def resume_absent(sid, sessions_dir, dry_run):
     print(f"   launcher: {launcher} ({launcher_source})")
     print(f"   wezterm: {wezterm}")
 
-    argv = resume_command(sid, subject, chip, cwd, launcher)
+    # `--absent` only ever resumes a manager, so its loop command always rides the
+    # resume prompt — the pane wake cannot be relied on to arm it (see
+    # `manager_loop_prompt`).
+    argv = resume_command(sid, subject, chip, cwd, launcher,
+                          resume_prompt=manager_loop_prompt(branch, subject))
     argv[0] = wezterm
     try:
         spawned = subprocess.run(argv, capture_output=True, text=True, timeout=30)
@@ -1970,9 +1995,16 @@ def main():
     # no fall-through to the success `return 0` at the end of main(): a killed pid
     # whose session was NOT resumed must never read as a successful restart, because
     # the caller branches on this exit code to decide whether the worker is back.
+    # A manager's loop is armed by the resume itself, never by a pane keystroke: the
+    # resume prompt carries the loop command (see `manager_loop_prompt`). A worker's
+    # resume keeps `/color <chip>`.
+    resume_prompt = None
+    if role == "manager" and subject:
+        resume_prompt = manager_loop_prompt(subject[0], subject[1])
     try:
         spawned = subprocess.run(
-            resume_command(sid, title, chip, cwd, launcher, fresh_prompt, wezterm),
+            resume_command(sid, title, chip, cwd, launcher, fresh_prompt, wezterm,
+                           resume_prompt),
             capture_output=True, text=True, timeout=30,
         )
     except Exception as error:

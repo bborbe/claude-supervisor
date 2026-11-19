@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a manager resume arms its own loop instead of relying on a pane keystroke.** A manager's loop is one-shot per re-arm, so a resume that left `/supervisor:<branch>-loop` to the pane wake did nothing when the guard refused or the pane was slow — measured 2026-11-19: 2 of 5 resumed manager panes never passed `pane-wake-guard.py` within 90 s and their loop was never armed. `scripts/restart-worker.py` gains `manager_loop_prompt()` and `resume_command(resume_prompt=…)`, and both the normal resume (manager role) and `--absent` now carry the loop command as the resume prompt. `commands/open.md` § 3.1 records the manager exception. Change set: `scripts/restart-worker.py`, `scripts/tests/test_restart_worker.py`, `commands/open.md`, `CHANGELOG.md`.
+
 ## v0.352.3
 
 - fix: **the fleet keeper can no longer report a lapse whose card it never posted.** `notify()` returned `None` on a failed `attention-ask.py post` without inspecting `out.returncode` and without logging anything, and the lapse branch printed `reported — … lapse reported for <who>` regardless — so a store 503 read as a successful report with no card. Measured 2026-11-19: **73 `lapse reported for` lines carrying no card** across a six-hour lapse of session `26480062`, while `~/Library/Logs/claude-wrapper/stderr.log` carried a sustained 503 storm (`01:20:45–07:20:46`, ~1 820 lines/hour). `notify()` now logs `notify failed: exit <rc>; <reason>` (the reason being the last line `attention-ask.py` printed), and the lapse branch reports `cannot-tell` — with the lapse left unmarked so the next tick retries — instead of a cardless `reported`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.

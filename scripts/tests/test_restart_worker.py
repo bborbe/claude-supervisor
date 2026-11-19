@@ -2032,5 +2032,47 @@ class RegisteredVaultShapes(unittest.TestCase):
                 self.assertNotIn("resolves to no existing directory", text)
 
 
+class ManagerLoopArmsOnResume(unittest.TestCase):
+    """A manager resume arms its own loop — no pane keystroke.
+
+    Measured 2026-11-19: 2 of 5 resumed manager panes never passed
+    `pane-wake-guard.py` within 90 s, so the loop the pane wake was to type was
+    never armed. The fix is that the resume prompt itself carries the loop command.
+    """
+
+    def command(self, **over):
+        argv = rw.resume_command(
+            "1c05c414-269b-4a65-887e-bb8dc25f5b1e", "Some Subject", "orange",
+            "/tmp", "/scripts/cc-private", **over,
+        )
+        return " ".join(argv)
+
+    def test_a_manager_resume_never_ends_unarmed(self):
+        """SC2: the loop command is the resume's first turn, not a pane keystroke."""
+        goal = self.command(resume_prompt=rw.manager_loop_prompt("goal", "Some Subject"))
+        self.assertIn('--resume', goal)
+        self.assertIn('/supervisor:goal-loop \\"Some Subject\\"', goal)
+        self.assertNotIn('/color orange', goal)
+
+        topic = self.command(resume_prompt=rw.manager_loop_prompt("topic", "Some Subject"))
+        self.assertIn('/supervisor:topic-loop \\"Some Subject\\"', topic)
+
+        fleet = self.command(resume_prompt=rw.manager_loop_prompt("fleet", "Some Subject"))
+        self.assertIn('/supervisor:fleet-loop', fleet)
+
+    def test_a_worker_resume_keeps_the_colour(self):
+        """The negative control: a worker resume is unchanged — `/color`, no loop."""
+        worker = self.command()
+        self.assertIn('/color orange', worker)
+        self.assertNotIn('/supervisor:', worker)
+
+    def test_the_loop_prompt_is_escaped_for_the_bash_string(self):
+        """A subject carrying a quote or `$` must not break out of `bash -lc`."""
+        prompt = rw.manager_loop_prompt("goal", 'A "quoted" $subject')
+        command = self.command(resume_prompt=prompt)
+        self.assertIn('\\"quoted\\"', command)
+        self.assertIn('\\$subject', command)
+
+
 if __name__ == "__main__":
     unittest.main()
