@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.2
 
 - fix: **the manager CHECKS the round delegate's verdict instead of trusting it.** `agents/fleet-round.md` already said *emit the fence and NOTHING else*, and the delegates ignore it: measured 2026-11-18 across eight live `supervisor:fleet-round` runs, **seven emitted no fence at all** — a 54–111 B closing remark — and the eighth emitted prose at **1 510 B** against the 1 024 B cap. A rule the delegate can re-read and override is not a bound, so `commands/steps/round-dispatch.md` now runs `check-handback-size.py --transcript <the delegate's transcript>` before reading a single count, and on exit 1 **re-asks once for the counts only**. ⚠️ **The re-ask is the mechanism**: an overrun costs the delegate a turn instead of loading the manager's context with a narrative that restates what the payload already holds. Change set: `commands/steps/round-dispatch.md`, `CHANGELOG.md`.
 
