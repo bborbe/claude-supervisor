@@ -12,12 +12,17 @@ fence, minus the lines the contract declares **variable** (the truncation except
 design — the payload carries the remainder — so counting them would fail a leg that is behaving
 correctly.
 
-⚠️ **This pins the authored shape, not a live round.** A placeholder is not always longer than
-its value: `<n>` and `<pct>` are, but `<path>` and `<id>` stand in for strings that can exceed
-them, so a template under the cap does not prove every instance is. What it does prove is that
-the *fixed* text — the keys, the separators, the labels a leg controls — leaves room for the
-values, and a leg that overruns the cap on a real round has broken its own contract, which is a
-review question rather than something a static check can see.
+⚠️ **The default mode pins the authored shape; `--transcript` measures a live round.** A
+placeholder is not always longer than its value: `<n>` and `<pct>` are, but `<path>` and
+`<id>` stand in for strings that can exceed them, so a template under the cap does not prove
+every instance is. What the template check does prove is that the *fixed* text — the keys, the
+separators, the labels a leg controls — leaves room for the values.
+
+⚠️ **That gap is why the transcript modes exist.** Measured 2026-11-18 on eight live
+`supervisor:fleet-round` delegates: seven emitted **no verdict at all**, and the eighth emitted
+**1 510 B** against the 1 024 B cap — and the template check reported green through all of it.
+`--transcript` / `--transcript-dir` measure what a delegate actually emitted, and **an absent
+hand-back is a failure, not 0 B**.
 """
 
 import argparse
@@ -123,11 +128,14 @@ def emitted_reading(transcript: Path, variable: tuple[str, ...] = ()) -> tuple[i
     if not texts:
         return None, "no assistant text block"
     for text in reversed(texts):
-        fence = handback_fence(text)
-        if fence is not None:
-            return fixed_bytes(fence, variable), "fence found"
+        # ⚠️ **The WHOLE block, never just the fence.** A delegate that uses the authored
+        # fence shape still wraps it in a heading, a table and a trailing note; measuring
+        # the fence alone under-reported a 1 098 B message as 40 B and passed it 74 B over
+        # the cap. Both shapes measure the emitted message.
+        if handback_fence(text) is not None:
+            return fixed_bytes(text, variable), "fence block found"
         if ROUND_ID.search(text):
-            return len(text.rstrip().encode("utf-8")), "round-id block found"
+            return fixed_bytes(text, variable), "round-id block found"
     return None, (
         f"no `**Hand-back**` fence and no round-id block in {len(texts)} assistant "
         f"text block(s)"
@@ -135,9 +143,18 @@ def emitted_reading(transcript: Path, variable: tuple[str, ...] = ()) -> tuple[i
 
 
 def transcript_readings(directory: Path, agent_type: str) -> tuple[list[str], list[str]]:
-    """Measure every delegate transcript under `directory`. (readings, failures)."""
+    """Measure every delegate transcript under `directory`. (readings, failures).
+
+    ⚠️ **A missing, empty or non-matching directory is a FAILURE, not a clean zero.**
+    Otherwise a typo'd session id prints `ok: 0 emitted hand-back(s)` and greens the gate —
+    the directory-level form of the absent-hand-back defect this mode exists to close.
+    """
+    if not directory.is_dir():
+        return [], [f"{directory}: not a directory — nothing was measured"]
+    variable = VARIABLE.get(agent_type, ())
     readings: list[str] = []
     failures: list[str] = []
+    matched = 0
     for transcript in sorted(directory.glob("*.jsonl")):
         meta = transcript.with_suffix(".meta.json")
         if meta.exists():
@@ -147,10 +164,11 @@ def transcript_readings(directory: Path, agent_type: str) -> tuple[list[str], li
                 declared = None
             if declared and declared != agent_type:
                 continue
-        size, reason = emitted_reading(transcript)
+        matched += 1
+        size, reason = emitted_reading(transcript, variable)
         if size is None:
             failures.append(
-                f"{transcript.name}: {reason} — an absent fence is a failure, not 0 B"
+                f"{transcript.name}: {reason} — an absent hand-back is a failure, not 0 B"
             )
             continue
         readings.append(f"{transcript.name}={size}B")
@@ -158,16 +176,22 @@ def transcript_readings(directory: Path, agent_type: str) -> tuple[list[str], li
             failures.append(
                 f"{transcript.name}: emitted hand-back is {size} B over its {MAX_BYTES} B cap"
             )
+    if matched == 0:
+        failures.append(
+            f"{directory}: no transcript matched agent type {agent_type!r} — "
+            f"an empty set is a failure, not a clean zero"
+        )
     return readings, failures
 
 
 def main(argv=None, root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
         "--transcript", type=Path,
         help="measure the EMITTED hand-back of one subagent transcript, not the authored template",
     )
-    parser.add_argument(
+    source.add_argument(
         "--transcript-dir", type=Path,
         help="measure every *.jsonl under this subagents directory",
     )
@@ -178,11 +202,16 @@ def main(argv=None, root: Path | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.transcript is not None:
-        size, reason = emitted_reading(args.transcript)
+        if not args.transcript.is_file():
+            print(f"handback-size FAILED: {args.transcript}: not a file", file=sys.stderr)
+            return 1
+        size, reason = emitted_reading(
+            args.transcript, VARIABLE.get(args.agent_type, ())
+        )
         if size is None:
             print(
-                f"handback-size FAILED: {args.transcript.name}: {reason} — an absent fence "
-                f"is a failure, not 0 B",
+                f"handback-size FAILED: {args.transcript.name}: {reason} — an absent "
+                f"hand-back is a failure, not 0 B",
                 file=sys.stderr,
             )
             return 1

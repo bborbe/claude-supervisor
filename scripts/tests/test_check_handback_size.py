@@ -160,6 +160,55 @@ class TranscriptModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no `**Hand-back**` fence and no round-id block", result.stderr)
 
+    def test_a_fence_wrapped_in_prose_is_measured_as_the_whole_block(self):
+        """The fence branch must not measure only the fenced body.
+
+        A delegate using the authored shape still wraps it in a heading, a table and a
+        trailing note; measuring the fence alone under-reported a 1 098 B message as 40 B
+        and passed it 74 B over the cap.
+        """
+        keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-round"]["required"]
+        wrapped = (
+            "The round is complete. Hand-back delivered.\n\n"
+            "**Round 1795010883 — final verdict**\n\n"
+            "**Hand-back**\n\n```text\n"
+            + " · ".join(f"{k}=<n>" for k in keys)
+            + "\n```\n</output_format>\n\n"
+            + "- a payload bullet that the contract says belongs elsewhere\n" * 20
+        )
+        path = self.write("e.jsonl", wrapped)
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("over its", result.stderr)
+
+    def test_a_missing_transcript_dir_fails(self):
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript-dir", str(pathlib.Path(self.dir) / "nope")],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a directory", result.stderr)
+
+    def test_a_dir_matching_no_agent_type_fails(self):
+        """A typo'd agent type must not print `ok: 0` — an empty set is a failure."""
+        self.write("f.jsonl", "**Round 1795010883 — final verdict**\n")
+        (pathlib.Path(self.dir) / "f.meta.json").write_text(
+            json.dumps({"agentType": "supervisor:other-leg"}), encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript-dir", self.dir],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no transcript matched", result.stderr)
+
+    def test_dir_mode_measures_matching_transcripts(self):
+        self.write("g.jsonl", "**Round 1795010883 — final verdict**\n")
+        self.write("h.jsonl", "I'll start by reading the router.")
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript-dir", self.dir],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("h.jsonl", result.stderr)   # the absent one is named
+        self.assertNotIn("g.jsonl", result.stderr)  # the present one is not
+
     def test_the_authored_fence_shape_also_counts(self):
         keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-round"]["required"]
         path = self.write("d.jsonl",
