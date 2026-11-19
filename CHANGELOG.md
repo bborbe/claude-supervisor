@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the manager CHECKS the round delegate's verdict instead of trusting it.** `agents/fleet-round.md` already said *emit the fence and NOTHING else*, and the delegates ignore it: measured 2026-11-18 across eight live `supervisor:fleet-round` runs, **seven emitted no fence at all** — a 54–111 B closing remark — and the eighth emitted prose at **1 510 B** against the 1 024 B cap. A rule the delegate can re-read and override is not a bound, so `commands/steps/round-dispatch.md` now runs `check-handback-size.py --transcript <the delegate's transcript>` before reading a single count, and on exit 1 **re-asks once for the counts only**. ⚠️ **The re-ask is the mechanism**: an overrun costs the delegate a turn instead of loading the manager's context with a narrative that restates what the payload already holds. Change set: `commands/steps/round-dispatch.md`, `CHANGELOG.md`.
+
 ## v0.352.1
 
 - refactor: **the session-ownership predicates live in their own module, so `gate-owner-filter.py` can be deleted.** `load_ledger_checked`, `load_claims` and `is_manager` moved out of the script into `scripts/session-ownership.py`, with their docstrings verbatim, and both callers now import it — `adopt-orphans.py` previously imported the script itself, which was the only thing preventing its deletion. ⚠️ The distinction the move exists to protect is preserved: `load_ledger_checked` returns `None` for "could not read" and `{}` for "read, nobody recorded", and the two callers need opposite answers — the filter fails OPEN on `None` (keeps every gate), `adopt-orphans.py` must refuse. Collapsing them would turn a dead controller into "no spawns ever", silently. `_Unreadable` was deliberately left in the filter: it belongs to `route_to_fleet`, not to the three functions, so moving it would have broken that caller.
