@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`attention-answer.py dismiss ITEM_ID` retires a card without recording an answer.** `skip` was the only way to clear a card that asks nothing, and the store records it as a DECLINE the operator never gave; `dismiss` closes the item, stores no answer, and names the arm that closed it. `closed` is terminal, so a second dismiss exits non-zero rather than reading as a silent no-op. Change set: `scripts/attention-answer.py`, `scripts/tests/test_attention_answer.py`.
+- docs: **`docs/closer-classes.md` gains the hand-over split.** A `you run:` closer is a hand-over, but only some hand-overs are the operator's: an agent-doable one (a command, a session action, answering a card) mints no card, an operator-only one (chore, people-communication, no-command-form action, live-pane typing) still mints `done` / `not now`. Default is mint — a stranded gate is the cost the split must never buy. Operator-specific rows stay out of this repo and are read from `CLOSER_HANDOVER_POLICY`. Change set: `docs/closer-classes.md`.
+
 ## v0.352.12
 
 - fix: **the round delegate is granted `Skill`, so row 8's step file is runnable once the row moves.** PR 6 of the seven-PR lever-(b) order. `commands/steps/open-items.md` says the open-items ledger is read and written **only** through the `supervisor:open-items` skill, and the delegate's `tools:` omitted `Skill` — so row 8 would have been **inert by construction** the moment it moved: the delegate's own `<error_handling>` says a row needing a tool outside `allowed-tools` must be reported and stopped. `Skill` is now granted and the step file records why. ⚠️ **Row 8 has NOT moved yet** — the router, `round-dispatch.md` and the agent's own run table still assign it to the manager; the move is its own PR, after all seven step files are ready. This one makes the step runnable, not live. ⚠️ **Same class as the two withdrawn attempts:** a row cannot move until its step file stops assuming the manager's capabilities — and conversely, rewriting the step file alone moves nothing. Change set: `agents/fleet-round.md`, `commands/steps/open-items.md`, `CHANGELOG.md`.

@@ -78,6 +78,7 @@ voice (see `answer_text_refusal`). `--answerer` has no default and must be state
 Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
                                   [--answer-text TEXT] [--answerer operator|manager]
      python3 attention-answer.py attempt ITEM_ID --outcome delivered|failed [--by ARM]
+     python3 attention-answer.py dismiss ITEM_ID [--by ARM]
 """
 
 import argparse
