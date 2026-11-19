@@ -12,6 +12,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: **a live manager auto-adopts a dead-spawner gate, so a non-routine permission is answered at the fast path instead of the manager's next turn.** `gate-answer-check.py` escalated every gate whose spawner was not the answering session, so a gate routed away from a dead manager waited for a turn — or timed out at 15 min — which is the p90 tail this closes. Adoption is bounded to a dead spawner (a registry `live_ids()` read; an unreadable registry escalates, never adopts) and runs the full rubric, so a production-touching or `operator`-tier prompt is still refused. Change set: `scripts/gate-answer-check.py`, `scripts/tests/test_gate_answer_check.py`.
 
+## v0.355.0
+
+- feat: **the gate answerer answers a worker's closer pick in the manager's voice.** `PICK_ANSWERING_ENABLED` flips to `True` (kept as the kill switch). `attention-answer.py --answer-text` now posts `answer.answerer` (`operator` | `manager`), which attention-controller v0.104+ and claude-wrapper v0.45+ read to deliver a manager answer as `Manager answer, via supervisor: …` instead of in the operator's voice. `answer_text_refusal` stops refusing `--answerer manager`, refuses any answerer other than `operator` / `manager`, and refuses the `supervisor:gate-answerer` arm unless it answers as `manager`. `docs/permission-allowlist.md` and `agents/gate-answerer.md` no longer describe picks as disabled. Requires both carrier releases to be installed first.
+
 ## v0.354.0
 
 - feat: **`attention-answer.py dismiss ITEM_ID` retires a card without recording an answer.** `skip` was the only way to clear a card that asks nothing, and the store records it as a DECLINE the operator never gave; `dismiss` closes the item, stores no answer, and names the arm that closed it. `closed` is terminal, so a second dismiss exits non-zero rather than reading as a silent no-op. Change set: `scripts/attention-answer.py`, `scripts/tests/test_attention_answer.py`.

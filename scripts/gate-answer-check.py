@@ -12,12 +12,12 @@ Two card kinds, one verdict line each — `kind` says which:
 
   permission  a wrapper-backed worker's parked tool call (`answer_mechanism: permission`)
   pick        a worker's closer `pick —` card (`answer_mechanism: message`,
-              `interrupt_class: pick`, `producer_kind: session`). ⚠️ **DISABLED**
-              (`PICK_ANSWERING_ENABLED = False`): every carrier that delivers a card answer
-              renders it as the OPERATOR's (attention-controller `pkg/pane-carrier.go`,
+              `interrupt_class: pick`, `producer_kind: session`). Answered with the recommended
+              label as `--answerer manager`; the store records `answer.answerer: manager`
+              and every carrier (attention-controller `pkg/pane-carrier.go`,
               `pkg/headless-answer.go` `AnswerTurnText`; claude-wrapper `pkg/board.go`
-              `messageAnswer`), so a manager's pick would reach the worker as an operator
-              answer. Every pick card is `skip` until the carriers render the manager's voice.
+              `messageAnswer`) delivers it as `Manager answer, via supervisor: …`, never in
+              the operator's voice. `PICK_ANSWERING_ENABLED` is the kill switch.
 
 One JSON line per `--item`, carrying `verdict`:
 
@@ -136,10 +136,11 @@ WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
 #: escalate nearly every build a worker runs.
 RUNNER_WORDS = ("uv", "uvx", "npx", "pnpx", "bunx", "pipx", "poetry", "pdm", "hatch", "rye")
 
-#: Off until every carrier renders a manager's answer in the manager's voice — see the module
-#: docstring. The pick branch below stays, tested with this flipped, so turning it on is one line.
-PICK_ANSWERING_ENABLED = False
-PICK_DISABLED_WHY = "pick answering disabled until carriers render manager voice"
+#: The kill switch for pick answering. On since every carrier renders an `answerer: manager`
+#: answer in the manager's voice (attention-controller v0.104+, claude-wrapper v0.45+); an
+#: older carrier would voice it as the operator, so turn this off if either is rolled back.
+PICK_ANSWERING_ENABLED = True
+PICK_DISABLED_WHY = "pick answering disabled by the PICK_ANSWERING_ENABLED kill switch"
 
 #: The only tools an unattended manager answer may release. The tier classifier understands
 #: these; an `mcp__*` call, `WebFetch` or `Agent` reaches something it cannot read.

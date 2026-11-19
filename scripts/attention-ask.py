@@ -461,7 +461,7 @@ STATE_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
     "~/.claude/state/attention")
 
 
-def record_posted_closer(producer_id, closer, dedup_key):
+def record_posted_closer(producer_id, closer, dedup_key, item_id=None):
     """Name the closer line this card corresponds to, for the hook's `Stop` branch.
 
     A session that posts a card and then ends its turn with the same ask on its
@@ -499,7 +499,14 @@ def record_posted_closer(producer_id, closer, dedup_key):
         try:
             os.makedirs(STATE_DIR, exist_ok=True)
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"closer": closer, "dedup_key": dedup_key, "ts": time.time()}, f)
+                rec = {"closer": closer, "dedup_key": dedup_key, "ts": time.time()}
+                # The posted card's store id, so the hook can suppress a closer
+                # that NAMES the card by id (a `pick — card <prefix>…` line), not
+                # only one that repeats its text. Omitted when unknown so an older
+                # caller / a failed post degrades the hook to today's text match.
+                if item_id:
+                    rec["item_id"] = item_id
+                json.dump(rec, f)
             os.replace(tmp, path)
         except Exception:
             try:
@@ -1030,7 +1037,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
         return _report_transport_failure(err, True, out)
     except OSError as err:
         return _report_transport_failure(err, True, out)
-    record_posted_closer(producer_id, getattr(args, "closer", ""), args.dedup_key)
+    record_posted_closer(producer_id, getattr(args, "closer", ""), args.dedup_key, item.get("item_id"))
     print(f"ITEM_ID: {item.get('item_id')}", file=out)
     print(f"POLL: python3 attention-ask.py poll {item.get('item_id')}", file=out)
     return 0

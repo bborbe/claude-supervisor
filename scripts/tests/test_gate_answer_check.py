@@ -213,12 +213,17 @@ def pick(options=None, payload="pick — 1. split the helper (recommended) · 2.
     return base
 
 
+class PickEnabled(unittest.TestCase):
+    def test_kill_switch_is_on(self):
+        self.assertTrue(gac.PICK_ANSWERING_ENABLED)
+
+
+@mock.patch.object(gac, "PICK_ANSWERING_ENABLED", False)
 class PickDisabled(unittest.TestCase):
-    def test_every_pick_is_skipped_while_carriers_speak_as_the_operator(self):
-        self.assertFalse(gac.PICK_ANSWERING_ENABLED)
+    def test_every_pick_is_skipped_while_the_kill_switch_is_off(self):
         out = run(item=pick())
         self.assertEqual(out["verdict"], gac.SKIP)
-        self.assertEqual(out["why"], "pick answering disabled until carriers render manager voice")
+        self.assertEqual(out["why"], "pick answering disabled by the PICK_ANSWERING_ENABLED kill switch")
 
     def test_disabled_pick_gets_no_answer_argv(self):
         verdict = dict(run(item=pick()), verdict=gac.ANSWERABLE, recommended="x")

@@ -1387,6 +1387,24 @@ class RecordPostedCloserTest(unittest.TestCase):
         self.assertEqual(rec["dedup_key"], "cap-1")
         self.assertGreater(rec["ts"], 0)
 
+    def test_records_the_posted_item_id_when_given(self):
+        with mock.patch.object(ask, "resolved_session_id", return_value=""):
+            ask.record_posted_closer("session-a", "pick — card abc12345…", "k", "abc12345deadbeef")
+        with open(
+            os.path.join(self._dir, "session-a.posted.json"), encoding="utf-8"
+        ) as f:
+            rec = json.load(f)
+        self.assertEqual(rec["item_id"], "abc12345deadbeef")
+
+    def test_omits_item_id_when_not_given(self):
+        with mock.patch.object(ask, "resolved_session_id", return_value=""):
+            ask.record_posted_closer("session-a", "pick — 1. x · 2. y", "k")
+        with open(
+            os.path.join(self._dir, "session-a.posted.json"), encoding="utf-8"
+        ) as f:
+            rec = json.load(f)
+        self.assertNotIn("item_id", rec)
+
     def test_a_failed_write_leaves_no_tmp_and_does_not_raise(self):
         with mock.patch.object(ask, "resolved_session_id", return_value=""):
             with mock.patch.object(ask.os, "replace", side_effect=OSError("boom")):
