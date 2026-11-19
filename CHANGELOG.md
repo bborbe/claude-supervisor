@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.3
 
 - fix: **the fleet keeper can no longer report a lapse whose card it never posted.** `notify()` returned `None` on a failed `attention-ask.py post` without inspecting `out.returncode` and without logging anything, and the lapse branch printed `reported — … lapse reported for <who>` regardless — so a store 503 read as a successful report with no card. Measured 2026-11-19: **73 `lapse reported for` lines carrying no card** across a six-hour lapse of session `26480062`, while `~/Library/Logs/claude-wrapper/stderr.log` carried a sustained 503 storm (`01:20:45–07:20:46`, ~1 820 lines/hour). `notify()` now logs `notify failed: exit <rc>; <reason>` (the reason being the last line `attention-ask.py` printed), and the lapse branch reports `cannot-tell` — with the lapse left unmarked so the next tick retries — instead of a cardless `reported`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
 
