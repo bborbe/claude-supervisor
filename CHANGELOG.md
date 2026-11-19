@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`commands/steps/output-shape.md` renders to `<round>.render` and no longer asks the operator anything.** PR 2 of the seven-PR lever-(b) order; PR 1 (`#1014`) put the contract row in place first. The step now states that `supervisor:fleet-round` executes it (router row 20), that the render is **written to a file** and printed by the manager **after** its row 19 tail, and why both alternatives fail — printed here it lands in a headless transcript nobody reads, and returned in the hand-back it breaks the ≤ 1 KB cap. ⚠️ **Two items lost their `AskUserQuestion`:** item 6 (needs-input) and item 11 (course-correction drafts) now **render the material** for a question and leave the asking to the manager's **row 11**, the only row that may put one — a headless delegate that asked would park with nobody to answer. ⚠️ **Absence is `not-run`, not an empty file:** a delegate that exits 14 on `--budget` before row 20 runs writes nothing, so a missing render and an empty one stay distinguishable. Change set: `commands/steps/output-shape.md`, `CHANGELOG.md`.
+
 ## v0.352.6
 
 - docs: **`<round>.render` joins the payload-path table, with why it is a file and what its absence means.** The render cannot travel in either existing channel — as hand-back text it breaks the ≤ 1 KB cap this contract enforces, and printed by the delegate it lands in a headless transcript the operator never sees — so the delegate computes it, writes it here, and the manager prints it **after** its row 19 tail. That ordering is the reason it is a file: the tail judges the manager's own `re-arm` epoch and receipt and must reach the operator's block, so it cannot run after the render. ⚠️ **Absence is `not-run`, not an empty render:** a delegate that hands back early on `--budget` exit 14 skips row 20, and an empty block would read like a quiet fleet. Change set: `docs/handback-contract.md`, `CHANGELOG.md`.
