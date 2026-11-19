@@ -1,6 +1,6 @@
 ---
 name: fleet-round
-description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg, the keep-alive leg, the own-parks leg, the open leg and the manager reap, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows and the render.
+description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg, the keep-alive leg, the own-parks leg, the answer-the-parked-workers row, the open-items row, the cause check, the escalation, the open leg, the manager reap and the render, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the needs-input question, the attention watchers, the compaction, the voice and the round tail.
 model: sonnet
 tools: Read, Bash, Write, Task, SendMessage, ListAgents, mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
 allowed-tools: Bash(python3:*), Bash(date:*), Bash(vault-cli:*), Bash(ls:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(grep:*), Bash(pgrep:*), Bash(gh:*), Bash(git log:*), Bash(wezterm cli list:*), mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
@@ -102,11 +102,16 @@ once, reading its step file yourself:
 | 5b | Keep alive — every round, dispatch `supervisor:fleet-keepalive-actor` | `steps/keepalive.md` |
 | 5d | Own parks — every round; its `routed` parks and their request ids go to `parks=` so the manager's row 7 can answer them | `steps/own-parks.md` |
 | 6 | Reap contract — when the drive leg runs | `steps/reap.md` |
+| 7 | Answer a parked or exited worker — every round; a worker that is **not** this manager's is routed, never answered | `steps/worker-channels.md` |
+| 8 | Act on the open-items ledger — when the ledger holds ≥ 1 open entry | `steps/open-items.md` |
+| 9 | Verify a named cause — before the render names one | `steps/cause-verify.md` |
+| 10 | Escalate — every round | `steps/escalate.md` |
 | 12 | Covered-subject invariant — when a covered subject's manager is live | `steps/covered-subject-invariant.md` |
 | 15 | Readings — every round, dispatch `supervisor:round-readings-reader` | `steps/readings.md` |
 | 16 | Open leg — every round, dispatch `supervisor:fleet-open-actor` | `steps/open.md` |
 | 16b | Manager reap — every round, after the open | `steps/manager-reap.md` |
 | 18 | Persist — only when the snapshot path is missing or its write failed | `steps/persist.md` |
+| 20 | Render the output shape — every round; the manager relays what you render | `steps/output-shape.md` |
 
 ⚠️ **The table is read more than once per round**, and the later reads are the ones that get
 skipped — re-read it once the sweep hand-back exists, honouring every row whose `When` has
@@ -136,16 +141,19 @@ one of them is the reason a later row could not run:
 | # | Row | Why the manager keeps it |
 |---|---|---|
 | 1 | Re-arm | `ScheduleWakeup` is one-shot per call and belongs at the round's head, in the session that keeps the loop |
-| 7 | Answer a parked or exited worker | a worker that is not this manager's is routed, not answered; row 5d is the manager's own parks, which you run |
-| 8 | Act on the open-items ledger | operator asks are the manager's to carry |
-| 9 | Verify a named cause | the cause is named in the round's **render**, which is the manager's — a delegate cannot verify a sentence it does not write |
-| 10 | Escalate | an escalation is the manager's voice, not a delegate's |
-| 11 | Needs-input batch + relay | an `AskUserQuestion` cannot be put by you |
-| 13 | Attention watchers | `Monitor` is the manager's tool |
+| 11 | Needs-input batch + relay | an `AskUserQuestion` cannot be put by you — a headless delegate that asked would park with nobody to answer |
+| 13 | Attention watchers | `Monitor` is the manager's tool, and an arm written inside your turn expires with it |
 | 14 | Auto-compaction | compacting a session is a manager act; you only **report** `context70` and `self-context` |
 | 17 | Voice + notification | TTS and the notify gate are the manager's |
-| 19 | Round tail | it judges the manager's own `re-arm` epoch and the round's receipt — both written by the manager — and it must run before the render |
-| 20 | Render the output shape | the manager renders from your verdict and the payload |
+| 19 | Round tail | it judges the manager's own `re-arm` epoch and the round's receipt — both written by the manager |
+
+⚠️ **Rows 7, 8, 9, 10 and 20 are yours as of 2026-11-19** — they moved here from this table. They
+only decide or render, and a decision or a render does not need to be in the manager's context to
+be correct. **Row 9 moved with row 20**, because the cause it verifies is now named in the render
+*you* write. Measured 2026-11-19 over eight rounds: the manager's own thinking plus the tool
+results it read were **65–70%** of a round, with a **19×** spread (11.7 → 228.4 KB, median
+105.9 KB against a 70 KB bound) — trimming hand-backs cannot close a spread that wide, so the
+decision and render work moves here instead.
 
 ## 3. Read your own fill level — do not guess it
 

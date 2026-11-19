@@ -10,12 +10,26 @@ When: every tick — after the re-arm (row 1), before the read half
 
 ⚠️ **The round's machine half runs in ONE delegate.** Dispatch `supervisor:fleet-round`
 **once**, passing the round id, this session's id, the vault and the absolute tasks dir. The
-delegate reads the step files, runs rows 0, 2–6, 12, 15, 16, 16b and 18 — dispatching the
-existing sweep, keep-alive, readings and open legs — persists the round, and returns the ≤ 1 KB
-verdict plus the artifact paths. You keep rows 7, 8, 9, 10, 11, 13, 14, 17, 19 and 20: the
-provenance acts, the cause check, the operator questions, the watchers, the voice, the round
-tail and the render. The split, and why the manager no longer reads the step files, is
-`agents/fleet-round.md`.
+delegate reads the step files, runs rows 0, 2–10, 12, 15, 16, 16b, 18 and 20 — dispatching the
+existing sweep, keep-alive, readings and open legs, **answering the parked workers, acting on the
+open-items ledger, verifying the cause it names and rendering the output shape** — persists the
+round, and returns the ≤ 1 KB verdict plus the artifact paths. **You keep rows 1, 11, 13, 14, 17
+and 19, and nothing else:** the re-arm, the needs-input question, the attention watchers, the
+compaction, the voice and the round tail. The split, and why the manager no longer reads the step
+files, is `agents/fleet-round.md`.
+
+⚠️ **Why exactly those six stay — each is structural, not preference.** Row **1** arms the wakeup.
+Row **11** needs an `AskUserQuestion`, and a headless delegate that asked would park with nobody
+to answer. Row **13** arms a `Monitor` whose lifetime is *your* session — an arm written inside
+the delegate expires with its turn. Row **14** compacts *your* session. Row **17** speaks as the
+manager. Row **19** judges **your** `re-arm` epoch and the receipt **you** wrote, which the
+delegate cannot see. Every other row only decides or renders, so it belongs in the delegate.
+
+⚠️ **This is the change that moves the number.** Measured 2026-11-19 over eight rounds: the
+manager's own thinking plus the tool results it read were **65–70%** of a round, with a **19×**
+spread (11.7 → 228.4 KB, median 105.9 KB against a 70 KB bound). Trimming hand-backs cannot close
+a spread that wide; moving the decisions and the render out of the manager is the lever. Probe: a
+round whose manager-side thinking plus tool-result share falls below **30%**.
 
 ⚠️ **The verdict is CHECKED, not trusted — run the gate before you read a single count.**
 `agents/fleet-round.md` already says *emit the fence and NOTHING else*, and the delegates
