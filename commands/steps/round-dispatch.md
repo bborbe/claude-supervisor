@@ -46,14 +46,19 @@ already holds. A delegate that overruns twice is a defect to report, not a third
 
 ⚠️ **Row 19 (the tail) runs after the delegate returns, never before.** It judges the `re-arm`
 epoch and the receipt **you** wrote — an arm that has not landed yet reads `skipped: re-arm` on
-a round that armed perfectly — and it must run before the render, or a skip it finds cannot
-reach the block the operator reads.
+a round that armed perfectly. ⚠️ **The render file is already written by then** (row 20 is the
+delegate's), so the tail cannot reach inside it: a skip it finds must be stated **in the tail's
+own output, printed after the render file**, never assumed to appear in the block. That is the
+order this line enforces — tail, then print.
 
 ⚠️ **Row 7 is the delegate's now, and it reads its own `parks=` file.** The delegate runs
 row 5d and hands back `parks-answered` / `parks-routed` / `parks-escalated` plus the `parks=`
 path; row 7 routes what it finds there and **you** answer it at row 11, because a headless
-delegate must not speak in the operator's voice. Nothing else carries those parks, so a round
-that skips the read leaves a class-C question to the 15-minute timeout.
+delegate must not speak in the operator's voice. ⚠️ **The routed parks and a routed row-8 spawn
+are the two material sources row 11 batches besides the attention feed's `BLOCKED` set** —
+`commands/steps/needs-input.md` names them, and the render's Needs-input item carries them, so
+nothing routes to a row that never reads it. Nothing else carries those parks, so a round that
+skips the read leaves a class-C question to the 15-minute timeout.
 
 ⚠️ **The digest path is the delegate's to derive, never yours to pass.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, written by the sweep reader the
