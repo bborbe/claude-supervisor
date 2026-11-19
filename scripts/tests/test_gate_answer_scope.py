@@ -45,13 +45,14 @@ GOAL = "Managers Unblock Their Own Workers"
 OTHER_GOAL = "Some Other Goal"
 
 
-def _scope(sessions=None, own_titles=None, reason="", self_goals=None):
+def _scope(sessions=None, own_titles=None, reason="", self_goals=None, manager=True):
     return ss.Scope(
         sessions if sessions is not None else {},
         {},
         set(own_titles or ()),
         list(self_goals or ()),
         reason,
+        manager,
     )
 
 
@@ -108,9 +109,22 @@ class AdmissionTest(unittest.TestCase):
             self.assertFalse(admit, sid)
             self.assertIn("scope unresolved", why)
 
-    def test_admits_this_sessions_own_gate(self):
+    def test_refuses_this_sessions_own_gate(self):
+        """`exclusion()` keeps a manager's own row; admission refuses it — self-approval."""
         admit, why = self.scope.admission(SELF, SELF)
-        self.assertTrue(admit, why)
+        self.assertFalse(admit)
+
+    def test_refuses_a_worker_scoped_session(self):
+        """A task-stamped session inherits its goal's task set but may not answer with it."""
+        worker = _scope(
+            sessions=self.scope.sessions,
+            own_titles={"Task In Subject", GOAL},
+            self_goals=[GOAL],
+            manager=False,
+        )
+        admit, why = worker.admission(IN_SUBJECT, SELF)
+        self.assertFalse(admit)
+        self.assertIn("not a manager", why)
 
     def test_unresolved_scope_refuses_to_answer_but_keeps_the_feed_row(self):
         """The one asymmetry: same input, opposite defaults, and neither may drift."""
