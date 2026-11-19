@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a manager resume arms its own loop instead of relying on a pane keystroke.** A manager's loop is one-shot per re-arm, so a resume that left `/supervisor:<branch>-loop` to the pane wake did nothing when the guard refused or the pane was slow — measured 2026-11-19: 2 of 5 resumed manager panes never passed `pane-wake-guard.py` within 90 s and their loop was never armed. `scripts/restart-worker.py` gains `manager_loop_prompt()`, `resume_command(resume_prompt=…)` and a read-only `--resume-prompt` verb; the normal resume (manager role, including the subject-less root Fleet Manager → `/supervisor:fleet-loop`) and `--absent` carry the loop command as the resume prompt, and `commands/open.md` § 3.1 calls `--resume-prompt` so it never hand-builds or hand-quotes it. `commands/restart.md` no longer types a second re-arm. Change set: `scripts/restart-worker.py`, `scripts/tests/test_restart_worker.py`, `commands/open.md`, `commands/restart.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
+
 ## v0.355.0
 
 - feat: **the gate answerer answers a worker's closer pick in the manager's voice.** `PICK_ANSWERING_ENABLED` flips to `True` (kept as the kill switch). `attention-answer.py --answer-text` now posts `answer.answerer` (`operator` | `manager`), which attention-controller v0.104+ and claude-wrapper v0.45+ read to deliver a manager answer as `Manager answer, via supervisor: …` instead of in the operator's voice. `answer_text_refusal` stops refusing `--answerer manager`, refuses any answerer other than `operator` / `manager`, and refuses the `supervisor:gate-answerer` arm unless it answers as `manager`. `docs/permission-allowlist.md` and `agents/gate-answerer.md` no longer describe picks as disabled. Requires both carrier releases to be installed first.
