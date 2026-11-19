@@ -89,7 +89,7 @@ Branch on Step 1's `classification:`. **The transcript tail classifies; the pane
 | `undetermined` | **Type nothing.** An unreadable transcript proves nothing about what the pane is holding. |
 | `mid-work` | **Check the pane, then type.** Read it first — the veto is not optional. |
 
-⚠️ **The gate rule outranks the re-arm rule, and the conflict is real for a manager.** A restarted manager must re-arm its loop — its scheduled jobs died with the process — but a manager that came up holding a gate gets nothing typed, so its loop stays down until the operator answers and re-arms. That is the correct trade: a re-arm note typed into a live gate is read as the answer to it. Say so in the report rather than resolving it by typing.
+⚠️ **The gate rule outranks the note rule, and the conflict is real for a manager.** A manager's loop is armed by the resume prompt (`manager_loop_prompt`, § below), so the pane note is informational — but a manager that came up holding a gate still gets no note typed, because a note typed into a live gate is read as the answer to it. That is the correct trade: withhold the note, and say so in the report rather than resolving it by typing.
 
 **Read the pane before typing:**
 
@@ -112,10 +112,10 @@ For a **worker**:
 wezterm cli send-text --pane-id <NEW-PANE-ID> --no-paste $'You were restarted by /supervisor:restart. Nothing about your task changed — re-read anything you concluded from the old plugin version. This is not an answer to any gate; if you are holding one, it is still yours.'
 ```
 
-For a **manager**, the re-arm is the point — a killed session's `CronCreate` jobs die with it, so a manager that is not told to re-arm comes back idle and its topic stops being swept:
+For a **manager**, the loop is **already armed by the resume prompt** — `scripts/restart-worker.py`'s `manager_loop_prompt` rides the loop command (`/supervisor:goal-loop "<subject>"`, `/supervisor:topic-loop "<subject>"`, or `/supervisor:fleet-loop`) as the resumed session's first turn, so a manager that comes back is sweeping again with no keystroke. The note is therefore **informational only** — never tell it to re-arm a second time, which would run the loop command twice:
 
 ```bash
-wezterm cli send-text --pane-id <NEW-PANE-ID> --no-paste $'You were restarted by /supervisor:restart. Re-arm your loop now — your scheduled jobs died with the old process. This is not an answer to any gate; if you are holding one, it is still yours.'
+wezterm cli send-text --pane-id <NEW-PANE-ID> --no-paste $'You were restarted by /supervisor:restart. Your loop was armed by the resume prompt. Nothing about your subject changed — re-read anything you concluded from the old plugin version. This is not an answer to any gate; if you are holding one, it is still yours.'
 ```
 
 **How to submit it — and why a trailing `\r` on the text is not enough — is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker. Read it there and follow it.** Do not restate the submission steps here: it is the same recipe every other call site uses, and a second copy is how the two drift.
@@ -135,6 +135,6 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 ## Rules
 
 - **One target per run, named by the operator.** This command never hunts for which session needs restarting.
-- **Workers and managers alike.** A manager holds fleet-wide state no task file carries, so a manager restart owes one extra thing a worker's does not: the re-arm note. Withholding it leaves the topic unwatched while the tab looks healthy.
+- **Workers and managers alike.** A manager holds fleet-wide state no task file carries, so a manager restart owes one extra thing a worker's does not: the informational note. The loop itself is armed by the resume prompt, not by the note.
 - **Never reimplement the kill, the resume, or the liveness probe.** One mechanism, called.
 - **Never type into a pane the veto flagged.** The asymmetry is the whole design: an undriven mid-work resume wastes a session, a driven gate-death resume answers a question nobody gave.
