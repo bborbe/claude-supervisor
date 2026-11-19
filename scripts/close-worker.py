@@ -778,6 +778,20 @@ def main():
             "owns it — no live pid, or several unrelated live pids; nothing is closed",
         )
     if rec is None:
+        # ⚠️ **A live session with no registry entry is unaddressable, not unknown** — but
+        # this verb DESTROYS, so the classified answer is a refusal that names what it
+        # found, never a close verdict for a session it cannot prove it owns. Measured
+        # 2026-11-19 (session 616a52dd): the heartbeat read LIVE while this verb refused
+        # `unknown-session-id`, so a caller could neither close nor understand why.
+        age = wnm.session_transcript_age(sid)
+        if age is not None and age != float("inf") and age <= wnm.LIVE_WINDOW:
+            print("unregistered-live")
+            print(
+                "❌ unregistered-live: no registry entry carries session id %s, but its "
+                "transcript was written %ds ago — a live session this verb cannot close; "
+                "use /supervisor:restart %s" % (sid, int(age), sid)
+            )
+            return 1
         return refuse("unknown-session-id", f"no registry entry carries session id {sid}")
 
     # A hold outranks every other consideration: `busy` says the moment is wrong, a hold

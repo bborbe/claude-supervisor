@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -318,11 +319,51 @@ class TestCli(unittest.TestCase):
         with open(os.path.join(self.sessions, f"{rec['pid']}.json"), "w", encoding="utf-8") as f:
             json.dump(rec, f)
 
-    def _run(self, sid):
+    def _run(self, sid, config=None):
+        env = dict(os.environ)
+        if config is not None:
+            # `who-needs-me.py` resolves transcripts through `PROJECTS_DIR`, not
+            # `CLAUDE_CONFIG_DIR` — the age probe and the cwd reader must both be isolated.
+            env["CLAUDE_CONFIG_DIR"] = config
+            env["PROJECTS_DIR"] = os.path.join(config, "projects")
         return subprocess.run(
             [sys.executable, SCRIPT, "--sessions-dir", self.sessions, sid],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, env=env,
         )
+
+    def _transcript(self, sid, idle_seconds=1):
+        """A transcript for `sid` under an isolated config dir; returns that dir.
+
+        The reach half decides "live" from the transcript age, so the fixture must own the
+        transcript — reading the machine's real one would let a live session on this host
+        decide a fixture's verdict.
+        """
+        config = os.path.join(self.tmp, "config")
+        projects = os.path.join(config, "projects", "-some-project")
+        os.makedirs(projects, exist_ok=True)
+        path = os.path.join(projects, "%s.jsonl" % sid)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"cwd": self.repo}) + "\n")
+        then = time.time() - idle_seconds
+        os.utime(path, (then, then))
+        return config
+
+    def test_a_live_unregistered_session_gets_a_classified_report(self):
+        # The defect: a live session with no registry entry was refused `unknown-session-id`
+        # by every registry-keyed verb while the heartbeat reader answered LIVE. The verb
+        # must now report what it can prove — registry, liveness, cwd — and exit 0.
+        done = self._run(SID, config=self._transcript(SID))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("registry: UNREGISTERED", done.stdout)
+        self.assertIn("classification: unregistered-live", done.stdout)
+        self.assertIn("cwd: %s" % self.repo, done.stdout)
+
+    def test_a_stale_unregistered_session_still_refuses(self):
+        # The control: a transcript older than LIVE_WINDOW proves nothing, so the refusal
+        # stands. Without this, a dead session would report LIVE and authorise a restart.
+        done = self._run(SID, config=self._transcript(SID, idle_seconds=3600))
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "unknown-session-id")
 
     def _dirty(self):
         with open(os.path.join(self.repo, "a.txt"), "a", encoding="utf-8") as f:

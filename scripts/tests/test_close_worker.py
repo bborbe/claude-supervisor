@@ -421,6 +421,19 @@ class TestCliRefusals(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.splitlines()[0], "unknown-session-id")
 
+    def test_a_live_unregistered_session_refuses_as_unregistered_not_unknown(self):
+        # A live session with no registry entry must be NAMED, not refused as unknown —
+        # but this verb destroys, so the answer stays a refusal and never a close verdict
+        # for a session it cannot prove it owns.
+        project = os.path.join(self.projects, "-some-project")
+        os.makedirs(project, exist_ok=True)
+        with open(os.path.join(project, "%s.jsonl" % SID), "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        done = self._run()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "unregistered-live")
+        self.assertIn("/supervisor:restart", done.stdout)
+
     def test_ambiguous_pid(self):
         """Two registry entries claiming one session id are refused, never guessed at."""
         self._registry(pid=4242)
