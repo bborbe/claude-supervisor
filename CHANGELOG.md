@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a round's end is now persisted in its own hand-back, because the receipt could not carry it.** `--handback` writes `ended_at=<epoch>` as the file's first line, and a later `--handback` for the same round **keeps the first stamp** — a late delegate's rewrite must not move the end. ⚠️ **The measurement this unblocks had no data:** a 24 h overlap sample (successor-start minus predecessor-end) found **0 measurable pairs over 19 rounds**, because `manager-receipt.py` keeps only the current and previous round, so 18 of 19 had no end at all; the max-mtime fallback used instead was gameable in both directions — a rewrite landing after the successor started read as an overlap, and excluding those pairs let a genuinely overlapping gate pass. Measured 2026-11-19. The hand-back is the one artifact written once per round, so it is where the end belongs. Change set: `scripts/manager-receipt.py`, `scripts/tests/test_manager_receipt.py`, `CHANGELOG.md`.
+
 ## v0.352.3
 
 - fix: **the fleet keeper can no longer report a lapse whose card it never posted.** `notify()` returned `None` on a failed `attention-ask.py post` without inspecting `out.returncode` and without logging anything, and the lapse branch printed `reported — … lapse reported for <who>` regardless — so a store 503 read as a successful report with no card. Measured 2026-11-19: **73 `lapse reported for` lines carrying no card** across a six-hour lapse of session `26480062`, while `~/Library/Logs/claude-wrapper/stderr.log` carried a sustained 503 storm (`01:20:45–07:20:46`, ~1 820 lines/hour). `notify()` now logs `notify failed: exit <rc>; <reason>` (the reason being the last line `attention-ask.py` printed), and the lapse branch reports `cannot-tell` — with the lapse left unmarked so the next tick retries — instead of a cardless `reported`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
