@@ -96,6 +96,23 @@ SESSION_BOUND = re.compile(
     re.IGNORECASE,
 )
 
+#: A card wait's clock is a **re-check time, not a deadline.** The observable is
+#: "the card is answered (pollable)" and the ISO time only says when to poll again,
+#: so a past clock must not expire a card wait — the defect this pattern guards.
+#: Detected by the word "card" plus a backtick-quoted hex id, the shape every card
+#: wait in the live logs carries (`card \`967fbbf4…\` answered (pollable)`); prose
+#: that merely mentions a card ("the install card being answered") carries no id and
+#: is deliberately NOT matched.
+#:
+#: The exemption is bounded structurally, not by a card-store poll (this reader is a
+#: pure local log read and runs per session in tight loops): an answered card resumes
+#: its session and writes a NEW `Stop`, and the newest-wins walk above makes the
+#: exemption apply only while the card wait is still the latest observable; and the
+#: `parked` branch in `flagged-rows.py` sits AFTER every liveness branch, so a dead
+#: session is never parked on this reader at all. `MAX_AGE_S` still expires every
+#: non-card wait exactly as before.
+CARD_WAIT = re.compile(r"\bcard\b[^`\n]*`([0-9a-f]{8,})`", re.IGNORECASE)
+
 _CLOCK = re.compile(
     r"(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::\d{2})?(Z|[+-]\d{2}:?\d{2})?)?"
 )
@@ -215,8 +232,12 @@ def wait_record(sid, state_dir=None, now=None):
         ts = last_ts
     now_s = time.time() if now is None else now
     clock = _latest_clock(ends)
+    # A card wait is pollable: its clock is when to re-check, not a deadline, so a
+    # past clock does not expire it (see `CARD_WAIT`).
+    card_wait = bool(CARD_WAIT.search(ends))
     expired = (last_ts is not None and now_s - last_ts > _max_age()
-               and not (clock is not None and clock > now_s))
+               and not (clock is not None and clock > now_s)
+               and not card_wait)
     return {
         "session_id": sid,
         "ts": ts,
