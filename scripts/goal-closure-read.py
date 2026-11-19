@@ -17,7 +17,7 @@ Prints one line per section plus a verdict, and exits on the verdict:
     status: in_progress
     Success Criteria: 3 done, 0 open
     Definition of Done: 2 done, 0 open
-    VERDICT: CLOSE
+    VERDICT: CLOSE (basis: boxes)
 
     CLOSE         every section present, every section carrying at least one box,
                   and zero open boxes across both — or an absent `# Definition of
@@ -25,6 +25,16 @@ Prints one line per section plus a verdict, and exits on the verdict:
     OPEN          at least one box is open                -> exit 1
     UNMEASURABLE  a section is absent, or carries no recognised box -> exit 1
     TERMINAL      the page already reads completed/aborted -> exit 1
+
+⚠️ **The verdict names its BASIS, and a `CLOSE` is only as strong as that basis.**
+`CLOSE (basis: boxes)` means every box is ticked and the page records no
+measurement; `CLOSE (basis: measurement)` means the page's own `## Final
+measurement` block was read and every criterion reads `MET`. A block carrying a
+`NOT MET` reads `OPEN (basis: measurement)` however the boxes read — the defect
+this reader was changed to stop: a goal whose boxes were ticked on an earlier
+window used to read a bare `CLOSE` while its own final measurement missed its
+bars. A block that is present but unparseable, empty, or missing a criterion id
+also reads `OPEN (basis: measurement)`, never a silent `CLOSE (basis: boxes)`.
 
 ⚠️ **A grandfathered goal is the one exception to "a section is absent".** The vault
 requires a `# Definition of Done` only on goals created on or after `DOD_REQUIRED_AS_OF`
@@ -313,6 +323,123 @@ def verdict_of(status, sections, dod_may_be_absent=False):
     return "CLOSE"
 
 
+# ---------------------------------------------------------------------------
+# `## Final measurement` — the page's own recorded measurement.
+#
+# ⚠️ **The reader never MEASURES; it parses what a page records.** Running a
+# goal's measurement commands from a markdown page is a different design decision
+# (arbitrary shell from a page), explicitly out of scope. So the page carries the
+# numbers, in one parseable block:
+#
+#     ## Final measurement
+#
+#     - SC1 bar = 10 min measured = 6.7 min verdict = MET
+#     - SC5 bar = 5.0 min measured = 5.15 min verdict = NOT MET
+#
+# ⚠️ **A block that cannot be read FAILS CLOSED.** Present but unparseable, empty,
+# or missing a criterion id the page's SCs carry -> `OPEN (basis: measurement)`,
+# never a silent fall back to `CLOSE (basis: boxes)`. A block this reader cannot
+# read is one it FAILED to read, not one the document lacks — the same rule the
+# grandfathering exemption applies to an unparseable DoD heading.
+# ---------------------------------------------------------------------------
+_FINAL_MEASUREMENT = re.compile(
+    r"^## Final measurement\s*$(.*?)(?=^#{1,2} |\Z)", re.S | re.M
+)
+# `.+?` for the two values, not `\S+`: a value carries its unit (`10 min`,
+# `5.15 m`, `2.5 %`), so a no-whitespace class rejects every real reading.
+_MEASUREMENT_LINE = re.compile(
+    r"^\s*-\s*(?P<id>SC\d+)\s+bar\s*=\s*(?P<bar>.+?)\s+"
+    r"measured\s*=\s*(?P<measured>.+?)\s+"
+    r"verdict\s*=\s*(?P<verdict>MET|NOT MET)\s*$"
+)
+# The `SCn` id that begins a goal's SC line — `- [x] **SC1** …`.
+_SC_LABEL = re.compile(r"^[ \t]*[-*+][ \t]*\[.\][ \t]*\*\*(SC\d+)\b", re.M)
+
+
+def read_measurement(body):
+    """(present, rows). `rows` is None when the block is present but unreadable.
+
+    Absent block -> `(False, None)`, the box-only case. Present and every non-blank
+    line parses to one measurement row -> `(True, [row, ...])`. Present but empty,
+    or carrying any line the format does not match -> `(True, None)`, which the
+    caller turns into `OPEN (basis: measurement)`.
+    """
+    if body is None:
+        return False, None
+    m = _FINAL_MEASUREMENT.search(body)
+    if not m:
+        return False, None
+    rows = []
+    for line in m.group(1).splitlines():
+        if not line.strip():
+            continue
+        hit = _MEASUREMENT_LINE.match(line)
+        if not hit:
+            return True, None
+        rows.append(hit.groupdict())
+    return True, (rows or None)
+
+
+def sc_labels(body):
+    """The `SCn` ids the page's `# Success Criteria` section actually carries."""
+    if body is None:
+        return set()
+    m = re.search(r"^# Success Criteria\s*$(.*?)(?=^# |\Z)", body, re.S | re.M)
+    if not m:
+        return set()
+    return set(_SC_LABEL.findall(m.group(1)))
+
+
+def measurement_contradicts(present, rows, labels):
+    """(contradicted, unreadable) — how a recorded block bears on a box-only CLOSE.
+
+    `contradicted` is a parsed block carrying a `NOT MET`: the page's own
+    measurement says a criterion fails while every box is ticked. `unreadable` is
+    the fail-closed case — present but unparseable, empty, or missing an id.
+    """
+    if not present:
+        return False, False
+    if rows is None:
+        return False, True
+    if any(r["verdict"] == "NOT MET" for r in rows):
+        return True, False
+    ids = [r["id"] for r in rows]
+    # A repeated id, or a page whose SCs carry no id to check against, cannot be
+    # vouched for: the block must name each criterion exactly once.
+    if len(ids) != len(set(ids)):
+        return False, True
+    if not labels or labels - set(ids):
+        return False, True
+    return False, False
+
+
+def closure_of(status, sections, dod_may_be_absent=False,
+               measurement=(False, None), labels=frozenset()):
+    """(verdict, basis) — `verdict_of` plus the input that produced it.
+
+    The basis is `boxes` or `measurement`, and it is printed so a `CLOSE` from
+    ticked boxes is distinguishable from one the page's own measurement confirms.
+
+    Precedence, and every clause is load-bearing:
+      - a recorded `NOT MET` outranks an open box — it is the stronger fact, and
+        the one a false CLOSE hides;
+      - an unreadable block is `measurement` too (fail closed);
+      - otherwise an open box wins, so a fully-MET block can never close a page
+        whose boxes are open;
+      - all boxes ticked with no block is the box-only case, `CLOSE (basis: boxes)`.
+    """
+    base = verdict_of(status, sections, dod_may_be_absent)
+    if base in ("TERMINAL", "UNMEASURABLE"):
+        return base, ""
+    present, rows = measurement
+    contradicted, unreadable = measurement_contradicts(present, rows, labels)
+    if contradicted or unreadable:
+        return "OPEN", "measurement"
+    if base == "OPEN":
+        return "OPEN", "boxes"
+    return "CLOSE", ("measurement" if present else "boxes")
+
+
 # `vault-cli task complete`'s own gate, mirrored byte for byte: `storage.CheckboxRegex`
 # (`pkg/storage/base.go`) counted over the WHOLE page by `countCheckboxStates`
 # (`pkg/ops/complete.go`), refusing on any `[ ]` or `[/]`. It strips no fences and reads
@@ -369,10 +496,15 @@ def main(argv):
     # The exemption's two safety guards live in `exemption_for`, so no caller can reach
     # it by handing `verdict_of` a bare flag (see that function's docstring).
     exempt = exemption_for(kind, text, body)
-    verdict = verdict_of(status, sections, exempt)
+    # The measurement block is a GOAL concept: a goal carries the numbers its own
+    # criteria are scored on. A task closes on its boxes and the close verb's gate,
+    # so reading a block there would let a hand-written section outvote them.
+    measurement = read_measurement(body) if kind == "goal" else (False, None)
+    labels = sc_labels(body) if kind == "goal" else set()
+    verdict, basis = closure_of(status, sections, exempt, measurement, labels)
     verb_open = verb_open_boxes(text) if kind == "task" else 0
     if verdict == "CLOSE" and verb_open:
-        verdict = "OPEN"
+        verdict, basis = "OPEN", "boxes"
 
     print(f"status: {status or 'ABSENT'}")
     if not fenced_ok:
@@ -389,7 +521,9 @@ def main(argv):
             print(f"{name}: {tally[0]} done, {tally[1]} open")
     if kind == "task":
         print(f"Whole page (task complete's gate): {verb_open} open")
-    print(f"VERDICT: {verdict}")
+    # The basis names WHICH input produced the verdict, so `CLOSE (basis: boxes)` is
+    # distinguishable from `CLOSE (basis: measurement)` without reading the page.
+    print(f"VERDICT: {verdict}" + (f" (basis: {basis})" if basis else ""))
     return 0 if verdict == "CLOSE" else 1
 
 

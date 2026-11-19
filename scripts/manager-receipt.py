@@ -574,6 +574,34 @@ def handback_present(started) -> bool:
     return bool(p) and os.path.exists(p)
 
 
+def round_end_from_handback(started):
+    """The round's end as PERSISTED in its own hand-back, or `None`.
+
+    ⚠️ **This is the only end that survives the round, and its absence is a measurement
+    defect, not a detail.** The receipt keeps the current and previous round only, so a
+    metric sampled over 24 h had no end for **18 of 19** rounds — measured 2026-11-19 —
+    and the max-mtime fallback it used instead was gameable in both directions: a late
+    rewrite landing after the successor started read as an overlap, while excluding those
+    pairs let a genuinely overlapping gate pass. The hand-back is written by the delegate
+    at completion, so the stamp it carries is the round's real end.
+
+    ⚠️ **First write wins.** A late delegate re-running `--handback` for the same round
+    rewrites the file; keeping the EARLIER stamp is what stops that rewrite from moving
+    the end (which is the confound this field exists to remove).
+    """
+    p = handback_path(started)
+    if not p:
+        return None
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("ended_at="):
+                    return float(line.split("=", 1)[1].strip())
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def leg_in_flight(d: dict, started) -> str:
     """The leg the round is waiting on, in the pinned line's own vocabulary.
 
@@ -690,8 +718,14 @@ def handback(topic: str, branch: str = "", text: str = "", round_id=None) -> int
         print(f"--round must be the numeric round id, got {round_id!r}", file=sys.stderr)
         return 2
     p = handback_path(started)
+    # ⚠️ **First write wins on `ended_at`.** A delegate that re-runs `--handback` for the
+    # same round (a late finish) must not move the round's end — that rewrite is exactly
+    # the confound the field exists to remove.
+    prior = round_end_from_handback(started)
+    end = prior if prior is not None else time.time()
+    body = f"ended_at={end:.6f}\n" + text
     try:
-        write_atomic_at(p, text if text.endswith("\n") else text + "\n")
+        write_atomic_at(p, body if body.endswith("\n") else body + "\n")
     except OSError as exc:
         # ⚠️ **This write is the delegate's LAST step, so it must not traceback.** An
         # unwritable store would otherwise kill the delegate after its payloads and
