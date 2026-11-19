@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.4
 
 - fix: **a round's end is now persisted in its own hand-back, because the receipt could not carry it.** `--handback` writes `ended_at=<epoch>` as the file's first line, and a later `--handback` for the same round **keeps the first stamp** — a late delegate's rewrite must not move the end. ⚠️ **The measurement this unblocks had no data:** a 24 h overlap sample (successor-start minus predecessor-end) found **0 measurable pairs over 19 rounds**, because `manager-receipt.py` keeps only the current and previous round, so 18 of 19 had no end at all; the max-mtime fallback used instead was gameable in both directions — a rewrite landing after the successor started read as an overlap, and excluding those pairs let a genuinely overlapping gate pass. Measured 2026-11-19. The hand-back is the one artifact written once per round, so it is where the end belongs. Change set: `scripts/manager-receipt.py`, `scripts/tests/test_manager_receipt.py`, `CHANGELOG.md`.
 
