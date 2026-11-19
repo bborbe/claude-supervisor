@@ -166,14 +166,28 @@ def main(argv=None):
         return 2
 
     mod = load_who_needs_me()
+    # ⚠️ `wezterm_panes()` answers None on a mux timeout or an unreadable socket —
+    # a distinct answer from `{}` (a reachable mux with no panes). A failed read
+    # cannot prove a pane is gone, and `is_routable` would raise `TypeError` on
+    # `str(pane) not in None`. Measured: the query takes up to ~88 s under load,
+    # which is exactly the loaded machine this tool targets. Refuse, never guess.
     pmap = mod.wezterm_panes()
+    if pmap is None:
+        sys.stderr.write(
+            "reap-stale-gates: pane read failed (wezterm unreachable or timed out) — "
+            "refusing; an unroutable classification needs the live pane table\n")
+        return 2
     registry = mod.read_registry()
     now = time.time()
     cutoff = now - args.max_age_hours * 3600
 
-    candidates = [(p, r) for p, r in open_items(args.state)
+    # The pane set comes from EVERY open item, not just the stale candidates: the
+    # report this mirrors derives `open_panes` from the whole record set, and a
+    # candidate-only set would call a live session's pane unroutable.
+    all_items = list(open_items(args.state))
+    open_panes = {str(r.get("pane")) for _, r in all_items if r.get("pane")}
+    candidates = [(p, r) for p, r in all_items
                   if float(r.get("ts") or 0) <= cutoff]
-    open_panes = {str(r.get("pane")) for _, r in candidates if r.get("pane")}
     rows = select(candidates, mod, open_panes)
     reapable = [r for r in rows if r["reapable"]]
 
