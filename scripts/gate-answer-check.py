@@ -396,7 +396,7 @@ def _role_human(session_id, ledger):
 
 
 def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
-           tier_mod, allowlist, own_mod, seen=None, answering=False, expect=None,
+           tier_mod, allowlist, own_mod, scope=None, seen=None, answering=False, expect=None,
            is_human=None):
     """One verdict dict. Every input that could not be read arrives as `None`.
 
@@ -455,7 +455,7 @@ def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
     if producer in holds:
         return done(ESCALATE, "session carries an operator hold")
 
-    own, why = own_mod.verdict(self_id, producer, ledger)
+    own, why = own_mod.verdict(self_id, producer, ledger, scope=scope)
     if not own:
         if (claims or {}).get(producer) == self_id and self_id:
             why = "adopted by this session (ownership claim)"
@@ -703,17 +703,31 @@ class _AllSeen(dict):
         return {"state": "ledger-unreadable", "verdict": "unknown"}
 
 
-def load_inputs():
-    """Every store and file the decision reads — one seam, so tests can replace it whole."""
+def load_inputs(self_id=""):
+    """Every store and file the decision reads — one seam, so tests can replace it whole.
+
+    `scope` is the durable half of the ownership predicate: the vault's answer to "whose work
+    is this", which is what lets a manager answer a card raised by a PEER's worker. It is
+    loaded once per invocation — the answer cannot change within a run — and an empty
+    `self_id` yields an unresolved Scope that admits nothing.
+
+    ⚠️ **This is a SECOND full vault walk, on top of `stamp_index`'s.** Measured 2026-11-18,
+    one walk costs ~3 s over both vaults, so a check now pays roughly twice the walk it did
+    before. Acceptable for a background agent, but it is the obvious thing to fix if the
+    answerer's latency ever matters: `stamp_index` and `session-scope.load()` want the same
+    pages, and sharing one walk is a contained follow-up.
+    """
     tier_mod = _load("permission_tier", "permission-tier.py")
     own_mod = _load("own_park_check", "own-park-check.py")
     filt = _load("gate_owner_filter", "gate-owner-filter.py")
     fleet_mod = _load("fleet_sessions", "fleet-sessions.py")
+    scope_mod = _load("session_scope", "session-scope.py")
     return {
         "tier_mod": tier_mod, "own_mod": own_mod, "is_human": filt.is_human,
         "ledger": own_mod._spawn_ledger().read_ledger(), "claims": filt.load_claims(),
         "holds": read_holds(), "sessions": read_sessions(),
         "allowlist": tier_mod.load_allowlist(), "index": stamp_index(fleet_mod),
+        "scope": scope_mod.load(self_id),
     }
 
 
@@ -735,7 +749,7 @@ def main(argv=None):
         print("REFUSED: %s" % refusal)
         return 2
 
-    inputs = load_inputs()
+    inputs = load_inputs(self_id)
     index = inputs["index"]
     with Ledger(ledger_path(self_id)) as book:
         seen = _AllSeen() if book.items is None else book.items
@@ -748,7 +762,8 @@ def main(argv=None):
             pages = None if index is None else index.get(producer, [])
             verdict = decide(item_id, item, self_id, inputs["ledger"], inputs["claims"],
                              inputs["holds"], inputs["sessions"], pages, inputs["tier_mod"],
-                             inputs["allowlist"], inputs["own_mod"], seen=seen,
+                             inputs["allowlist"], inputs["own_mod"],
+                             scope=inputs.get("scope"), seen=seen,
                              answering=args.answer, expect=args.expect or None,
                              is_human=inputs["is_human"])
             print(json.dumps(verdict))
