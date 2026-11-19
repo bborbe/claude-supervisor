@@ -708,8 +708,14 @@ def load_inputs(self_id=""):
 
     `scope` is the durable half of the ownership predicate: the vault's answer to "whose work
     is this", which is what lets a manager answer a card raised by a PEER's worker. It is
-    loaded once per invocation — the walk is expensive and the answer cannot change within a
-    run — and an empty `self_id` yields an unresolved Scope that admits nothing.
+    loaded once per invocation — the answer cannot change within a run — and an empty
+    `self_id` yields an unresolved Scope that admits nothing.
+
+    ⚠️ **This is a SECOND full vault walk, on top of `stamp_index`'s.** Measured 2026-11-18,
+    one walk costs ~3 s over both vaults, so a check now pays roughly twice the walk it did
+    before. Acceptable for a background agent, but it is the obvious thing to fix if the
+    answerer's latency ever matters: `stamp_index` and `session-scope.load()` want the same
+    pages, and sharing one walk is a contained follow-up.
     """
     tier_mod = _load("permission_tier", "permission-tier.py")
     own_mod = _load("own_park_check", "own-park-check.py")
