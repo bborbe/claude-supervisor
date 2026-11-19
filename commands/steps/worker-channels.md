@@ -10,9 +10,11 @@ When: a worker is parked on a question or has exited
 
 ### Two channels reach a worker, and they are not interchangeable
 
+⚠️ **This step runs in `supervisor:fleet-round` (router row 7). You answer your OWN workers and you ROUTE everyone else's.** Speaking an answer in the **operator's** voice is a provenance act a delegate must not take — `agents/fleet-round.md`'s `<role>` forbids it, and before 2026-11-19 the first row of this table told you to do exactly that. ⚠️ **A park belonging to another manager routes to that manager** (`commands/steps/rules.md` § routing), and a question that needs the **operator** goes to the manager's **row 11**. 
+
 | The worker is… | Whose answer | Channel | Call |
 |---|---|---|---|
-| **headless, parked on a question** | the **operator's** | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(agent_id, request_id, behavior="deny", message="Operator answer, via supervisor: <option>")` |
+| **headless, parked on a question** | the **operator's** | ⚠️ **ROUTED to the manager's row 11 — never answered here** | render the question and its options, then route; the manager's `mcp__supervisor__answer_permission(…, message="Operator answer, via supervisor: <option>")` is its call, not yours |
 | **headless, parked on a question** | **your own** | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(agent_id, request_id, behavior="deny", message="Manager answer, via supervisor: <option>")` |
 | **headless, parked on a permission gate** (server worker) | **yours when `permission_tier` is `allowlist` or `manager`**, the operator's when `operator` | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(agent_id, request_id, behavior="allow"\|"deny")` — decide by the tier and rubric in `${CLAUDE_PLUGIN_ROOT}/docs/permission-allowlist.md` § *How a manager applies it*; cannot verify → escalate |
 | **wrapper-backed (`cc-*` child), parked on a permission gate** | same tier rule — a `manager`-tier gate is **held off the operator's board** for you for 10 min, then falls through naming you | the wrapper, never the attention store | `POST localhost:18090/api/1.0/sessions/<session-id>/answer {"request_id", "behavior"}`, `request_id` from `GET /api/1.0/sessions` — see the doc § *Releasing a wrapper-backed gate* |
