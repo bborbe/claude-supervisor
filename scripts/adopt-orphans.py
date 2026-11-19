@@ -94,10 +94,12 @@ def _load(module_name, filename):
     return module
 
 
-# The filter owns `is_manager` and the ledger/claims readers. Imported rather than
-# reimplemented: two copies of "what is a manager" would drift, and the drift would be
-# silent -- this script would adopt on a predicate the router does not use.
-gf = _load("gate_owner_filter", "gate-owner-filter.py")
+# The shared ownership readers (`is_manager`, `load_ledger_checked`, `load_claims`) live in
+# `session-ownership.py`, extracted from the filter so this script no longer imports the
+# filter at all. Imported rather than reimplemented: two copies of "what is a manager" would
+# drift, and the drift would be silent -- this script would adopt on a predicate the router
+# does not use.
+so = _load("session_ownership", "session-ownership.py")
 
 # The ONE stand-down marker read (`<branch>--<slug>.stopped`), owned by the script that
 # writes it (`/supervisor:stop` -> `manager-liveness.py --stop`). Imported for the same
@@ -191,8 +193,8 @@ def stranded_workers(ledger, live):
 
     The worker must be live: a worker that also exited holds no gate, so claiming it would
     inflate the count with sessions nothing routes to. The spawner must be a manager that
-    is not live -- `is_manager` is imported from the filter rather than reimplemented, so
-    the two cannot disagree about what a manager is.
+    is not live -- `is_manager` is imported from `session-ownership.py` rather than
+    reimplemented, so the two cannot disagree about what a manager is.
     """
     out = {}
     for session_id, record in ledger.items():
@@ -207,7 +209,7 @@ def stranded_workers(ledger, live):
         parent = record.get("spawner_session_id") or record.get("parent_session")
         if not parent or parent in live:
             continue
-        if not gf.is_manager(parent, ledger):
+        if not so.is_manager(parent, ledger):
             continue
         out.setdefault(parent, []).append(session_id)
     return {parent: sorted(workers) for parent, workers in out.items()}
@@ -379,17 +381,17 @@ def main(argv=None):
         )
         return 1
 
-    # ⚠️ **`load_ledger_checked`, never `load_ledger`.** The filter's `load_ledger` returns
-    # `{}` for an unreadable store AND for a genuinely empty one, and its own docstring
-    # requires the caller to treat `{}` as UNKNOWN rather than as "no spawns". This file must
-    # not collapse the two: an unreadable ledger means the spawn edges were never read, so a
-    # round that adopted on it would move ownership on no evidence. The checked variant keeps
-    # `None` distinct, so an unreadable store exits 1 like an unreadable registry instead of
-    # reporting a clean round it never measured — while a store that IS readable and empty
-    # still exits 0, because that one is a real answer.
-    # ⚠️ This reaches the store TRANSITIVELY, through `gate-owner-filter.py`, and deliberately
+    # ⚠️ **`load_ledger_checked`, never `load_ledger`.** `gate-owner-filter.py`'s `load_ledger`
+    # wrapper returns `{}` for an unreadable store AND for a genuinely empty one, and its own
+    # docstring requires the caller to treat `{}` as UNKNOWN rather than as "no spawns". This
+    # file must not collapse the two: an unreadable ledger means the spawn edges were never
+    # read, so a round that adopted on it would move ownership on no evidence. The checked
+    # variant keeps `None` distinct, so an unreadable store exits 1 like an unreadable registry
+    # instead of reporting a clean round it never measured — while a store that IS readable and
+    # empty still exits 0, because that one is a real answer.
+    # ⚠️ This reaches the store TRANSITIVELY, through `session-ownership.py`, and deliberately
     # has no endpoint client of its own — the same one-reader rule `session-liveness.py` keeps.
-    ledger = gf.load_ledger_checked(args.endpoint)
+    ledger = so.load_ledger_checked(args.endpoint)
     if ledger is None:
         sys.stderr.write(
             "adopt-orphans: spawn ledger endpoint unreadable -- adopting nothing.\n"
@@ -405,7 +407,7 @@ def main(argv=None):
         )
         return 1
 
-    claims = gf.load_claims(args.claims_file) if args.claims_file else gf.load_claims()
+    claims = so.load_claims(args.claims_file) if args.claims_file else so.load_claims()
 
     # Drop the workers a live manager already holds, and then the managers left with
     # nothing to do. A row that survives is one this round actually acts on.

@@ -256,13 +256,28 @@ import time
 
 STATE = os.path.expanduser("~/.claude/state/attention")
 REGISTRY = os.path.expanduser("~/.claude/sessions")
-# Same env override the writer (`ownership-claim.py`) honours, deliberately: a
-# writer pointed at one file while every reader reads another is a SILENT
-# no-op -- the claim is recorded, `list` reports it held, and no watcher ever
-# consults it. The two resolutions must not drift.
-CLAIMS = os.environ.get("SUPERVISOR_OWNERSHIP_CLAIMS") or os.path.expanduser(
-    "~/.claude/state/ownership-claims.json"
-)
+
+
+def _load_sibling(module_name, filename):
+    """Import a sibling script by path. They are shipped side by side, not installed."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# The ownership readers and their `CLAIMS` constant live in `session-ownership.py`, so
+# `adopt-orphans.py` can import them without importing this whole filter — which is what
+# kept the filter undeletable. Bound eagerly rather than lazily: the module only defines
+# functions and reads one env var, and a bare global name inside `evaluate` cannot be
+# resolved lazily through a module `__getattr__`. ⚠️ `load_ledger_checked`'s `None`-vs-`{}`
+# contract moved with it, docstring and all — see it there before touching either caller.
+_ownership = _load_sibling("session_ownership", "session-ownership.py")
+CLAIMS = _ownership.CLAIMS
+load_claims = _ownership.load_claims
+load_ledger_checked = _ownership.load_ledger_checked
+is_manager = _ownership.is_manager
 
 EMIT = "emit"
 DROP = "drop"
@@ -456,7 +471,6 @@ EMISSIONS_MAX_BYTES = int(os.environ.get("GATE_EMISSIONS_MAX_BYTES") or 5_000_00
 EMISSIONS_KEEP_LINES = int(os.environ.get("GATE_EMISSIONS_KEEP_LINES") or 20000)
 
 
-_SPAWN_LEDGER = None
 _SESSION_SCOPE = None
 _OWNER = None
 #: Distinguishes "the caller did not supply a fleet manager" from "the caller supplied
@@ -515,7 +529,7 @@ def scope_input(self_id, vault_paths=None):
 def _session_scope():
     """Import `session-scope.py` (hyphenated filename -> importlib) — the ONE vault reader.
 
-    Loaded lazily and cached, the same shape `_spawn_ledger()` uses, so a run that disables
+    Loaded lazily and cached, the same shape `_owner()` uses, so a run that disables
     the input (`--no-scope`) or has no `--self` to resolve never imports it at all — and the
     ~7 s vault walk is skipped by `load()` itself in the second case.
     """
@@ -527,41 +541,6 @@ def _session_scope():
         spec.loader.exec_module(mod)
         _SESSION_SCOPE = mod
     return _SESSION_SCOPE
-
-
-def _spawn_ledger():
-    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the ONE ledger reader.
-
-    ⚠️ **The ledger moved to the attention store's endpoint on 2026-10-14, and this file
-    DELEGATES rather than reading the store itself.** `spawn-ledger.py` was extracted so
-    `worker-sessions.py` and `session-liveness.py` could share one reader; this file was one
-    of the five that kept its own, and writing a second endpoint client here would recreate
-    exactly the drift the extraction removed. What this file does NOT adopt is that module's
-    `None`-on-unreadable answer — see `load_ledger_checked` for why the two callers need
-    different ones.
-    """
-    global _SPAWN_LEDGER
-    if _SPAWN_LEDGER is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spawn-ledger.py")
-        spec = importlib.util.spec_from_file_location("spawn_ledger", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _SPAWN_LEDGER = mod
-    return _SPAWN_LEDGER
-
-
-def load_ledger_checked(endpoint=None):
-    """Spawn records keyed by session id, or None when the store could not be read.
-
-    ⚠️ **`{}` and `None` are different answers and the two callers need different ones.**
-    `{}` is "read it, nobody is recorded"; `None` is "could not read it" — an unreachable
-    controller, a non-200, or a body that is not a row array. `load_ledger` COLLAPSES them,
-    because this module must fail OPEN (an unreadable ledger resolves every spawner as a
-    manager, and keeping every gate is the safe direction there). `adopt-orphans.py` must
-    NOT collapse them: it refuses on an unreadable store, because adopting on the strength
-    of spawn edges it could not read would hand one manager's workers to another.
-    """
-    return _spawn_ledger().read_ledger(endpoint)
 
 
 def load_ledger(endpoint=None):
@@ -576,67 +555,6 @@ def load_ledger(endpoint=None):
     apart calls `load_ledger_checked` instead.
     """
     return load_ledger_checked(endpoint) or {}
-
-
-def load_claims(path=CLAIMS):
-    """Open ownership claims, keyed by gated session id, or {} when unreadable.
-
-    An unreadable store is NOT an empty one, and here the two happen to agree:
-    both fail open. That is deliberate -- a claim store that cannot be read must
-    never silence a manager's watcher, and the cost of a missed drop is one
-    wasted wake against a fleet-wide silence.
-
-    Only entries carrying a `manager` are returned; a malformed entry is skipped
-    rather than read as a claim held by nobody. Read directly rather than by
-    shelling out to `ownership-claim.py`, so the filter keeps its single-process
-    shape and stays runnable when the script is absent.
-    """
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    claims = data.get("claims")
-    if not isinstance(claims, dict):
-        return {}
-    out = {}
-    for session_id, entry in claims.items():
-        if isinstance(entry, dict) and entry.get("manager"):
-            out[str(session_id)] = str(entry["manager"])
-    return out
-
-
-def is_manager(session_id, ledger):
-    """A spawner is a manager when it was never itself spawned, or was spawned AS one.
-
-    The spawn edge alone cannot answer this. `/supervisor:open` starts a topic
-    manager in a plain wezterm tab, which writes no ledger record, so absence is the
-    common case -- but `spawn_agent(role="manager")` is a documented call that DOES
-    write one, and reading any record as proof of "worker" made such a manager
-    indistinguishable from the workers it spawns. Measured 2026-10-06: the CDB in
-    Weldall Manager (`1d379d23`, spawned by the Fleet Manager) had a record, so every
-    peer resolved its workers `worker-spawner` and re-escalated gates it had already
-    handled -- the same gates escalated twice.
-
-    ONLY an explicit `manager` counts, and a record with no `role` reads as a
-    worker. That default is NOT "no pre-field manager has a record" -- the very
-    manager this fixes had one. It is that a pre-field record cannot be told
-    apart: the field is absent on every worker AND every manager spawned before
-    it existed alike. Defaulting the other way would flip every pre-field record
-    to manager, and workers outnumber managers by orders of magnitude, so it
-    would drop the whole fleet's gates -- the fleet-wide silence every other hop
-    here fails open to avoid. The residue is a known gap, not a claim that no
-    such manager exists: a pre-change `spawn_agent(role="manager")` manager still
-    reads as a worker until it is re-spawned or its record gains the field.
-    """
-    if not session_id:
-        return False
-    record = ledger.get(session_id)
-    if record is None:
-        return True
-    return record.get("role") == "manager"
 
 
 def is_human(session_id, ledger):
