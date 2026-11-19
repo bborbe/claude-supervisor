@@ -104,6 +104,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import ssl
 import sys
 import time
@@ -1061,6 +1062,38 @@ def _mechanism_or_default(args):
     return MECHANISM, None
 
 
+# A card that tells the operator to type into a pane asks for something the
+# asking session owns: it has `wezterm cli send-text`. Measured 2026-11-19, a
+# card carried "you run: type anything in pane 229 and press Enter" for a pane
+# that no longer existed.
+_PANE_ASK_PATTERN = re.compile(
+    r"\btype\s+(?:anything|something|this|that)\s+in(?:to)?\s+pane\s+(\d+)\b"
+    r"|\bin\s+pane\s+(\d+)\s+and\s+press\s+enter\b",
+    re.IGNORECASE,
+)
+
+
+def pane_ask_refusal(payload, context=None):
+    """Refuse a card whose text asks the operator to type into a pane.
+
+    ⚠️ BOTH pane states refuse, and the refusal names the action the posting
+    session must take itself: `wezterm cli send-text --pane-id N`. A live pane is
+    still not the operator's to poke — the keystroke is the session's own — and a
+    dead pane has nothing to poke at all, so there is no card worth posting
+    either way.
+    """
+    text = " ".join(part for part in (payload, context) if part)
+    match = _PANE_ASK_PATTERN.search(text)
+    if not match:
+        return None
+    pane = match.group(1) or match.group(2)
+    return (
+        f"this card asks the operator to type into pane {pane}, which is the "
+        f"asking session's own action: run `wezterm cli send-text --pane-id "
+        f"{pane}` and Enter yourself, or drop the ask if that pane is gone."
+    )
+
+
 def cmd_post(args, out=sys.stdout):
     producer = _producer_or_refuse(args, out)
     if producer is None:
@@ -1098,6 +1131,10 @@ def cmd_post(args, out=sys.stdout):
             "with no --option and let the answer be free text; or re-run with "
             "--force if the card is deliberate.",
             file=out)
+        return 2
+    refusal = pane_ask_refusal(args.payload, getattr(args, "context", None))
+    if refusal:
+        print(f"REFUSED: {refusal}", file=out)
         return 2
     return _post_and_report(args, *producer, args.payload, options, out,
                             mechanism=mechanism)
