@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the fleet keeper can no longer report a lapse whose card it never posted.** `notify()` returned `None` on a failed `attention-ask.py post` without inspecting `out.returncode` and without logging anything, and the lapse branch printed `reported — … lapse reported for <who>` regardless — so a store 503 read as a successful report with no card. Measured 2026-11-19: **73 `lapse reported for` lines carrying no card** across a six-hour lapse of session `26480062`, while `~/Library/Logs/claude-wrapper/stderr.log` carried a sustained 503 storm (`01:20:45–07:20:46`, ~1 820 lines/hour). `notify()` now logs `notify failed: exit <rc>; <reason>` (the reason being the last line `attention-ask.py` printed), and the lapse branch reports `cannot-tell` — with the lapse left unmarked so the next tick retries — instead of a cardless `reported`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
+
 ## v0.352.2
 
 - fix: **the manager CHECKS the round delegate's verdict instead of trusting it.** `agents/fleet-round.md` already said *emit the fence and NOTHING else*, and the delegates ignore it: measured 2026-11-18 across eight live `supervisor:fleet-round` runs, **seven emitted no fence at all** — a 54–111 B closing remark — and the eighth emitted prose at **1 510 B** against the 1 024 B cap. A rule the delegate can re-read and override is not a bound, so `commands/steps/round-dispatch.md` now runs `check-handback-size.py --transcript <the delegate's transcript>` before reading a single count, and on exit 1 **re-asks once for the counts only**. ⚠️ **The re-ask is the mechanism**: an overrun costs the delegate a turn instead of loading the manager's context with a narrative that restates what the payload already holds. Change set: `commands/steps/round-dispatch.md`, `CHANGELOG.md`.
