@@ -1999,8 +1999,14 @@ def main():
     # resume prompt carries the loop command (see `manager_loop_prompt`). A worker's
     # resume keeps `/color <chip>`.
     resume_prompt = None
-    if role == "manager" and subject:
-        resume_prompt = manager_loop_prompt(subject[0], subject[1])
+    if role == "manager":
+        # A subject of None is the ROOT Fleet Manager: `manager_subject` resolves only
+        # topic and goal pages, so skipping it left the fleet manager unarmed — the
+        # exact failure this path exists to fix. Its loop takes no subject.
+        resume_prompt = (
+            manager_loop_prompt(subject[0], subject[1]) if subject
+            else manager_loop_prompt("fleet", "")
+        )
     try:
         spawned = subprocess.run(
             resume_command(sid, title, chip, cwd, launcher, fresh_prompt, wezterm,

@@ -2059,6 +2059,8 @@ class ManagerLoopArmsOnResume(unittest.TestCase):
 
         fleet = self.command(resume_prompt=rw.manager_loop_prompt("fleet", "Some Subject"))
         self.assertIn('/supervisor:fleet-loop', fleet)
+        # The root Fleet Manager resolves to no subject; it must still be armed.
+        self.assertEqual(rw.manager_loop_prompt("fleet", ""), "/supervisor:fleet-loop")
 
     def test_a_worker_resume_keeps_the_colour(self):
         """The negative control: a worker resume is unchanged — `/color`, no loop."""
