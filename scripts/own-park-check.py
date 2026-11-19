@@ -48,12 +48,37 @@ def spawner_of(row):
     return row.get("spawner_session_id") or row.get("parent_session") or None
 
 
-def verdict(self_id, worker_sid, ledger):
-    """`(own, reason)` for one worker. `ledger` is the read map, or `None` when unreadable."""
+def verdict(self_id, worker_sid, ledger, scope=None):
+    """`(own, reason)` for one worker. `ledger` is the read map, or `None` when unreadable.
+
+    Two independent inputs, and either admits. The **spawn edge** answers "who opened this"
+    and is the cheap, live read. `scope` — a `session-scope.Scope` for `self_id`, when the
+    caller has one — answers "whose work is this" from the vault, and is what admits a worker
+    spawned by ANOTHER manager whose task belongs to this manager's goal. Without it a
+    manager's feed can only ever hold the workers it spawned itself, which is why every card
+    raised by a peer's worker escalated.
+
+    ⚠️ **`scope` is optional and its absence is not a refusal.** A caller with no vault walk
+    keeps exactly the pre-existing spawn-edge behaviour; the widening is opt-in at the call
+    site, never a hidden default.
+    """
     if not self_id:
         return False, "no --self session id"
     if not worker_sid:
         return False, "empty worker session id"
+    spawned, why = _spawn_verdict(self_id, worker_sid, ledger)
+    if spawned:
+        return True, why
+    if scope is None:
+        return False, why
+    admit, reason = scope.admission(worker_sid, self_id)
+    if admit:
+        return True, "in this manager's subject — %s" % reason
+    return False, "%s; %s" % (why, reason)
+
+
+def _spawn_verdict(self_id, worker_sid, ledger):
+    """The spawn-edge half of `verdict()`: `(own, reason)` from the ledger alone."""
     if ledger is None:
         return False, "spawn ledger unreadable"
     row = ledger.get(worker_sid)
