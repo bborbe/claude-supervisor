@@ -70,7 +70,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 8 | Act on the open-items ledger | the ledger holds ≥1 open entry | `${CLAUDE_PLUGIN_ROOT}/commands/steps/act.md` · `${CLAUDE_PLUGIN_ROOT}/commands/steps/open-items.md` |
 | 9 | Verify a named cause | about to name a cause in the round's report | `${CLAUDE_PLUGIN_ROOT}/commands/steps/cause-verify.md` |
 | 10 | Escalate | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/escalate.md` |
-| 11 | Needs-input batch + relay | hand-back reports `blocked` > 0 or `parks-routed` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
+| 11 | Needs-input batch + relay | hand-back reports `blocked` > 0, `parks-routed` > 0, or a routed spawn | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
 | 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
@@ -84,7 +84,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 
 ⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**; a second sweep duplicates sends.
 
-⚠️ **Round split:** rows 0, 2–10, 12, 15, 16, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay here — `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`.
+**Split:** rows 0, 2–10, 12, 15, 16, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
 
 ## INLINE — the hard rules
 

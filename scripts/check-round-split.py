@@ -78,7 +78,7 @@ def router_split() -> tuple[set[str], set[str]]:
     if line is None:
         raise SystemExit("FAIL: commands/fleet-drive.md carries no row-split line")
     delegate = re.search(r"rows ([^;]+) run in `supervisor:fleet-round`", line)
-    manager = re.search(r"; ([^;]+) stay here", line)
+    manager = re.search(r"; ([^;—]+?) stay(?: here)?[:—]", line)
     if not (delegate and manager):
         raise SystemExit("FAIL: the row-split line does not parse")
     return expand(delegate.group(1)), expand(manager.group(1))

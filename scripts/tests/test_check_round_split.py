@@ -112,6 +112,18 @@ class TestRoundSplit(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("NEITHER", done.stderr)
 
+    def test_a_missing_router_table_is_a_parse_failure(self):
+        # The coverage half reads the router's own table; its absence must fail loudly.
+        text = self.router().read_text(encoding="utf-8")
+        self.assertEqual(text.count("| # | Step | When | File |"), 1)
+        self.router().write_text(
+            text.replace("| # | Step | When | File |", "| row | Step | When | File |"),
+            encoding="utf-8",
+        )
+        done = run(self.root)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("no router table", done.stderr)
+
     def test_a_missing_split_line_is_a_parse_failure(self):
         text = self.router().read_text(encoding="utf-8")
         line = next(l for l in text.splitlines() if "run in `supervisor:fleet-round`" in l)
