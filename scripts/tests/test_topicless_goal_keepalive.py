@@ -77,6 +77,10 @@ class LegTest(unittest.TestCase):
         self.ka.session_verdict = lambda sid: self.verdicts.get(sid, "UNKNOWN")
         self.ka.cadence_state_detail = lambda subject, branch="goal", vault="": (
             self.cadences.get(subject, "OK"), "")
+        # The declaring-topic probe now reads `crashed-managers.py`'s own instrument — the one
+        # home, so the census and this leg agree — so the injected verdicts must reach it too.
+        self.cm = self.leg.crashed()
+        self.cm.session_state = lambda sid: self.verdicts.get(sid, "UNKNOWN")
 
     def goal(self, name, sid, status="in_progress", phase="execution"):
         (self.vault / "24 Goals" / f"{name}.md").write_text(

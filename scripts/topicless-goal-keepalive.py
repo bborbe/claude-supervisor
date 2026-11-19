@@ -130,41 +130,13 @@ def keepalive():
         raise Refused(str(exc)) from exc
 
 
-#: Topic-manager verdicts that mean no round will restart it, so its declared goals fall to
-#: the fleet tier. `restart` is deliberately absent: that session is live with a lapsed loop,
-#: and § 1 of the same round restarts it, after which the topic round resumes its goals.
-UNKEPT_TOPIC_VERDICTS = ("resume", "cannot-tell")
-
-
-def topic_verdict(vault: str, topics_dir: str, topic: str) -> str:
-    """`topic-keepalive.py --branch topic`'s verdict word for one topic page."""
-    out = io.StringIO()
-    try:
-        with redirect_stdout(out):
-            keepalive().main(["--vault", vault, "--subject", topic, "--branch", "topic",
-                              "--dir", topics_dir])
-    except SystemExit:
-        return "cannot-tell"
-    except Exception:  # noqa: BLE001 — an unreadable topic is undecidable, never dead
-        return "cannot-tell"
-    lines = out.getvalue().splitlines()
-    return lines[0].strip() if lines else "cannot-tell"
-
-
 def unkept_topics(vault: str, topics_dir: str) -> dict[str, str]:
     """`topic name → verdict` for every topic whose manager no round will restart."""
     cm = crashed()
     try:
-        entries = sorted(e[: -len(".md")] for e in cm._listdir(os.path.join(vault, topics_dir))
-                         if e.endswith(".md"))
+        return cm.unkept_topics(vault, topics_dir)
     except cm.Refused as exc:
         raise Refused(str(exc)) from exc
-    out = {}
-    for name in entries:
-        word = topic_verdict(vault, topics_dir, name)
-        if word in UNKEPT_TOPIC_VERDICTS:
-            out[name] = word
-    return out
 
 
 def select(vault: str, goals_dir: str, topics_dir: str,
