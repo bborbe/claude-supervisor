@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`session-liveness --check` marks a live session that carries no identity-registry entry as `UNREGISTERED`.** The heartbeat reader answered `LIVE` while every registry-keyed verb (`restart-precheck.py`, `close-worker.py`, `send_agent_message`) refused the same session with `unknown-session-id` — measured 2026-11-19 on session `616a52dd`, alive, `busy`, pane-less, holding no `~/.claude/sessions/*.json` entry, `--check` = LIVE, both verbs refusing. The split is now visible in the verdict instead of having to be re-derived by joining the two sources. Two regression tests: the marker fires when the entry is absent, and stays silent for a registered live control.
+
 ## v0.352.7
 
 - fix: **`commands/steps/output-shape.md` renders to `<round>.render` and no longer asks the operator anything.** PR 2 of the seven-PR lever-(b) order; PR 1 (`#1014`) put the contract row in place first. The step now states that `supervisor:fleet-round` executes it (router row 20), that the render is **written to a file** and printed by the manager **after** its row 19 tail, and why both alternatives fail — printed here it lands in a headless transcript nobody reads, and returned in the hand-back it breaks the ≤ 1 KB cap. ⚠️ **Two items lost their `AskUserQuestion`:** item 6 (needs-input) and item 11 (course-correction drafts) now **render the material** for a question and leave the asking to the manager's **row 11**, the only row that may put one — a headless delegate that asked would park with nobody to answer. ⚠️ **Absence is `not-run`, not an empty file:** a delegate that exits 14 on `--budget` before row 20 runs writes nothing, so a missing render and an empty one stay distinguishable. Change set: `commands/steps/output-shape.md`, `CHANGELOG.md`.

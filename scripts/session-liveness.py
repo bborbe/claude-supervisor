@@ -1016,6 +1016,28 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None, 
     ), None
 
 
+def _registry_has_entry(sid, registry_dir=None):
+    """`True` when the identity registry holds a record for `sid`, `False` when it does not,
+    `None` when the registry could not be read.
+
+    ⚠️ **A live heartbeat with no registry entry is the unaddressable shape.** The registry is
+    pid-keyed and Claude Code writes it, so a session that is alive and stamping the endpoint
+    can still have no entry — a wrapper-spawned headless run, or one resumed without a fresh
+    write. Every registry-keyed verb (`restart-precheck.py`, `close-worker.py`,
+    `send_agent_message`) then refuses it with `unknown-session-id`, while this reader answers
+    LIVE from the heartbeat. The marker lets a caller see the split instead of having to join
+    the two sources itself.
+    """
+    identity = _identity()
+    try:
+        registry = identity.read_registry(registry_dir)
+    except Exception:  # noqa: BLE001 — an unreadable registry is `None`, never a crash
+        return None
+    if registry is None:
+        return None
+    return any(k.lower() == sid.lower() for k in registry)
+
+
 def _verdict_for(row, sid, registry_dir=None, projects_dir=None):
     """`(verdict, message, row)` for a single heartbeat row. UNKNOWN when `live` is unusable.
 
@@ -1033,6 +1055,12 @@ def _verdict_for(row, sid, registry_dir=None, projects_dir=None):
     full = row.get("session_id") or sid
     live = row.get("live")
     if live is True:
+        # A live heartbeat with NO identity-registry entry is the unaddressable shape: every
+        # registry-keyed verb (`restart-precheck`, `close-worker`, `send_agent_message`)
+        # refuses it while this reader answers LIVE. Mark it, so a caller sees the split
+        # instead of having to join the two sources itself.
+        if _registry_has_entry(full, registry_dir) is False:
+            return LIVE, "%s (UNREGISTERED — live heartbeat, no identity-registry entry)" % full, row
         return LIVE, full, row
     if live is False:
         if row.get("source") == "cluster":
