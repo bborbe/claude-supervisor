@@ -7,6 +7,11 @@ wrapping this script does it from the TARGET line printed here.
 
   next              list open items, oldest first, each with its delivery target
   answer ITEM_ID    POST /api/1.0/attention/{ITEM_ID}/answer, then print the target
+  dismiss ITEM_ID   POST /api/1.0/attention/{ITEM_ID}/close — retire a card
+                    without answering it. `closed` is terminal, so a second
+                    dismiss exits non-zero; nothing is delivered, and no
+                    answer is stored (unlike the board's `skip`, which records
+                    a decline the operator never gave)
 
 Order matters in `answer`: the store's open -> answered compare-and-set runs
 first, and a caller that loses it (409) must NOT route its answer -- another arm
@@ -74,6 +79,7 @@ and the gate answerer's arm may answer only as `manager` (see `answer_text_refus
 Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
                                   [--answer-text TEXT] [--answerer operator|manager]
      python3 attention-answer.py attempt ITEM_ID --outcome delivered|failed [--by ARM]
+     python3 attention-answer.py dismiss ITEM_ID [--by ARM]
 """
 
 import argparse
@@ -402,6 +408,38 @@ def post_answer(item_id, answered_by, resolved_by="", decision="", answer=None):
     )
     with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
         return json.load(resp)
+
+
+def post_close(item_id, answered_by):
+    """Close an item — the dismiss verb's one store call.
+
+    `closed` is terminal: a dismissed card cannot be reopened (reopening is a
+    new item with a new id), and the store rejects `closed -> closed` as an
+    illegal transition, so a second dismiss exits non-zero rather than reading
+    as a silent no-op.
+    """
+    body = {"answered_by": answered_by}
+    req = urllib.request.Request(
+        f"{STORE}/api/1.0/attention/{item_id}/close",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+        return json.load(resp)
+
+
+def cmd_dismiss(item_id, answered_by, out=sys.stdout):
+    """Retire a card without answering it.
+
+    The board's `skip` was the only way to clear a card that asks nothing, and
+    it recorded a DECLINE — a negative the operator never gave. A dismiss names
+    what it is: the item leaves the queue, no answer is stored, and the record
+    says which arm closed it.
+    """
+    post_close(item_id, answered_by)
+    print(f"DISMISSED: {item_id}", file=out)
+    return 0
 
 
 # The answer endpoint returns HTTP 409 for more than one failure, and the status
@@ -863,6 +901,9 @@ def main(argv=None):
     # record an outcome the caller never observed. The refusal belongs to this
     # script so its wording stays testable.
     att.add_argument("--outcome", default="")
+    dis = sub.add_parser("dismiss")
+    dis.add_argument("item_id")
+    dis.add_argument("--by", default=DEFAULT_ARM)
     args = parser.parse_args(argv)
     registry = load_registry()
     try:
@@ -870,6 +911,8 @@ def main(argv=None):
             return cmd_next(registry)
         if args.cmd == "attempt":
             return cmd_attempt(args.item_id, args.by, args.outcome)
+        if args.cmd == "dismiss":
+            return cmd_dismiss(args.item_id, args.by)
         return cmd_answer(args.item_id, args.by, registry, decision=args.decision,
                           answer_text=args.answer_text, answerer=args.answerer)
     except urllib.error.HTTPError as err:
