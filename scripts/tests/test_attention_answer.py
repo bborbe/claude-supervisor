@@ -895,5 +895,40 @@ class MirrorCardLookup(unittest.TestCase):
         self.assertNotIn("TARGET:", text)
 
 
+class DismissTest(unittest.TestCase):
+    """The dismiss verb retires a card without answering it.
+
+    Unlike the board's `skip` it stores no answer, so a dismissed card is not
+    recorded as a decline the operator never gave. `closed` is terminal, so a
+    second dismiss is a non-zero exit, not a silent no-op.
+    """
+
+    def test_dismiss_posts_close_and_prints(self):
+        out = io.StringIO()
+        with mock.patch.object(aa, "post_close", return_value={}) as post:
+            rc = aa.cmd_dismiss("item-1", "arm-1", out=out)
+        post.assert_called_once_with("item-1", "arm-1")
+        self.assertEqual(rc, 0)
+        self.assertIn("DISMISSED: item-1", out.getvalue())
+
+    def test_main_routes_dismiss(self):
+        with mock.patch.object(aa, "post_close", return_value={}) as post:
+            rc = aa.main(["dismiss", "item-9", "--by", "arm-9"])
+        post.assert_called_once_with("item-9", "arm-9")
+        self.assertEqual(rc, 0)
+
+    def test_already_closed_is_nonzero(self):
+        with mock.patch.object(aa, "post_close", side_effect=_conflict("ITEM_CLOSED")):
+            rc = aa.main(["dismiss", "item-2"])
+        self.assertEqual(rc, 1)
+
+    def test_unreachable_store_is_nonzero(self):
+        with mock.patch.object(
+            aa, "post_close", side_effect=urllib.error.URLError("refused")
+        ):
+            rc = aa.main(["dismiss", "item-3"])
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
