@@ -231,9 +231,9 @@ class EnumsMatchTheirProducers(unittest.TestCase):
         self.assertEqual(set(load_schema()["properties"]["mode"]["enum"]),
                          set(fr.SPAWN_MODES))
 
-    def test_liveness_is_the_exit_code_map_plus_none(self):
+    def test_liveness_is_the_producers_own_set_plus_none(self):
         self.assertEqual(set(load_schema()["properties"]["liveness"]["enum"]),
-                         set(fr.LIVENESS_EXIT.values()) | {"none"})
+                         set(fr.LIVENESS_VERDICTS) | {"none"})
 
     def test_kind_matches_the_sort_table(self):
         self.assertEqual(set(load_schema()["properties"]["kind"]["enum"]),
