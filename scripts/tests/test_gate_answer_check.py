@@ -96,6 +96,14 @@ class Answerable(unittest.TestCase):
         self.assertEqual(out["verdict"], gac.ANSWERABLE)
         self.assertIn("ownership claim", out["why"])
 
+    def test_adopted_dead_spawner(self):
+        # Spawner is NOT in the live set → a live manager auto-adopts (operator-approved
+        # 2026-11-19, card 0a5572c2fcb2edae48e00277b277cb55), rubric-limited.
+        out = run(ledger={WORKER: {"spawner_session_id": OTHER}}, live=set())
+        self.assertEqual(out["verdict"], gac.ANSWERABLE, out)
+        self.assertIn("spawner", out["why"])
+        self.assertIn("not live", out["why"])
+
 
 class Escalate(unittest.TestCase):
     def assertEscalate(self, out, fragment):
@@ -122,6 +130,16 @@ class Escalate(unittest.TestCase):
 
     def test_other_spawner(self):
         self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}), "not this session's worker")
+
+    def test_live_spawner_still_escalates(self):
+        # Spawner IS live → never adopted; the spawner owns its worker.
+        self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}, live={OTHER}),
+                            "not this session's worker")
+
+    def test_unreadable_live_fails_closed(self):
+        # Registry unreadable (live=None) → escalate, never adopt.
+        self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}, live=None),
+                            "not this session's worker")
 
     def test_claim_by_peer_is_not_ownership(self):
         self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}, claims={WORKER: OTHER}),
