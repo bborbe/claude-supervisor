@@ -181,6 +181,28 @@ class TranscriptModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("over its", result.stderr)
 
+    def test_the_largest_matching_block_is_measured_not_the_last(self):
+        """A verdict followed by a short round-id remark must not read as the remark."""
+        verdict = "**Round 1795010883 — final verdict**\n\n" + "- x\n" * 400
+        path = self.write("i.jsonl", verdict, "Round 1795010883 complete — hand-back delivered.")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("over its", result.stderr)
+
+    def test_variable_lines_are_excluded_in_transcript_mode(self):
+        """The contract declares these rows unbounded, so a long row list still passes."""
+        keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-keepalive-actor"]["required"]
+        rows = "\n".join(f"crash-loop: subject-{i} · WORKER" for i in range(40))
+        path = self.write("j.jsonl",
+                          "**Hand-back**\n\n```text\n"
+                          + " · ".join(f"{k}=<n>" for k in keys)
+                          + "\n" + rows + "\n```\n</output_format>")
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript", str(path),
+             "--agent-type", "supervisor:fleet-keepalive-actor"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_a_missing_transcript_dir_fails(self):
         result = subprocess.run(
             [sys.executable, str(SIZE_SCRIPT), "--transcript-dir", str(pathlib.Path(self.dir) / "nope")],

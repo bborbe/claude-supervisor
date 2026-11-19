@@ -127,15 +127,19 @@ def emitted_reading(transcript: Path, variable: tuple[str, ...] = ()) -> tuple[i
     texts = assistant_texts(transcript)
     if not texts:
         return None, "no assistant text block"
-    for text in reversed(texts):
-        # ⚠️ **The WHOLE block, never just the fence.** A delegate that uses the authored
-        # fence shape still wraps it in a heading, a table and a trailing note; measuring
-        # the fence alone under-reported a 1 098 B message as 40 B and passed it 74 B over
-        # the cap. Both shapes measure the emitted message.
-        if handback_fence(text) is not None:
-            return fixed_bytes(text, variable), "fence block found"
-        if ROUND_ID.search(text):
-            return fixed_bytes(text, variable), "round-id block found"
+    # ⚠️ **The WHOLE block, never just the fence.** A delegate that uses the authored
+    # fence shape still wraps it in a heading, a table and a trailing note; measuring the
+    # fence alone under-reported a 1 098 B message as 40 B and passed it 74 B over the cap.
+    # ⚠️ **The LARGEST matching block, never the last.** A verdict followed by a short
+    # `Round <id> complete — hand-back delivered.` remark would otherwise be measured as
+    # the remark (1 639 B read as 50 B). Measuring the maximum fails closed.
+    sizes = [
+        fixed_bytes(text, variable)
+        for text in texts
+        if handback_fence(text) is not None or ROUND_ID.search(text)
+    ]
+    if sizes:
+        return max(sizes), "emitted block found"
     return None, (
         f"no `**Hand-back**` fence and no round-id block in {len(texts)} assistant "
         f"text block(s)"
@@ -165,7 +169,13 @@ def transcript_readings(directory: Path, agent_type: str) -> tuple[list[str], li
             if declared and declared != agent_type:
                 continue
         matched += 1
-        size, reason = emitted_reading(transcript, variable)
+        try:
+            size, reason = emitted_reading(transcript, variable)
+        except (OSError, UnicodeDecodeError) as exc:
+            # ⚠️ **One unreadable file must not abort the scan.** A corrupt transcript used
+            # to raise out of the loop and hide every other file's verdict.
+            failures.append(f"{transcript.name}: unreadable ({type(exc).__name__})")
+            continue
         if size is None:
             failures.append(
                 f"{transcript.name}: {reason} — an absent hand-back is a failure, not 0 B"
