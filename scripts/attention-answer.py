@@ -65,10 +65,11 @@ that settles an irreversible prompt without an operator-supplied decision.
 A `message` answer may carry its CONTENT (`--answer-text TEXT`), and then it routes
 like a permission one: the store holds what was said, the attention-controller's
 carriers deliver it (pane, or a resumed headless turn), so no TARGET is printed and
-the same bounded delivery wait reports whether it landed. ⚠️ It is REFUSED while
-`gate-answer-check.py`'s `PICK_ANSWERING_ENABLED` is false, for the gate answerer's arm,
-and for `--answerer manager` — every carrier renders answer content in the operator's
-voice (see `answer_text_refusal`). `--answerer` has no default and must be stated.
+the same bounded delivery wait reports whether it landed. The `--answerer` is posted
+as `answer.answerer`, and every carrier delivers a `manager` answer in the manager's
+voice. ⚠️ It is REFUSED while `gate-answer-check.py`'s `PICK_ANSWERING_ENABLED` is false,
+and the gate answerer's arm may answer only as `manager` (see `answer_text_refusal`).
+`--answerer` has no default and must be stated.
 
 Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
                                   [--answer-text TEXT] [--answerer operator|manager]
@@ -679,21 +680,18 @@ def picks_enabled():
 def answer_text_refusal(answered_by, answerer, enabled):
     """Why `--answer-text` must not run, or "" when it may.
 
-    ⚠️ **Every carrier renders a card's answer content in the OPERATOR's voice** — the pane
-    carrier types `Operator answer, via attention board:`, the controller's headless arm opens
-    "The operator answered on the attention board.", and claude-wrapper's `messageAnswer`
-    prefixes `Operator answer, via supervisor:`. So a manager's text would reach the worker as
-    the operator's own answer whatever marker it wrote here: `manager` is refused, the gate
-    answerer is refused under any answerer, and the whole path is off while picks are.
+    The answerer is posted as `answer.answerer`, and every carrier voices a `manager` answer
+    as `Manager answer, via supervisor: …` and an `operator` one as the operator's. So the
+    answerer must be stated, and the gate answerer — a manager's sub-agent — may only ever
+    answer as `manager`: an `operator` answer from it would be a forged provenance claim.
+    The whole path stays behind the `PICK_ANSWERING_ENABLED` kill switch.
     """
     if not enabled:
         return "--answer-text is disabled while PICK_ANSWERING_ENABLED is false"
-    if answered_by == GATE_ANSWERER_ARM:
-        return "the gate answerer never answers a card's content — every carrier would voice it as the operator"
-    if answerer == "manager":
-        return "a manager answer would be delivered in the operator's voice by every carrier"
-    if answerer != "operator":
-        return "--answer-text needs an explicit --answerer operator"
+    if answerer not in ("operator", "manager"):
+        return "--answer-text needs an explicit --answerer operator|manager"
+    if answered_by == GATE_ANSWERER_ARM and answerer != "manager":
+        return "the gate answerer answers only as --answerer manager — it is never the operator"
     return ""
 
 
@@ -719,7 +717,8 @@ def cmd_answer_content(item, answered_by, resolved_by, answer_text, answerer, ou
         resolved_by = resolved_session_id()
     try:
         answered = post_answer(item_id, answered_by, resolved_by,
-                               answer={"kind": "text", "value": answer_text})
+                               answer={"kind": "text", "value": answer_text,
+                                       "answerer": answerer})
     except urllib.error.HTTPError as err:
         if err.code == 409:
             print(answer_conflict_line(item_id, err, "deliver"), file=out)
