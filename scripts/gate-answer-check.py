@@ -397,7 +397,7 @@ def _role_human(session_id, ledger):
 
 def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
            tier_mod, allowlist, own_mod, scope=None, seen=None, answering=False, expect=None,
-           is_human=None):
+           is_human=None, live=None):
     """One verdict dict. Every input that could not be read arrives as `None`.
 
     `item` is the store record, `None` when unreadable, or `{}` when absent (404).
@@ -460,7 +460,19 @@ def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
         if (claims or {}).get(producer) == self_id and self_id:
             why = "adopted by this session (ownership claim)"
         else:
-            return done(ESCALATE, "not this session's worker: %s" % why)
+            # Auto-adopt a dead-spawner gate — operator-approved 2026-11-19, card
+            # 0a5572c2fcb2edae48e00277b277cb55: "auto-adopt for dead-spawner gates only,
+            # rubric-limited". A gate whose spawner is not live would otherwise wait for a
+            # manager turn (or time out) because no live spawner owns it. Adoption does NOT
+            # bypass the rubric: every later check (UNATTENDED_TOOLS, tier allowlist/manager,
+            # no script file, readable brief) still runs, so a production-touching or
+            # operator-tier prompt is refused below. FAIL CLOSED: `live is None` (registry
+            # unreadable) or an unnameable spawner escalates, never adopts.
+            spawner = own_mod.spawner_of((ledger or {}).get(producer))
+            if spawner and self_id and live is not None and spawner not in live:
+                why = "adopted: spawner %s not live" % spawner[:8]
+            else:
+                return done(ESCALATE, "not this session's worker: %s" % why)
 
     if out["kind"] == "pick":
         out["expect"] = pick_hash(item)
@@ -728,6 +740,10 @@ def load_inputs(self_id=""):
         "holds": read_holds(), "sessions": read_sessions(),
         "allowlist": tier_mod.load_allowlist(), "index": stamp_index(fleet_mod),
         "scope": scope_mod.load(self_id),
+        # Live session ids from the Claude Code registry, or None when unreadable. Used only
+        # to decide whether a gate's spawner is dead (auto-adoption, below); None means
+        # unknown, and adoption refuses rather than guessing.
+        "live": filt.live_ids(),
     }
 
 
@@ -765,7 +781,7 @@ def main(argv=None):
                              inputs["allowlist"], inputs["own_mod"],
                              scope=inputs.get("scope"), seen=seen,
                              answering=args.answer, expect=args.expect or None,
-                             is_human=inputs["is_human"])
+                             is_human=inputs["is_human"], live=inputs.get("live"))
             print(json.dumps(verdict))
             if not args.answer:
                 if verdict["verdict"] in (ANSWERABLE, ESCALATE):
