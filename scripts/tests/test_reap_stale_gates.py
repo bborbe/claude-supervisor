@@ -14,7 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -150,6 +150,52 @@ class PaneReadRefusalTest(unittest.TestCase):
         with open(os.path.join(self.dir, "a.events.jsonl"), encoding="utf-8") as f:
             types = [json.loads(l)["type"] for l in f if l.strip()]
         self.assertEqual(types, ["open", "close"])
+
+
+class SelectionTest(unittest.TestCase):
+    """The two cases review round 1 named as priority: the cutoff boundary and a
+    non-`awaiting-operator` cause. Both are the difference between reaping a live
+    gate and leaving a dead one, so each is pinned by a dry-run count."""
+
+    NOW = 10000.0
+
+    def setUp(self):
+        self.mod = load_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def dry_run(self, ts, cause, max_age_hours=1):
+        with open(os.path.join(self.dir, "a.events.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"item_id": "x", "type": "open", "ts": ts,
+                                "session_id": "s", "pane": "1"}) + "\n")
+        fake = mock.Mock()
+        fake.wezterm_panes.return_value = {}
+        fake.read_registry.return_value = {}
+        fake.CAUSE_OPERATOR = "awaiting-operator"
+        fake.cause_class.return_value = cause
+        fake.row.return_value = "row"
+        with mock.patch.object(self.mod, "load_who_needs_me", return_value=fake), \
+             mock.patch.object(self.mod, "liveness", return_value="ABSENT"), \
+             mock.patch.object(self.mod.time, "time", return_value=self.NOW):
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                rc = self.mod.main(["--state", self.dir,
+                                    "--max-age-hours", str(max_age_hours)])
+        self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    def test_item_exactly_at_cutoff_is_included(self):
+        # cutoff = NOW - 1h; `<=` admits the boundary item.
+        self.assertIn("would reap 1", self.dry_run(self.NOW - 3600, "awaiting-operator"))
+
+    def test_item_inside_cutoff_is_excluded(self):
+        self.assertIn("would reap 0", self.dry_run(self.NOW - 3599, "awaiting-operator"))
+
+    def test_non_operator_cause_is_kept(self):
+        self.assertIn("would reap 0", self.dry_run(0, "task-completed"))
 
 
 if __name__ == "__main__":
