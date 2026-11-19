@@ -45,8 +45,8 @@ The shape a sweep's **read half** and **act half** return to their caller. Ten a
     drive tallies (`revived`, `blocked`, `reaped`), the keep-alive tallies (`legs`, `restarted`,
     `resumed`, `parked-due`, `nudged`, `undelivered`), the open leg's (`open-status`, `selected`,
     `opened`, `open-resumed`, `jumped`, `refused`), `managers-reaped`, the own-parks split
-    (`parks-answered`, `parks-routed`, `parks-escalated` — `parks-routed` is row 7's
-    trigger), `context70`, and
+    (`parks-answered`, `parks-routed`, `parks-escalated` — `parks-routed` is row 11's
+    trigger (and row 7's routing input)), `context70`, and
     `self-context` — the manager's **own** fill level, the one reading `context-usage.py
     --compactable` hides and the reading that stops the loop guessing.
     ⚠️ **A count whose leg was still in flight is `not-run`**, with its reason in the payload —

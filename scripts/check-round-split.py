@@ -62,6 +62,14 @@ def expand(run: str) -> set[str]:
     return {base(r) for r in out}
 
 
+def router_rows() -> set[str]:
+    """Every row number in the router's own `| # | Step | When | File |` table."""
+    text = ROUTER.read_text(encoding="utf-8")
+    if "| # | Step | When | File |" not in text:
+        raise SystemExit("FAIL: commands/fleet-drive.md carries no router table")
+    return {base(m.group(1)) for m in re.finditer(r"^\| (\d+b?d?) \|", text, re.M)}
+
+
 def router_split() -> tuple[set[str], set[str]]:
     text = ROUTER.read_text(encoding="utf-8")
     line = next(
@@ -137,6 +145,14 @@ def main() -> int:
             f"router and the agent's § 2 disagree: "
             f"only-router={sorted(router[1] - agent[1])} "
             f"only-agent={sorted(agent[1] - router[1])}"
+        )
+
+    # Pairwise agreement is not coverage: a row dropped from ALL four places passes
+    # pairwise. The router table is the population, so the union must cover it.
+    uncovered = router_rows() - (router[0] | router[1])
+    if uncovered:
+        problems.append(
+            f"row(s) in the router table assigned to NEITHER session: {sorted(uncovered)}"
         )
 
     if problems:

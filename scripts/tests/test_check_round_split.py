@@ -102,6 +102,16 @@ class TestRoundSplit(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("7", done.stderr)
 
+    def test_a_row_assigned_to_neither_session_fails(self):
+        # Pairwise agreement is not coverage: drop a row from the router's list AND both
+        # agent tables and every pairwise comparison still holds.
+        self.rewrite(self.router(), "rows 0, 2–10, 12, 15, 16, 16b, 18, 20", "rows 0, 2–10, 12, 15, 16, 16b, 18")
+        self.rewrite(self.agent(), "| 20 | Render the output shape — write `<round>.render`, never print, never ask | `steps/output-shape.md` |\n", "")
+        self.rewrite(self.dispatch(), "runs rows 0, 2–10, 12, 15, 16, 16b, 18 and 20", "runs rows 0, 2–10, 12, 15, 16, 16b and 18")
+        done = run(self.root)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("NEITHER", done.stderr)
+
     def test_a_missing_split_line_is_a_parse_failure(self):
         text = self.router().read_text(encoding="utf-8")
         line = next(l for l in text.splitlines() if "run in `supervisor:fleet-round`" in l)

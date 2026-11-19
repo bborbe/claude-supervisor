@@ -84,7 +84,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 
 ⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**; a second sweep duplicates sends.
 
-⚠️ **The manager's round:** rows 0, 2–10, 12, 15, 16, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay here — `commands/steps/round-dispatch.md`.
+⚠️ **Round split:** rows 0, 2–10, 12, 15, 16, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay here — `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`.
 
 ## INLINE — the hard rules
 
