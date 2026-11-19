@@ -378,6 +378,40 @@ class Scope:
             return True, f"foreign-goal:{goal}"
         return True, "owner-unknown"
 
+    def admission(self, session_id, self_id):
+        """`(admit?, reason)` for one gated session — the fail-CLOSED twin of `exclusion()`.
+
+        ⚠️ **The two answer different questions and therefore take opposite defaults.**
+        `exclusion()` asks "may this row be hidden from the feed", where hiding on a failed
+        read silences the fleet — so it fails open. This asks "may this manager ANSWER this
+        row's gate", where admitting on a failed read is the blanket widening the manager
+        contract forbids — so it fails closed. Same four reads, same vault, opposite default;
+        a caller that swaps one for the other turns it into the other.
+
+        Admit only when the session resolves to exactly one page whose title is in this
+        manager's own scope. Everything else refuses: unresolved scope, no page, two pages, a
+        foreign goal, a page declaring none.
+        """
+        if not self.resolved:
+            return False, "scope unresolved: %s" % (self.reason or "no page for this manager")
+        if not session_id:
+            return False, "card names no producing session"
+        if session_id == self_id:
+            return True, "this session's own gate"
+        entries = self.sessions.get(session_id) or []
+        titles = {entry.title for entry in entries}
+        if not titles:
+            return False, "no vault page stamps %s" % session_id[:8]
+        if len(titles) != 1:
+            return False, "%d vault pages stamp %s" % (len(titles), session_id[:8])
+        entry = entries[0]
+        if entry.title in self.own_titles:
+            return True, "in this manager's subject: %s" % entry.title
+        goal = entry.goals[0] if entry.goals else None
+        if goal:
+            return False, "foreign-goal:%s" % goal
+        return False, "owner-unknown"
+
 
 def _read_task(path):
     """A task page's frontmatter-bearing head, widened when the block does not close in it."""
