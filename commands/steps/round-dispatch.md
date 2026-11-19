@@ -26,15 +26,22 @@ check is what holds it:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/check-handback-size.py \
-  --transcript "<projects-root>/<this session id>/subagents/agent-<agentId>.jsonl"
+  --transcript ~/.claude/projects/*/<this session id>/subagents/agent-<agentId>.jsonl
 ```
 
-`<agentId>` is the id the Task tool returned; `<projects-root>` is `~/.claude/projects`.
-**Exit 0** → read the counts. **Exit 1** → the delegate emitted no fence, or one over the cap: **re-ask
-it once for the counts only**, in one line, and read nothing from its prose. ⚠️ **The re-ask is
-the mechanism, not politeness** — it makes an overrun cost the *delegate* a turn instead of
-loading the manager's context with a narrative that restates what the payload already holds.
-A delegate that overruns twice is a defect to report, not a third ask.
+⚠️ **The `*` is the project slug and it is load-bearing** — every session lives at
+`~/.claude/projects/<project-slug>/<session-id>/…`, never directly under `projects/`, so a path
+without that segment resolves to nothing. It is deliberately unquoted so the shell expands it,
+the same form `docs/fleet-surface.md` and `commands/steps/fleet-triage-state.md` use.
+`<agentId>` is the id the Task tool returned.
+
+**Exit 0** → read the counts. **Exit 1** → read the script's **stderr first**, then act on what it
+names: *no fence* or *over the cap* is the delegate's defect → **re-ask it once for the counts
+only**, in one line, and read nothing from its prose; *not a file* or *unreadable* is **your**
+path or a broken transcript, never a delegate defect — fix the path and re-run, do not re-ask.
+⚠️ **The re-ask is the mechanism, not politeness** — it makes an overrun cost the *delegate* a
+turn instead of loading the manager's context with a narrative that restates what the payload
+already holds. A delegate that overruns twice is a defect to report, not a third ask.
 
 ⚠️ **Row 19 (the tail) runs after the delegate returns, never before.** It judges the `re-arm`
 epoch and the receipt **you** wrote — an arm that has not landed yet reads `skipped: re-arm` on
