@@ -9,7 +9,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * PATCH version when you make backwards-compatible bug fixes.
 
 
-## Unreleased
+## v0.351.1
 
 - fix: **the fleet subject's `STALE` limit covers a healthy long round.** `observed_period()` took the p90 of start-to-start arm gaps for every branch, but an arm gap is start-to-start, so a round's own duration sets a floor on it — a long healthy round therefore sat in the tail the p90 discards by construction and read `STALE`. The `fleet--` branch now takes the **maximum of its 12-arm window and a persisted high-water mark** (`.hwm` beside the `.arms`, written on every read), bounded at **2 × median** rather than `PERIOD_CAP` — a ring-recomputed maximum forgets a long gap within ~10 arms and the false `STALE` returns, which the mark prevents; every other branch keeps the p90, and a non-fleet subject's limit is byte-identical before and after. Measured 2026-11-18: one round ran **1355 s** start-to-start against a then-live **1157 s** limit (p90 977 + SLACK 180), so the false `STALE` reproduces. The fleet limit moved 1157 s → 1535 s on the ring that contained it, and the mark keeps it there once that gap ages out — synthetic proof: **1980 s with the mark, 1080 s without**, after a 3000 s gap is removed from the ring. `commands/fleet-loop.md` § Interval now states round duration as the binding constraint, not the declared interval, and the declared 900 s stays unraised. Change set: `scripts/manager-liveness.py`, `scripts/tests/test_manager_liveness.py`, `commands/fleet-loop.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 ## v0.351.0
