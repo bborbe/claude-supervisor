@@ -122,3 +122,28 @@ own execution rules.
 
 Carry a `CLOSERS` row only for sessions that also appear in the digest's
 `CLASSIFICATION` section; the digest's 41-line payload cap depends on that filter.
+
+## The hand-over split — agent-doable vs operator-only
+
+A `👤 You: you run: …` closer is a **hand-over**: the session says the next move lies
+outside itself. The `Stop` mirror (`~/.claude/hooks/attention-log.py`) mints such a
+closer as a `question` card carrying a fixed `done` / `not now` pair — but only for the
+hand-overs that are actually the operator's.
+
+The test is **"can an agent do this?"**:
+
+| class | the closer names | card |
+|---|---|---|
+| **agent-doable** | a shell command, a session action (close / restart / resume), or answering a card | **none** — report-only. A gated command is an `approve-run.py` card, never a `done` card |
+| **operator-only** | real-world physical work; communicating with people; an action with no command form (browser OAuth, Shift+Tab, `/reload-plugins`, `/exit`, powering a host); typing into a live pane | one `question` card with `done` / `not now` |
+
+⚠️ **Default is MINT.** An unrecognised hand-over is a real wait, and a stranded gate
+is the one cost this split must never buy. Only a closer that positively matches an
+agent-doable shape is suppressed.
+
+⚠️ **Pane typing is operator-only**, because closer text cannot distinguish a live pane
+from a dead one. A dead-pane card is retired by the session-death path, not here.
+
+⚠️ **The policy is the operator's, not this repository's.** The class table above is the
+generic neutral default. An operator-specific hand-over policy lives outside this repo
+and is read from the path in `CLOSER_HANDOVER_POLICY`; never commit one here.

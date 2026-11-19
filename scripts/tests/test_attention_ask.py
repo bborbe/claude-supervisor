@@ -1847,5 +1847,36 @@ class UrlopenContextWiringTest(unittest.TestCase):
         )
 
 
+class PaneAskRefusalTest(unittest.TestCase):
+    """A card that asks the operator to type into a pane is refused.
+
+    ⚠️ Both pane states refuse, and the refusal names the action the posting
+    session must take itself. A live pane is still not the operator's to poke —
+    the keystroke is the session's own (`wezterm cli send-text`) — and a dead
+    pane has nothing to poke at all. Measured 2026-11-19: a card carried
+    "you run: type anything in pane 229 and press Enter" for a pane that no
+    longer existed.
+    """
+
+    def test_refuses_type_anything_in_pane(self):
+        self.assertIsNotNone(ask.pane_ask_refusal(
+            "you run: type anything in pane 229 and press Enter"))
+
+    def test_refuses_type_something_into_pane(self):
+        self.assertIsNotNone(ask.pane_ask_refusal("type something into pane 12"))
+
+    def test_refusal_names_the_send_text_action(self):
+        refusal = ask.pane_ask_refusal("type something into pane 12")
+        self.assertIn("wezterm cli send-text --pane-id 12", refusal)
+
+    def test_refuses_the_same_instruction_in_the_context(self):
+        self.assertIsNotNone(
+            ask.pane_ask_refusal("do the thing", "type this in pane 5"))
+
+    def test_allows_an_ordinary_card(self):
+        self.assertIsNone(ask.pane_ask_refusal("Approve the dev deploy?"))
+        self.assertIsNone(ask.pane_ask_refusal("", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
