@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.1
 
 - refactor: **the session-ownership predicates live in their own module, so `gate-owner-filter.py` can be deleted.** `load_ledger_checked`, `load_claims` and `is_manager` moved out of the script into `scripts/session-ownership.py`, with their docstrings verbatim, and both callers now import it — `adopt-orphans.py` previously imported the script itself, which was the only thing preventing its deletion. ⚠️ The distinction the move exists to protect is preserved: `load_ledger_checked` returns `None` for "could not read" and `{}` for "read, nobody recorded", and the two callers need opposite answers — the filter fails OPEN on `None` (keeps every gate), `adopt-orphans.py` must refuse. Collapsing them would turn a dead controller into "no spawns ever", silently. `_Unreadable` was deliberately left in the filter: it belongs to `route_to_fleet`, not to the three functions, so moving it would have broken that caller.
 
