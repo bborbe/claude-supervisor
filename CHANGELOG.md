@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.351.0
 
 - fix: **a goal manager whose declaring topic manager is dead or `cannot-tell` now has a keeper.** It was nobody's population: `topicless-goal-keepalive.py`'s guard skipped any goal a topic declared, and `topic-keepalive.py` returned `cannot-tell` for the topic manager and acted on nothing, so the whole subtree was unkept indefinitely (measured 2026-11-18 on private-personal: `selected=22 actionable=0`). The fleet tier now takes it (operator ruling, Option A) — `fleet_keeps` gains `unkept_topics`, the leg probes each declaring topic and prefixes the row's reason with `declaring topic <name> reads <verdict>`. ⚠️ **The race that exception opens is the reason this ships with a guard, not after one:** the existing checks refuse a LIVE session and a spent cap, and neither refuses two writers that both read `ABSENT` for one `claude_session_id` before the first resume registers. `topic-keepalive.py` therefore gains an `O_EXCL` claim — `--claim-resume <id>` for the actor, `claim_state` (read-only) for the deciding probe, released by `--record-resume` and expiring after `CLAIM_TTL` — so exactly one writer resumes. Change set: `scripts/topic-keepalive.py`, `scripts/topicless-goal-keepalive.py`, `scripts/crashed-managers.py`, `scripts/tests/test_topic_keepalive.py`, `scripts/tests/test_topicless_goal_keepalive.py`, `agents/fleet-keepalive-actor.md`, `commands/steps/keepalive-topicless-goals.md`, `docs/session-tiers.md`, `CHANGELOG.md`.
 
