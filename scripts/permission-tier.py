@@ -378,15 +378,24 @@ _PROD_PATH = re.compile(r"(^|[/~])[\w.-]*-prod(/|$)")
 _PROD_WRAPPERS = {"kubectlprod", "kubectlnukeprod", "kubectlsmallprod"}
 _DEV_WRAPPERS = {"kubectlnukedev", "kubectldev", "kubectlsmalldev", "kubectlquant", "kubectlhell",
                  "kubectlsun", "kubectlstaging"}
+# ⚠️ A credential path is `secret` wherever a token names it — a `cat`/`head`/`ls` allowlist entry
+# must never be the tier of a read aimed at one. Measured 2026-11-18: `cat ~/.claude/.credentials.json`,
+# `head ~/.teamvault.json` and `ls ~/Library/Keychains` all classified `allowlist`, and the server
+# wrapper (`server/permission-tier.mjs`) asks this same pattern, so the goal-wrangler auto-allowed
+# them as class B. The directory forms match the directory itself as well as anything under it.
 _SECRET_PATH = re.compile(
-    r"(^|[/~\s=])(\.ssh(/|$)|\.netrc\b|\.aws(/|$)|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
-    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg(/|$)|\.vault-token\b|application_default_credentials\.json|\.(bash|zsh|sh)_history\b|^/proc/|/proc/\d+/environ)")
+    r"(^|[/~\s=])(\.ssh(/|$)|\.netrc\b|\.aws(/|$)|\.config/gh(/|\b|$)|\.kube(/|$)|\.env[\w.-]*$|\.env\b|"
+    r"id_[A-Za-z0-9_-]+(\.pub)?$|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg(/|$)|"
+    r"\.vault-token\b|application_default_credentials\.json|\.(bash|zsh|sh)_history\b|^/proc/|/proc/\d+/environ|"
+    r"\.credentials\.json\b|\.teamvault\.json\b|Library/Keychains(/|\b|$)|\.claude\.json\b)"
+    r"|[\w-]\.(pem|key)$|[\w-]\.(pem|key)\b(?![.\w-]*/)")
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
 _SECRET_FILES = ("~/.netrc", "~/.pgpass", "~/.git-credentials", "~/.ssh/id_rsa", "~/.ssh/id_ed25519", "~/.ssh/id_ecdsa",
                  "~/.aws/credentials", "~/.kube/config", "~/.docker/config.json", "~/.npmrc", ".env", "~/.pypirc",
-                 "~/.vault-token", "~/.config/gh/hosts.yml", "~/.config/gcloud/application_default_credentials.json")
+                 "~/.vault-token", "~/.config/gh/hosts.yml", "~/.config/gcloud/application_default_credentials.json",
+                 "~/.claude/.credentials.json", "~/.teamvault.json", "~/Library/Keychains", "~/.gnupg", "~/.kube")
 
 
 def _glob_hits_secret(arg):
@@ -544,11 +553,62 @@ def _kubectl(env, argv):
     return None
 
 
+# `~/.claude` named AS A DIRECTORY: it holds `.credentials.json`, so listing or reading it as a
+# whole is a credential read. Matched only as an argument of a non-`cd` command — `cd ~/.claude &&
+# make update` moves the shell, it reads nothing (`bad-example-2-make-update` pins that).
+_CLAUDE_DIR = re.compile(r"^(~[^/]*|\$HOME|\$\{HOME\}|/Users/[^/]+|/home/[^/]+|/root)/\.claude/?$")
+_NO_READ_HEADS = {"cd", "pushd", "popd"}
+
+# ⚠️ `~[^/]*`, not `~`: `~bborbe`, `~root`, `~+` and `~-` are all tilde words the shell expands
+# to a home (or a cwd), so each counts as home here. Measured 2026-11-19: `grep -rh token ~bborbe`
+# was `allowlist` while `grep -rh token ~` was `secret`.
+# A directory whose WHOLE-TREE read reaches a credential: home itself, an ancestor of home, or a
+# directory that contains one of the credential paths above.
+_BROAD_DIR = re.compile(
+    r"^(/|/Users|/home|/root|~[^/]*|\$HOME|\$\{HOME\}|/Users/[^/]+|/home/[^/]+)/?$"
+    r"|^(~[^/]*|\$HOME|\$\{HOME\}|/Users/[^/]+|/home/[^/]+|/root)/(\.claude|\.config|Library|\.local|\.local/share)/?$")
+# Readers that walk a tree by default, and readers that do so under a recursive flag.
+_TREE_READERS = {"find", "du", "tree", "rg", "ag", "ack", "fd", "fdfind", "locate", "mdfind"}
+_GREPS = {"grep", "egrep", "fgrep", "zgrep"}
+_GLOB_READERS = {"cat", "head", "tail", "less", "more", "strings", "xxd", "od", "hexdump", "grep",
+                 "egrep", "fgrep", "jq", "wc", "file", "bat"}
+
+
+def _whole_tree_read(name, rest):
+    """True when the command reads a broad directory recursively, or globs into one.
+
+    ⚠️ A recursive read of `~` reaches every credential file under it, so no single path in the
+    command names a secret and the per-token check above cannot fire: `grep -rh token ~` was
+    `allowlist` until 2026-11-18 (`grep` is an entry), and the goal-wrangler would have allowed it.
+    """
+    operands = [x for x in rest if not x.startswith("-")]
+    if name in _TREE_READERS:
+        # A search with no path walks the cwd, which this classifier cannot see; the caller's
+        # rubric confines it (a worker's cwd is its worktree), so only a NAMED broad path counts.
+        return any(_BROAD_DIR.match(x) for x in operands)
+    recursive = any(re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", x) or x in ("--recursive", "--dereference-recursive")
+                    or x.startswith("--directories=recurse") for x in rest)
+    if name in _GREPS and recursive:
+        return any(_BROAD_DIR.match(x) for x in operands)
+    if name == "ls" and recursive:
+        return any(_BROAD_DIR.match(x) for x in operands) or not operands
+    if name in _GLOB_READERS:
+        for x in operands:
+            m = re.search(r"[*?\[]", x)
+            if m and _BROAD_DIR.match(os.path.dirname(x[:m.start()] + "x") or "/"):
+                return True
+    return False
+
+
 def _files(env, argv):
     if not argv:
         return None
     name = os.path.basename(argv[0])
     rest = argv[1:]
+    if _whole_tree_read(name, rest):
+        return "secret"
+    if name not in _NO_READ_HEADS and any(_CLAUDE_DIR.match(x) for x in rest):
+        return "secret"
     if name == "rm":
         targets = [x for x in rest if not x.startswith("-")]
         if not targets or not all(t.startswith(("/tmp/", "/private/tmp/")) and ".." not in t
@@ -671,7 +731,8 @@ _TEXT_FORMS = (
     ("force-push/ref-delete", re.compile(r"git\s+push\b[^\n]*\s(--force\b|-f\b|--delete\b|--mirror\b)")),
     ("merge-to-protected", re.compile(r"gh\s+(-R\s+\S+\s+)?pr\s+merge\b")),
     ("prod", re.compile(r"BRANCH=prod\b|kubectl(nuke|small)?prod\b|nuke-deploy\s+prod\b")),
-    ("secret", re.compile(r"\.netrc\b|\.ssh/|id_rsa\b|\.aws/credentials|security\s+find-\w*-password")),
+    ("secret", re.compile(r"\.netrc\b|\.ssh/|id_rsa\b|\.aws/credentials|security\s+find-\w*-password|"
+                          r"\.credentials\.json\b|\.teamvault\.json\b|Library/Keychains|\.claude\.json\b")),
     ("publish", re.compile(r"gog\s+(gmail|chat)\b[^\n]*\bsend\b|gh\s+release\s+create\b|npm\s+publish\b|docker\s+push\b")),
     ("live-trade", re.compile(r"\btrade-(create|close|modify)\b|trading-api-write")),
 )
