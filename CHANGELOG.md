@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.4
 
 - fix: **the closer gate counts a local liveness probe and a task-field read as durable observables.** `session_bound_class()` checks `DURABLE` first, so a session-bound word in the `(mechanism, id)` slot — which CLAUDE.md § Async State Closer *requires* — only decides the outcome when no durable arm matched; neither probe had one, so both compliant closers were blocked. Measured 2026-11-19 in the Fleet Manager session: a `session-liveness.py --check <uuid>` observable blocked as `run-in-background-shell`, and a `vault-cli task get "<task>" claude_session_id` observable blocked as `background-sub-agent`. Two arms added — the liveness one needs the probe name AND a full 36-char uuid (an 8-char prefix is not re-probeable), the task one is keyed to a known field name so `task get "<title>" prints execution` still blocks. The `(mechanism, id)` slot is **not** stripped: that was the rejected fix, and it would newly allow a closer whose only observable is a background shell. Change set: `scripts/closer-gate-lint.py`, `scripts/tests/test_closer_gate_lint.py`, `CHANGELOG.md`.
 
