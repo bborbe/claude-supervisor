@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`commands/steps/worker-channels.md` no longer has the delegate answering in the operator's voice.** PR 5 of the seven-PR lever-(b) order. The step runs in `supervisor:fleet-round` (router row 7); its first table row told the caller to answer a headless park with `message="Operator answer, via supervisor: <option>"` — **a provenance act `agents/fleet-round.md`'s `<role>` explicitly forbids a delegate to take.** That row is now a **route**: the delegate renders the question and its options, and the manager's row 11 answers. ⚠️ **A park belonging to another manager routes to that manager** (`commands/steps/rules.md`), which is a different destination from the operator's question — the earlier lever-(b) attempt conflated the two. The delegate still answers its **own** workers (row 5d) and still holds `answer_permission` for that. Change set: `commands/steps/worker-channels.md`, `CHANGELOG.md`.
+
 ## v0.352.9
 
 - fix: **`commands/steps/escalate.md` routes its blocked set to the manager's row 11 instead of putting its own `AskUserQuestion`.** PR 4 of the seven-PR lever-(b) order. The step runs in `supervisor:fleet-round` (router row 10), and **a headless delegate cannot put an `AskUserQuestion`** — it would park with nobody to answer, the same reason row 11 stayed with the manager. The blocked-set bullet now says so: the delegate renders the material and routes it, and row 11 owns the ONE ask (up to 4) with its `asked-ledger` claim. ⚠️ **The old wording was satisfiable only while the manager ran this row**, which is exactly the kind of seam that made the two earlier lever-(b) attempts fail after the row moved. Change set: `commands/steps/escalate.md`, `CHANGELOG.md`.
