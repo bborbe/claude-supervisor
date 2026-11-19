@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.5
 
 - fix: **the goal closure reader names its basis and reads the goal's own recorded measurement, so a goal whose boxes are ticked but whose measurement misses a bar no longer reads a bare `CLOSE`.** `goal-closure-read.py` decided from checkbox counts alone — measured 2026-11-19: `24 Goals/PR Reviews Return a Verdict Within Minutes, Not Hours.md` read `VERDICT: CLOSE` with seven ticked SCs while its first single-window read missed three of them, and it flipped to `OPEN` the moment a box was un-ticked, with no measurement read at all. The reader now parses an optional `## Final measurement` block (`- SC1 bar = … measured = … verdict = MET|NOT MET`) and prints `VERDICT: CLOSE|OPEN (basis: boxes|measurement)`; a recorded `NOT MET` reads `OPEN (basis: measurement)` whatever the boxes say, and a block present but unparseable, empty, or missing a criterion id the page's SCs carry fails closed to `OPEN (basis: measurement)`. ⚠️ **The reader still never measures** — it parses what the page records, and a page with no block keeps `CLOSE (basis: boxes)`. Change set: `scripts/goal-closure-read.py`, `scripts/tests/test_goal_closure_read.py`, `CHANGELOG.md`.
 
