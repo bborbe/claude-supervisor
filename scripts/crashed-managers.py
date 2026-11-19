@@ -398,7 +398,7 @@ def fleet_keeps(vault: str, goal_name: str, goals_dir: str | None = None,
 
     True for a goal page at `status: in_progress` + `phase: execution`, carrying a
     `claude_session_id`, that no topic page declares (`commands/steps/keepalive.md`
-    § Restart a lapsed goal manager whose goal no topic declares) — **or** that a topic
+    § Restart an unkept lapsed goal manager) — **or** that a topic
     declares while every declaring topic is named in `unkept_topics`.
 
     ⚠️ **`unkept_topics` is the one exception to "a declared goal is never selected", and it

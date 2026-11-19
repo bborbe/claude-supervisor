@@ -190,7 +190,7 @@ installing task reads it. Format, not-run form and the dead-worker floor: **sing
 must land in the digest, which outlives the round** — a count spoken into chat and nowhere else
 dies with the round.
 
-## 1b. Restart a lapsed goal manager whose goal no topic declares or whose topic is unkept
+## 1b. Restart an unkept lapsed goal manager
 
 Read `<plugin root>/commands/steps/keepalive-topicless-goals.md` (absolute; never search for it) and run it.
 
