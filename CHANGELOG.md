@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.350.3
 
 - fix: **the decision-park leg fires for a re-approved row.** `vault-cli task approve` preserves `approved_at` on a re-approval, so a row the operator re-approved to clear a wait carried a stamp older than the worker's last turn and kind (a) could never fire — the wait was real, recent, and invisible. The leg now compares `reapproved_at` when present and keeps the preserved `approved_at` as the fallback, so a row that was never re-approved still emits nothing.
 
