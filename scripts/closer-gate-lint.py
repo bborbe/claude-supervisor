@@ -128,6 +128,11 @@ DECISION_ALLOW, DECISION_BLOCK = "allow", "block"
 # again on the continued turn's `Stop`. Bounded — see `_retry_verdict`.
 RETRY_REASON = "blocked-retry"
 
+# ⚠️ Sentinel for "this record predates the `ends` field". A pre-fix record carries no
+# `ends`, and comparing its `None` against a real line would read as CHANGED and release a
+# closer that was never corrected. Absent means "cannot tell" — fall back to `closer` alone.
+NO_ENDS = object()
+
 # `approve:` / `review:` are the two gate verbs the closer contract defines. `you run:` is
 # deliberately not here — a command the operator must execute is not a step the model may
 # simply perform.
@@ -402,6 +407,26 @@ DURABLE = (
         r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
         r"|\b(?:files?|mtime)\b", re.IGNORECASE)),
     ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
+    # ⚠️ Two LOCAL probes, each re-runnable after the session ends — the closer
+    # contract's own test. Measured 2026-11-19 in the Fleet Manager session: both were
+    # blocked, and the session-bound word that decided each one was the
+    # `(mechanism, id)` slot CLAUDE.md § Async State Closer REQUIRES. Neither is a
+    # loosening: a background shell dies with the session, which is why it still blocks
+    # (`test_a_non_durable_observable_is_still_blocked_by_its_slot`).
+    #
+    # The liveness arm needs BOTH halves — the probe name and a full uuid. An 8-char
+    # prefix is not re-probeable (`commands/open.md` refuses one as `❌ TRUNCATED ID`),
+    # and a uuid with no probe names nothing to re-run.
+    ("liveness-probe", re.compile(
+        r"\bsession-liveness\.py\b[^\n]*?"
+        r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", re.IGNORECASE)),
+    # The task-field arm is keyed to a KNOWN field name, never to "any trailing token":
+    # `task get "<title>" prints execution` is a statement, not a field read, and a
+    # looser pattern would clear it. Extend this list when a new field becomes load-bearing.
+    ("task-field-read", re.compile(
+        r"\bvault-cli\b[^\n]*?\btask\s+get\b[^\n]*?[\"'][^\"']+[\"']\s+"
+        r"(?:phase|status|assignee|claude_session_id|task_identifier|defer_date|due_date"
+        r"|priority|category|mode|role|flag|title)\b", re.IGNORECASE)),
     ("clock", re.compile(
         r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}"
         r"(?:[Tt ]\d{2}(?::\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?"
@@ -703,6 +728,14 @@ def _retry_verdict(payload, environ, verdict, card_probe=None):
         return verdict(0, "stop-hook-active", closer=closer)
     if previous.get("closer") != closer:
         return verdict(0, "stop-hook-active", closer=closer)
+    # ⚠️ The observable is part of "unchanged", not decoration. A continued turn that keeps
+    # `👤 You:` byte-identical and fixes ONLY its `⏰ Ends:` line has done the work the block
+    # asked for; comparing `closer` alone re-blocked it and left a cosmetic reword of a
+    # correct line as the only escape. Absent `ends` on an older record means "cannot tell"
+    # — never "changed" — so the pre-fix behaviour is preserved there.
+    prev_ends = previous.get("ends", NO_ENDS)
+    if prev_ends is not NO_ENDS and prev_ends != record.get("ends"):
+        return verdict(0, "stop-hook-active", closer=closer)
     code2, _unused, retry = verdict(2, RETRY_REASON, verb=record.get("verb"),
                                     matched=record.get("matched"), closer=closer,
                                     cls=record.get("class"), phrase=record.get("phrase"))
@@ -727,6 +760,9 @@ def evaluate(payload, environ=None, card_probe=None):
     """
     environ = os.environ if environ is None else environ
     session_id = payload.get("session_id") if isinstance(payload, dict) else None
+    # ⚠️ Bound BEFORE `verdict` is defined: the early returns (kill switch, no transcript
+    # path) run before the scan, and a closure read of an unassigned name raises NameError.
+    ends = None
 
     def verdict(code, reason, verb=None, matched=None, closer=None, cls=None, phrase=None):
         return code, _message(reason, verb, matched) if code else "", {
@@ -737,6 +773,11 @@ def evaluate(payload, environ=None, card_probe=None):
             "verb": verb,
             "matched": matched,
             "closer": (closer or "")[:200] or None,
+            # ⚠️ Recorded so the retry branch can tell a CORRECTED `⏰ Ends:` from a
+            # re-emitted one. Without it a continued turn that fixes only its observable
+            # compares equal on `closer` and is re-blocked as `blocked-retry` — the fix
+            # reads as invisible and the only escape is rewording a line that was right.
+            "ends": (ends or "")[:200] or None,
             "class": cls,
             "phrase": (phrase or "")[:200] or None,
         }

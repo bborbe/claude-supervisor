@@ -636,6 +636,82 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("stop-hook-active", record["reason"])
 
+    def _retry_transcript(self, you_text, ends_text=None):
+        """One assistant message carrying `👤 You:` and, optionally, an `⏰ Ends:` line."""
+        lines = ["🟢 ACTIVE · nothing running"]
+        if ends_text is not None:
+            lines.append("⏰ Ends:   " + ends_text)
+        lines.append("👤 You: " + you_text)
+        path = os.path.join(self.dir, "retry.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "type": "assistant", "timestamp": "2026-11-05T20:00:00Z",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "\n".join(lines)}]}}) + "\n")
+        return path
+
+    def _blocked_then_retry(self, you_text, first_ends, retry_ends):
+        env = {self.mod.STATE_DIR_ENV: self.dir}
+        first = self.mod.evaluate(
+            {"transcript_path": self._retry_transcript(you_text, first_ends),
+             "stop_hook_active": False, "session_id": "test-session"}, environ=env)
+        self.assertEqual(2, first[0], "the first stop must block, or the retry is not reached")
+        self.mod.write_record(first[2], directory=self.dir)
+        return self.mod.evaluate(
+            {"transcript_path": self._retry_transcript(you_text, retry_ends),
+             "stop_hook_active": True, "session_id": "test-session"}, environ=env)
+
+    def test_a_changed_ends_line_on_the_retry_is_allowed(self):
+        # ⚠️ The observable is part of "unchanged", not decoration. A continued turn
+        # that keeps `👤 You:` byte-identical and fixes ONLY its `⏰ Ends:` line has done
+        # what the block asked for; comparing `closer` alone re-blocked it, and the only
+        # escape left was rewording a line that was already correct.
+        code, _text, record = self._blocked_then_retry(
+            "approve: `gh -R Seibert-Data/shared pr ready 24` then `/github-pr-review-trigger 24`",
+            "a background shell dies with the turn",
+            # ⚠️ An absolute path, not a `~` one: the fixture only needs the `file` arm to
+            # match, and a home-directory path in test data reads as a machine-local
+            # reference to the self-containment rule.
+            "`/tmp/state/probe.json` is written")
+        self.assertEqual(0, code, "a corrected Ends line must release the retry")
+        self.assertEqual("stop-hook-active", record["reason"])
+
+    def test_a_changed_ends_retry_reports_the_current_reason(self):
+        # ⚠️ Whatever this stop emits is built from the CURRENT evaluation, never the
+        # previous stop's. The previous complaint (`session-bound-ends`, whose wording names
+        # `run-in-background-shell`) must not be re-printed on a retry that changed its
+        # observable — re-printing it is what made a correct fix look unheeded.
+        #
+        # ⚠️ The exit code is deliberately NOT asserted. With the fix a changed Ends line is
+        # RELEASED, so `text` is empty and the property holds trivially; without it the retry
+        # is blocked and the property STILL holds, because `_retry_message()` is handed the
+        # current evaluation's text — this pins that property rather than driving a second
+        # code path, which is what the property already did before the retry fix.
+        _code, text, _record = self._blocked_then_retry(
+            "approve: `gh -R Seibert-Data/shared pr ready 24` then `/github-pr-review-trigger 24`",
+            "a background shell dies with the turn",
+            "PR #9999 in bborbe/nope")
+        self.assertNotIn("run-in-background-shell", text)
+        self.assertNotIn("dies with the turn", text)
+
+    def test_the_block_record_carries_the_ends_it_judged(self):
+        # ⚠️ The comparison is possible only because the record carries the line it
+        # decided on, and it comes from the SAME single scan `evaluate` already performs —
+        # no second transcript read is introduced.
+        path = self._retry_transcript(
+            "approve: `gh -R Seibert-Data/shared pr ready 24`",
+            "a background shell dies with the turn")
+        code, _text, record = self.mod.evaluate(
+            {"transcript_path": path, "stop_hook_active": False,
+             "session_id": "test-session"}, environ={})
+        self.assertEqual(2, code)
+        self.assertIn("a background shell dies with the turn", record["ends"])
+
+        # A closer with no Ends line records `None`, so "cannot tell" stays distinguishable
+        # from "the line was corrected".
+        _code, _text, no_ends = self._closer("approve: `gh pr ready 24`")
+        self.assertIsNone(no_ends["ends"])
+
     def test_kill_switch_allows(self):
         code, _text, record = self.mod.evaluate(
             self.payload("01-github-pr-watch.jsonl"),
@@ -716,6 +792,69 @@ class CloserGateLintTest(unittest.TestCase):
                 self.assertEqual("", text)
                 self.assertIsNone(record["class"])
                 self.assertIsNone(record["phrase"])
+
+    def test_a_liveness_probe_on_a_full_session_id_is_durable(self):
+        # Measured 2026-11-19 in the Fleet Manager session: the lint blocked this
+        # compliant line as `run-in-background-shell`. No DURABLE arm covered a local
+        # probe, so the `(background shell …)` mechanism slot — which CLAUDE.md
+        # § Async State Closer REQUIRES — decided the outcome. The probe is re-runnable
+        # after the session ends, which is the closer contract's own test.
+        for body in (
+            "⏰ Ends:   `session-liveness.py --check 345a6131-f063-45bf-a2fb-7caba6718425`"
+            " reads LIVE (background shell bnu7e6xx6)",
+            "⏰ Ends:   `session-liveness.py --check` reads LIVE for"
+            " `345a6131-f063-45bf-a2fb-7caba6718425` and"
+            " `49b471f1-a8a6-48b0-b2b2-14b9cb2437e3` (background shell bnu7e6xx6)",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.session_bound_class(body))
+        # The other half, and the guard against a permissive fix: the arm keys on the
+        # probe AND a full uuid, so either half alone still blocks.
+        for body in (
+            # an 8-char prefix is not re-probeable (`/supervisor:open` refuses it)
+            "⏰ Ends:   `session-liveness.py --check 345a6131` reads LIVE"
+            " (background shell bnu7e6xx6)",
+            # the same uuid against a non-probe script
+            "⏰ Ends:   `foo.py --check 345a6131-f063-45bf-a2fb-7caba6718425` reads LIVE"
+            " (background shell bnu7e6xx6)",
+            # the probe with no id at all
+            "⏰ Ends:   `session-liveness.py --check` reads LIVE"
+            " (background shell bnu7e6xx6)",
+            # a uuid with no probe name
+            "⏰ Ends:   345a6131-f063-45bf-a2fb-7caba6718425 is the id"
+            " (background shell bnu7e6xx6)",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual("run-in-background-shell",
+                                 self.mod.session_bound_class(body))
+
+    def test_a_vault_cli_task_field_read_is_durable(self):
+        # Second measured repro, same run: a task-file field stays readable after the
+        # session ends, so it is durable — but the `(sub-agent spawn)` slot matched
+        # `background-sub-agent` and no DURABLE arm covered the read.
+        for body in (
+            '⏰ Ends:   vault-cli --vault private-personal task get'
+            ' "A Manager Is Never Headless and Arms Its Own Loop on Resume"'
+            " claude_session_id is non-empty (sub-agent spawn)",
+            '⏰ Ends:   `vault-cli task get "Some Task" phase` prints execution'
+            " (background shell bnu7e6xx6)",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.session_bound_class(body))
+        # A bare `task get` names no field, so it re-reads nothing observable.
+        self.assertEqual("background-sub-agent", self.mod.session_bound_class(
+            '⏰ Ends:   vault-cli task get "Some Task" prints execution'
+            " (sub-agent spawn)"))
+
+    def test_a_non_durable_observable_is_still_blocked_by_its_slot(self):
+        # ⚠️ The regression guard for the durable-first ordering, NOT a discriminator for
+        # the new arms — it passes before and after. A background shell dies with the
+        # session, so the slot decides; that is exactly why stripping the parenthetical
+        # (the rejected fix) would newly allow this line.
+        self.assertEqual("run-in-background-shell", self.mod.session_bound_class(
+            "⏰ Ends: the background shell finishes (background shell bnu7e6xx6)"))
+        self.assertIsNone(self.mod.session_bound_class(
+            "⏰ Ends:   `/tmp/x.log` exists (background shell bnu7e6xx6)"))
 
     def test_an_unqualified_pr_reference_is_blocked(self):
         # ⚠️ Both recorded bare shapes, verbatim: `PR #516` and `PR 738` (no hash). A
