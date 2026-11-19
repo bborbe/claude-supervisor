@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.12
 
 - fix: **the round delegate is granted `Skill`, so row 8's step file is runnable once the row moves.** PR 6 of the seven-PR lever-(b) order. `commands/steps/open-items.md` says the open-items ledger is read and written **only** through the `supervisor:open-items` skill, and the delegate's `tools:` omitted `Skill` — so row 8 would have been **inert by construction** the moment it moved: the delegate's own `<error_handling>` says a row needing a tool outside `allowed-tools` must be reported and stopped. `Skill` is now granted and the step file records why. ⚠️ **Row 8 has NOT moved yet** — the router, `round-dispatch.md` and the agent's own run table still assign it to the manager; the move is its own PR, after all seven step files are ready. This one makes the step runnable, not live. ⚠️ **Same class as the two withdrawn attempts:** a row cannot move until its step file stops assuming the manager's capabilities — and conversely, rewriting the step file alone moves nothing. Change set: `agents/fleet-round.md`, `commands/steps/open-items.md`, `CHANGELOG.md`.
 
