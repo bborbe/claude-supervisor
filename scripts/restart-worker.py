@@ -1696,8 +1696,9 @@ def resume_absent(sid, sessions_dir, dry_run):
     # `--absent` only ever resumes a manager, so its loop command always rides the
     # resume prompt — the pane wake cannot be relied on to arm it (see
     # `manager_loop_prompt`).
+    loop_prompt = manager_loop_prompt(branch, subject)
     argv = resume_command(sid, subject, chip, cwd, launcher,
-                          resume_prompt=manager_loop_prompt(branch, subject))
+                          resume_prompt=loop_prompt)
     argv[0] = wezterm
     try:
         spawned = subprocess.run(argv, capture_output=True, text=True, timeout=30)
@@ -1715,9 +1716,32 @@ def resume_absent(sid, sessions_dir, dry_run):
     pane = (spawned.stdout or "").strip().splitlines()
     print(f"   ✅ resumed session {sid} in a new tab (pane {pane[-1] if pane else '?'}); "
           "nothing was signalled")
-    print("   ↪ manager: its loop was ARMED by the resume prompt "
-          "(`/supervisor:fleet-loop`) — no second re-arm is needed")
+    print(f"   ↪ manager: its loop was ARMED by the resume prompt "
+          f"(`{loop_prompt}`) — no second re-arm is needed")
     return 0
+
+
+def print_manager_arming(resume_prompt, changed):
+    """Report how a resumed manager's loop will be armed — or that it will not.
+
+    An unresolved subject resumes on the `/color` fallback, so the report must say the
+    loop is NOT armed. Claiming it was contradicts the stderr warning that precedes the
+    spawn and talks the operator out of the hand re-arm the session actually needs
+    (measured 2026-11-19, review round 3 on claude-supervisor#1011).
+    """
+    if resume_prompt:
+        print(
+            "   ↪ manager: its loop was ARMED by the resume prompt "
+            f"(`{resume_prompt}`) — do NOT type a second re-arm. Tell it what changed: "
+            f"{describe_changed(changed)}"
+        )
+        return
+    print(
+        "   ↪ manager: its loop was NOT armed (subject unresolved) — re-arm it by "
+        "hand (`/supervisor:goal-loop <subject>` or "
+        "`/supervisor:topic-loop <subject>`). Tell it what changed: "
+        f"{describe_changed(changed)}"
+    )
 
 
 def main():
@@ -2076,11 +2100,7 @@ def main():
         f"(pane {pane[-1] if pane else '?'})"
     )
     if role == "manager":
-        print(
-            "   ↪ manager: its loop was ARMED by the resume prompt "
-            f"(`{resume_prompt}`) — do NOT type a second re-arm. Tell it what changed: "
-            f"{describe_changed(changed)}"
-        )
+        print_manager_arming(resume_prompt, changed)
     else:
         print(
             f"   ↪ tell the resumed session it was restarted, and what changed: {describe_changed(changed)}"
