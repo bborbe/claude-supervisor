@@ -312,18 +312,17 @@ turn opening *"The operator answered on the attention board."* with `allow` as t
 were carried by `watcher:attention-watcher` and 4 by `claude-wrapper:board`. The verdict is right
 either way; the attribution in that turn is the controller's to fix.
 
-## A worker's closer pick — the second row the answerer takes (DISABLED)
+## A worker's closer pick — the second row the answerer takes
 
-⚠️ **Gated off: `PICK_ANSWERING_ENABLED = False` in `scripts/gate-answer-check.py`, which returns
-`skip` — `pick answering disabled until carriers render manager voice` — for every `message` card.**
-Every carrier that delivers a card answer renders it as the operator's: attention-controller's
-pane carrier types `Operator answer, via attention board:` (`pkg/pane-carrier.go`
-`deliverPrefix`), its headless arm opens *"The operator answered on the attention board."*
-(`pkg/headless-answer.go` `AnswerTurnText`), and claude-wrapper's message arm prefixes
-`Operator answer, via supervisor:` (`pkg/board.go` `messageAnswer`). A manager's pick would
-therefore reach the worker as the operator's own answer. Turn the flag on only after those three
-carriers render a manager's answer in its own voice. The row below is the design that flag
-enables, kept so it can be measured apart from the permission row when it ships.
+`PICK_ANSWERING_ENABLED = True` in `scripts/gate-answer-check.py` is the kill switch. The answer
+is posted with `answer.answerer: manager`, and every carrier that delivers a card answer reads it:
+attention-controller's pane carrier types `Manager answer, via supervisor: <label> [<id>]`
+(`pkg/pane-carrier.go`), its headless arm opens the resumed turn with the same prefix
+(`pkg/headless-answer.go` `AnswerTurnText`), and claude-wrapper's message arm delivers it under
+`Manager answer, via supervisor:` (`pkg/board.go` `messageAnswer`) — never in the operator's voice.
+⚠️ Those carriers need attention-controller v0.104+ and claude-wrapper v0.45+; an older carrier
+ignores the field and voices the answer as the operator's, so set the flag to `False` if either
+is rolled back.
 
 A separate row from the permission tiers above, so the two are measured apart: a permission
 answer is a `permission` card carrying `decision: allow`; a pick answer is a `message` card whose
@@ -344,18 +343,14 @@ pick whose producer is not a worker session, and any pick whose scope the answer
 a line of the task file. *Not scope-changing* means what rubric clause (c) above means, plus: it
 does not abort, complete, hold or defer the task.
 
-When enabled, the answer would go through the same store-card path — `gate-answer-check.py
---answer`, which re-checks and then runs `attention-answer.py answer <id> --answer-text "Manager
-answer, via supervisor: <label>" --answerer manager`. ⚠️ **Today that call is refused twice over:**
-`attention-answer.py` refuses `--answer-text` while `PICK_ANSWERING_ENABLED` is false, refuses
-`--answerer manager` and the `supervisor:gate-answerer` arm under any answerer (every carrier
-would voice the text as the operator's), and `--answerer` has no default. Enabling picks needs both
-the carrier fix and lifting that refusal. The attention-controller carries it (carrier
-`watcher:attention-watcher`: typed into a tab worker's pane, or a resumed turn into a headless
-one); measured 2026-11-18, of the store history's 21 answered pick cards 17 carry a `delivered`
-report from that carrier (1 `failed`, 3 none). ⚠️ **Known gap, outside this repo:** the controller's headless turn
-opens with *"The operator answered on the attention board."* (`pkg/headless-answer.go`
-`AnswerTurnText`) whoever answered. The answer line itself carries the manager prefix, so the
-provenance is still on the record; the header is the controller's to fix.
+The answer goes through the same store-card path — `gate-answer-check.py --answer`, which
+re-checks and then runs `attention-answer.py answer <id> --answer-text "Manager answer, via
+supervisor: <label>" --answerer manager`. `attention-answer.py` refuses `--answer-text` while
+`PICK_ANSWERING_ENABLED` is false, refuses any answerer other than `operator` / `manager`
+(`--answerer` has no default), and refuses the `supervisor:gate-answerer` arm unless it answers as
+`manager`. The attention-controller carries it (carrier `watcher:attention-watcher`: typed into a
+tab worker's pane, or a resumed turn into a headless one); measured 2026-11-18, of the store
+history's 21 answered pick cards 17 carry a `delivered` report from that carrier (1 `failed`, 3
+none).
 
 Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
