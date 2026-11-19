@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.354.0
 
 - feat: **`attention-answer.py dismiss ITEM_ID` retires a card without recording an answer.** `skip` was the only way to clear a card that asks nothing, and the store records it as a DECLINE the operator never gave; `dismiss` closes the item, stores no answer, and names the arm that closed it. `closed` is terminal, so a second dismiss exits non-zero rather than reading as a silent no-op. Change set: `scripts/attention-answer.py`, `scripts/tests/test_attention_answer.py`.
 - docs: **`docs/closer-classes.md` gains the hand-over split.** A `you run:` closer is a hand-over, but only some hand-overs are the operator's: an agent-doable one (a command, a session action, answering a card) mints no card, an operator-only one (chore, people-communication, no-command-form action, live-pane typing) still mints `done` / `not now`. Default is mint — a stranded gate is the cost the split must never buy. Operator-specific rows stay out of this repo and are read from `CLOSER_HANDOVER_POLICY`. Change set: `docs/closer-classes.md`.
