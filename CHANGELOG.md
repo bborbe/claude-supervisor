@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.10
 
 - fix: **`commands/steps/worker-channels.md` no longer has the delegate answering in the operator's voice.** PR 5 of the seven-PR lever-(b) order. The step runs in `supervisor:fleet-round` (router row 7); its first table row told the caller to answer a headless park with `message="Operator answer, via supervisor: <option>"` — **a provenance act `agents/fleet-round.md`'s `<role>` explicitly forbids a delegate to take.** That row is now a **route**: the delegate renders the question and its options, and the manager's row 11 answers. ⚠️ **A park belonging to another manager routes to that manager** (`commands/steps/rules.md`), which is a different destination from the operator's question — the earlier lever-(b) attempt conflated the two. The delegate still answers its **own** workers (row 5d) and still holds `answer_permission` for that. Change set: `commands/steps/worker-channels.md`, `CHANGELOG.md`.
 
