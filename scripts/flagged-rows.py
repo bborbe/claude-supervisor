@@ -61,6 +61,9 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROLE_MAP = os.path.expanduser("~/.cache/wezterm-role-map.json")
@@ -113,9 +116,10 @@ KIND_DIRS = (
     ("topic", "topics_dir", ("23 Topics", "Topics")),
 )
 
-#: `session-liveness.py --check` exit code → verdict. Five answers; an unanswerable
-#: probe is UNKNOWN, never folded into ABSENT.
-LIVENESS_EXIT = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
+#: The verdicts `liveness_of` can emit; `none` is the no-session-id case, added by
+#: callers. AMBIGUOUS and MALFORMED retired 2026-11-19 with the subprocess they
+#: decoded — the endpoint's answer is binary, so there is no third state to report.
+LIVENESS_VERDICTS = ("LIVE", "ABSENT", "UNKNOWN")
 
 FLEET = {"kind": "fleet", "name": "Fleet Manager"}
 
@@ -343,49 +347,81 @@ def template_role(text, template_root):
     return (role.group(1) if role else None), False
 
 
-#: `session-liveness.py --list` renders `<sid>  pid <pid>  <name>  [<transport>]`,
-#: optionally followed by `  DEGRADED (...)`. The name is the only field that can
-#: contain spaces, so it is captured between the age/pid field and the bracketed
-#: transport — never `parts[2]`, which is the literal word `pid`.
+#: The wrapper's authoritative per-session liveness route.
 #:
-#: ⚠️ Two field forms, not one: a registry session carries `pid <n>`, while an
-#: endpoint-only session (cluster, mcp-timer) has no pid and renders `age <n>s`.
-#: Matching only the `pid` form drops every endpoint-only manager, and a dropped
-#: manager reads as an absent one — the fold that makes `open-manager` fire.
-_LIVE_LINE = re.compile(
-    r"^(\S+)\s+(?:pid\s+\d+|age\s+\d+s)\s+(.*?)\s+\[[^\]]*\]")
+#: This replaced `session-liveness.py --list`/`--check`: the wrapper owns the
+#: registry, its own child table and the heartbeat store, so it is the single
+#: derivation. Overridable so a test can point the consumer at a stub — the
+#: follow-the-endpoint test is what proves this consumer reads it.
+WRAPPER_LIVENESS_URL = os.environ.get(
+    "WRAPPER_LIVENESS_URL", "http://127.0.0.1:18090/api/1.0/liveness")
+
+#: Bound on one endpoint read. The wrapper answers from its child table and the
+#: registry, both in-process, so a slow answer means the daemon is wedged.
+LIVENESS_TIMEOUT = 10
+
+#: One read per run, shared by every row and every probe thread.
+#:
+#: The endpoint returns EVERY session the daemon has ever seen (measured
+#: 2026-11-19: 1454 rows), so re-fetching per row would be a 1454-row payload per
+#: row. `read` distinguishes "not read yet" from "read, and it was None" — the
+#: latter must stay cached so a dead endpoint is not retried once per row.
+_liveness_cache = {"read": False, "rows": None}
+_liveness_lock = threading.Lock()
+
+
+def read_liveness():
+    """Every verdict the wrapper serves, or `None` when the read could not run.
+
+    ⚠️ `None` is "could not read it" and is never folded into `[]`: an empty list
+    is the positive claim "nothing is live", while an unreachable endpoint or a
+    non-200 is the probe failing to run. Collapsing the two turns an outage into a
+    confident "nothing is live", which is the direction that hides live workers.
+    """
+    with _liveness_lock:
+        if _liveness_cache["read"]:
+            return _liveness_cache["rows"]
+        rows = None
+        try:
+            with urllib.request.urlopen(WRAPPER_LIVENESS_URL, timeout=LIVENESS_TIMEOUT) as resp:
+                if resp.status == 200:
+                    body = json.loads(resp.read().decode("utf-8"))
+                    if isinstance(body, list):
+                        rows = [row for row in body if isinstance(row, dict)]
+        except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+            rows = None
+        _liveness_cache["read"] = True
+        _liveness_cache["rows"] = rows
+        return rows
 
 
 def live_sessions():
-    """`{sid: name}` for every registry-live session — or `None` when the probe failed.
+    """`{sid: name}` for every session the wrapper reports LIVE — or `None` on a failed read.
 
-    ⚠️ **`None` is not `{}`.** `session-liveness.py --list` exits 2 when the identity
-    registry is unreadable or the coverage measurement cannot be taken (UNKNOWN). An
-    empty dict is a fact — "this fleet has no live sessions"; `None` is the absence of
-    an answer. Folding the second into the first empties `managers`, so `subject_live`
-    returns False for every subject and every goal/topic row emits `open-manager` — a
-    duplicate-spawn hazard, and the exact fold `branch: unknown` exists to reject.
+    ⚠️ **`None` is not `{}`.** The wrapper's endpoint is the authority now; an
+    unreachable endpoint or a non-200 is the probe failing to run, and folding that
+    into "this fleet has no live sessions" empties `managers`, so `subject_live`
+    returns False for every subject and every goal/topic row emits `open-manager` —
+    a duplicate-spawn hazard. The old subprocess had the same distinction (exit 2 =
+    UNKNOWN); only the transport changed.
 
-    ⚠️ **Exit 0 is not sufficient either, and this is the 2026-11-18 addition.** When the
-    session-heartbeat endpoint is unreadable, `--list` exits 0 built from the identity
-    registry and the headless store — a list that structurally OMITS cluster and a2a
-    sessions, because they have no local pid and no registry entry. Reading that as a
-    complete fleet makes a live cluster manager read absent and emits `open-manager` against
-    it: the same duplicate-spawn hazard as a non-zero exit, arriving through exit 0. The
-    fallback announces itself on stderr, so that line is the signal.
+    ⚠️ **The name comes from the verdict itself.** `/api/1.0/liveness` carries `name`
+    (from the registry's tab title) since `bborbe/claude-wrapper#131`, so this no
+    longer needs `session-liveness.py --list` for the identity map. A child-table
+    verdict carries no name (the registry is the only source), so it contributes no
+    entry to the name set — which is correct: `live_session_names` skips empties, and
+    a name is an identity match, so inventing one would be a false match.
     """
-    out = subprocess.run([sys.executable, os.path.join(HERE, "session-liveness.py"),
-                          "--list"], capture_output=True, text=True, check=False)
-    if out.returncode != 0:
-        return None
-    if "WARNING — the session-heartbeat endpoint" in (out.stderr or ""):
-        # The registry fallback: omits cluster/a2a, so a no-match is not "not live".
+    verdicts = read_liveness()
+    if verdicts is None:
         return None
     sessions = {}
-    for line in out.stdout.splitlines():
-        match = _LIVE_LINE.match(line)
-        if match:
-            sessions[match.group(1)] = match.group(2).strip()
+    for verdict in verdicts:
+        if verdict.get("liveness") != "live":
+            continue
+        sid = verdict.get("session_id")
+        if sid:
+            sessions[sid] = (verdict.get("name") or "").strip()
     return sessions
 
 
@@ -426,34 +462,29 @@ def live_session_names(sessions):
     return names
 
 
-#: How long ONE helper subprocess may take before its answer is abandoned.
-#:
-#: ⚠️ **Bounded, and it was not.** `subprocess.run` with no `timeout` waits
-#: forever, so a single slow helper held the whole predicate. Measured
-#: 2026-11-16: a `flagged-rows.py` child of the daemon sat 11m49s in `poll()`
-#: waiting on one `pane_for` helper, the daemon's 25-minute bound SIGKILLed it,
-#: and the tick opened nothing — 28 of 64 ticks died that way that day.
-#:
-#: A helper that cannot answer inside this window is treated exactly as the
-#: reader already treats a store it could not read: `UNKNOWN` for liveness, no
-#: pane for `pane_of`. Never a hang, because a hang costs the whole tick while a
-#: missing answer costs one row's field.
-PROBE_TIMEOUT = 15
-
-
 def liveness_of(sid):
-    """`session-liveness.py --check` — the heartbeat endpoint, never the registry."""
+    """The wrapper's verdict for one session id — `LIVE` / `ABSENT` / `UNKNOWN`.
+
+    ⚠️ **A session the endpoint does not list reads UNKNOWN, never ABSENT.** The
+    endpoint returns every session the daemon has ever spawned (exited records are
+    kept), so a wrapper-spawned manager that died is still listed `not-live` and
+    reaches ABSENT. A session absent from the list is one this daemon never spawned —
+    a tab or a cluster manager — and the wrapper cannot prove it dead. ABSENT
+    licenses spawning a second session, so the answer for "not listed" is the one
+    that does not: UNKNOWN, which every caller treats as "keep the owner".
+
+    A failed read is also UNKNOWN — the same fold the old subprocess made when its
+    probe could not run.
+    """
     if not sid:
         return "none"
-    try:
-        out = subprocess.run(
-            [sys.executable, os.path.join(HERE, "session-liveness.py"), "--check", sid],
-            capture_output=True, text=True, check=False, timeout=PROBE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        print("flagged-rows: liveness probe for %s exceeded %ds — UNKNOWN"
-              % (sid, PROBE_TIMEOUT), file=sys.stderr)
+    verdicts = read_liveness()
+    if verdicts is None:
         return "UNKNOWN"
-    return LIVENESS_EXIT.get(out.returncode, "UNKNOWN")
+    for verdict in verdicts:
+        if verdict.get("session_id") == sid:
+            return "LIVE" if verdict.get("liveness") == "live" else "ABSENT"
+    return "UNKNOWN"
 
 
 #: Probes of one run execute at most this many at a time. Each probe is a Python

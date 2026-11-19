@@ -404,24 +404,25 @@ class DegradedOwner(unittest.TestCase):
 
 
 class ExitedSessionResumes(unittest.TestCase):
-    """An EXITED worker resolves to `resume`, end to end through the real liveness probe.
+    """An EXITED worker resolves to `resume`, end to end through the real liveness read.
 
-    Claude Code deletes the registry entry when a session exits, so the probe sees no entry
-    and only the heartbeat endpoint's record. After #952 that read UNKNOWN and every such row
-    was `degraded`; measured 2026-11-17, 21 of 21 flagged rows with a session, none `resume`.
-    The probe runs as a subprocess exactly as the daemon's tick runs it.
+    Claude Code deletes the registry entry when a session exits, so a registry-only
+    derivation sees nothing and reads UNKNOWN. The wrapper keeps the exited child in
+    its own table and reports it `not-live`, so the consumer reaches ABSENT and the
+    row resolves to `resume`. Measured 2026-11-17 under the old UNKNOWN: 21 of 21
+    flagged rows carried a session and none resolved to `resume`.
     """
 
     SID = "4b8275b0-1111-2222-3333-444455556666"
 
-    def probe(self, rows):
-        import endpoint_fixture
-        with tempfile.TemporaryDirectory() as registry, \
-                endpoint_fixture.FixtureEndpoint(rows) as fx, \
-                unittest.mock.patch.dict(os.environ, {
-                    "ATTENTION_STORE_URL": fx.url,
-                    "SUPERVISOR_SESSIONS_DIR": registry,
-                }):
+    def probe(self, verdicts):
+        resp = unittest.mock.MagicMock()
+        resp.status = 200
+        resp.read.return_value = json.dumps(verdicts).encode("utf-8")
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        fr._liveness_cache.update({"read": False, "rows": None})
+        with unittest.mock.patch.object(fr.urllib.request, "urlopen", return_value=resp):
             return fr.liveness_of(self.SID)
 
     def branch(self, live):
@@ -429,13 +430,14 @@ class ExitedSessionResumes(unittest.TestCase):
                                  page("role: agent"), owner=None, owner_live=None,
                                  registry_ok=True)
 
-    def test_an_exited_session_with_a_stale_record_resolves_to_resume(self):
-        import endpoint_fixture
-        live = self.probe([endpoint_fixture.row(self.SID, live=False, age_seconds=24646)])
+    def test_an_exited_session_with_a_not_live_verdict_resolves_to_resume(self):
+        live = self.probe([{"session_id": self.SID, "liveness": "not-live"}])
         self.assertEqual(live, "ABSENT")
         self.assertEqual(self.branch(live)[0], "resume")
 
-    def test_a_session_with_no_record_still_never_resumes(self):
+    def test_a_session_the_endpoint_does_not_list_never_resumes(self):
+        # Absent from the wrapper's list is a session it never spawned; it cannot be
+        # proven dead, so it must not license a resume.
         live = self.probe([])
         self.assertEqual(live, "UNKNOWN")
         self.assertNotEqual(self.branch(live)[0], "resume")
@@ -987,28 +989,43 @@ class BlockedBy(unittest.TestCase):
 
 
 class RegistryProbe(unittest.TestCase):
-    """A failed `--list` is not an empty fleet, and a `⚙ `-prefixed label is not absent.
+    """A failed endpoint read is not an empty fleet, and a `⚙ `-prefixed label is not absent.
 
     Both defects produce the same wrong branch — `open-manager` against a live manager
     — which is a duplicate-spawn hazard, so each direction is pinned separately.
     """
 
-    def test_a_failed_list_returns_none_not_an_empty_set(self):
-        with unittest.mock.patch.object(fr.subprocess, "run") as run:
-            run.return_value = unittest.mock.Mock(returncode=2, stdout="", stderr="x")
+    def _endpoint(self, body):
+        """Patch the wrapper's liveness route with a stub serving `body`."""
+        resp = unittest.mock.MagicMock()
+        resp.status = 200
+        resp.read.return_value = json.dumps(body).encode("utf-8")
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        return unittest.mock.patch.object(
+            fr.urllib.request, "urlopen", return_value=resp)
+
+    def _reset_cache(self):
+        fr._liveness_cache.update({"read": False, "rows": None})
+
+    def setUp(self):
+        self._reset_cache()
+
+    def test_a_failed_read_returns_none_not_an_empty_set(self):
+        with unittest.mock.patch.object(
+                fr.urllib.request, "urlopen", side_effect=fr.urllib.error.URLError("x")):
             self.assertIsNone(fr.live_sessions())
 
-    def test_a_successful_empty_list_returns_an_empty_dict(self):
-        with unittest.mock.patch.object(fr.subprocess, "run") as run:
-            run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+    def test_a_successful_empty_read_returns_an_empty_dict(self):
+        with self._endpoint([]):
             self.assertEqual(fr.live_sessions(), {})
 
-    def test_the_pid_and_age_field_forms_both_parse(self):
-        with unittest.mock.patch.object(fr.subprocess, "run") as run:
-            run.return_value = unittest.mock.Mock(
-                returncode=0, stderr="",
-                stdout="sid1  pid 42  A Goal Manager  [wezterm]\n"
-                       "sid2  age 30s  A Topic Manager  [endpoint]\n")
+    def test_a_live_verdict_carries_its_name(self):
+        with self._endpoint([
+            {"session_id": "sid1", "liveness": "live", "name": "A Goal Manager"},
+            {"session_id": "sid2", "liveness": "live", "name": "A Topic Manager"},
+            {"session_id": "sid3", "liveness": "not-live", "name": "Dead"},
+        ]):
             self.assertEqual(fr.live_sessions(),
                              {"sid1": "A Goal Manager", "sid2": "A Topic Manager"})
 
@@ -1271,19 +1288,14 @@ class ProbeTimeoutTest(unittest.TestCase):
 
     Measured 2026-11-16: an unbounded `pane_for` helper held the predicate in `poll()`
     for 11m49s until the daemon's 25-minute bound SIGKILLed it, and the tick opened
-    nothing. Each probe is now bounded by `PROBE_TIMEOUT`.
+    nothing. The liveness read is now one bounded endpoint call per run
+    (`LIVENESS_TIMEOUT`), and an unreadable endpoint reads UNKNOWN.
     """
 
     SID = "616a52dd-833b-475b-889f-ee1580c73c37"
 
-    def _hang(self, *args, **kwargs):
-        # A real hang would block the test; asserting the timeout is PASSED and then
-        # raising what `subprocess.run` raises when it expires covers both halves.
-        self.assertEqual(kwargs.get("timeout"), fr.PROBE_TIMEOUT)
-        raise fr.subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
-
     def test_a_hung_liveness_probe_reads_unknown(self):
-        with unittest.mock.patch.object(fr.subprocess, "run", side_effect=self._hang):
+        with unittest.mock.patch.object(fr, "read_liveness", return_value=None):
             self.assertEqual(fr.liveness_of(self.SID), "UNKNOWN")
 
     def test_a_hung_pane_list_reads_no_pane_and_is_read_once(self):
@@ -1353,9 +1365,9 @@ class ProbeTimeoutTest(unittest.TestCase):
         self.assertEqual(row["branch"], "jump")
 
     def test_the_bound_is_far_below_the_daemon_read_bound(self):
-        # The daemon kills a read at 25 minutes. A per-probe bound near that would let
-        # a handful of slow probes reproduce the very kill this guard exists to stop.
-        self.assertLessEqual(fr.PROBE_TIMEOUT, 60)
+        # The daemon kills a read at 25 minutes. A per-read bound near that would let
+        # one slow endpoint reproduce the very kill this guard exists to stop.
+        self.assertLessEqual(fr.LIVENESS_TIMEOUT, 60)
 
 
 class ParallelProbeTest(unittest.TestCase):
@@ -1566,6 +1578,82 @@ class PageCacheTest(unittest.TestCase):
                                     "r": "not flagged"}}}, handle)
         self.run_once(vault="v")
         self.assertIn("/elsewhere/x.md", self.entries())
+
+
+class FollowTheEndpoint(unittest.TestCase):
+    """The consumer's output must FLIP when the endpoint's verdict flips.
+
+    This is the SC2 probe: a consumer that derives liveness itself (an `os.kill`, a
+    registry read) passes every "a call site exists" test and fails this one. Two
+    sessions are used, and the second's verdict CONTRADICTS its pid — a consumer that
+    follows the endpoint for some sessions and self-derives for others cannot pass on
+    the first alone.
+    """
+
+    LIVE_SID = "11111111-1111-4111-8111-111111111111"
+    CONTRADICTED_SID = "22222222-2222-4222-8222-222222222222"
+
+    def setUp(self):
+        fr._liveness_cache.update({"read": False, "rows": None})
+
+    def _serve(self, verdicts):
+        resp = unittest.mock.MagicMock()
+        resp.status = 200
+        resp.read.return_value = json.dumps(verdicts).encode("utf-8")
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        return unittest.mock.patch.object(
+            fr.urllib.request, "urlopen", return_value=resp)
+
+    def _reset(self):
+        fr._liveness_cache.update({"read": False, "rows": None})
+
+    def test_liveness_of_follows_the_endpoint_for_both_sessions(self):
+        # Round 1: both live.
+        with self._serve([
+            {"session_id": self.LIVE_SID, "liveness": "live", "name": "A Manager"},
+            {"session_id": self.CONTRADICTED_SID, "liveness": "live", "name": "B Manager"},
+        ]):
+            self.assertEqual(fr.liveness_of(self.LIVE_SID), "LIVE")
+            self.assertEqual(fr.liveness_of(self.CONTRADICTED_SID), "LIVE")
+        self._reset()
+        # Round 2: the SECOND session's verdict flips to not-live while its pid is
+        # unchanged — a self-deriving consumer would still answer LIVE here.
+        with self._serve([
+            {"session_id": self.LIVE_SID, "liveness": "live", "name": "A Manager"},
+            {"session_id": self.CONTRADICTED_SID, "liveness": "not-live", "name": "B Manager"},
+        ]):
+            self.assertEqual(fr.liveness_of(self.LIVE_SID), "LIVE")
+            self.assertEqual(fr.liveness_of(self.CONTRADICTED_SID), "ABSENT")
+
+    def test_live_sessions_follows_the_endpoint(self):
+        with self._serve([
+            {"session_id": self.LIVE_SID, "liveness": "live", "name": "A Manager"},
+            {"session_id": self.CONTRADICTED_SID, "liveness": "live", "name": "B Manager"},
+        ]):
+            self.assertEqual(fr.live_sessions(),
+                             {self.LIVE_SID: "A Manager", self.CONTRADICTED_SID: "B Manager"})
+        self._reset()
+        with self._serve([
+            {"session_id": self.LIVE_SID, "liveness": "live", "name": "A Manager"},
+            {"session_id": self.CONTRADICTED_SID, "liveness": "not-live", "name": "B Manager"},
+        ]):
+            self.assertEqual(fr.live_sessions(), {self.LIVE_SID: "A Manager"})
+
+    def test_an_unlisted_session_reads_unknown_not_absent(self):
+        # ABSENT licenses a second spawn. A session the daemon never spawned (a tab,
+        # a cluster manager) is one it cannot prove dead, so it must not read ABSENT.
+        with self._serve([
+            {"session_id": self.LIVE_SID, "liveness": "live", "name": "A Manager"},
+        ]):
+            self.assertEqual(fr.liveness_of("33333333-3333-4333-8333-333333333333"),
+                             "UNKNOWN")
+
+    def test_a_failed_read_reads_unknown_not_absent(self):
+        with unittest.mock.patch.object(
+                fr.urllib.request, "urlopen", side_effect=fr.urllib.error.URLError("down")):
+            self.assertEqual(fr.liveness_of(self.LIVE_SID), "UNKNOWN")
+            self.assertIsNone(fr.live_sessions())
 
 
 if __name__ == "__main__":
