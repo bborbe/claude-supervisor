@@ -100,13 +100,18 @@ once, reading its step file yourself:
 | 4 | Adopt — only when `adopt-orphans.py` printed rows or exited non-zero | `steps/adopt.md` |
 | 5 | Drive leg — every round | `steps/drive.md` |
 | 5b | Keep alive — every round, dispatch `supervisor:fleet-keepalive-actor` | `steps/keepalive.md` |
-| 5d | Own parks — every round; its `routed` parks and their request ids go to `parks=` so the manager's row 7 can answer them | `steps/own-parks.md` |
+| 5d | Own parks — every round; its `routed` parks and their request ids go to `parks=` so the manager's row 11 can put the ask | `steps/own-parks.md` |
 | 6 | Reap contract — when the drive leg runs | `steps/reap.md` |
+| 7 | Answer a parked or exited worker — **route** it, never answer in the operator's voice | `steps/worker-channels.md` |
+| 8 | Act on the open-items ledger | `steps/act.md` · `steps/open-items.md` |
+| 9 | Verify a named cause | `steps/cause-verify.md` |
+| 10 | Escalate — render the material and route it; row 11 asks | `steps/escalate.md` |
 | 12 | Covered-subject invariant — when a covered subject's manager is live | `steps/covered-subject-invariant.md` |
 | 15 | Readings — every round, dispatch `supervisor:round-readings-reader` | `steps/readings.md` |
 | 16 | Open leg — every round, dispatch `supervisor:fleet-open-actor` | `steps/open.md` |
 | 16b | Manager reap — every round, after the open | `steps/manager-reap.md` |
 | 18 | Persist — only when the snapshot path is missing or its write failed | `steps/persist.md` |
+| 20 | Render the output shape — write `<round>.render`, never print, never ask | `steps/output-shape.md` |
 
 ⚠️ **The table is read more than once per round**, and the later reads are the ones that get
 skipped — re-read it once the sweep hand-back exists, honouring every row whose `When` has
@@ -136,16 +141,11 @@ one of them is the reason a later row could not run:
 | # | Row | Why the manager keeps it |
 |---|---|---|
 | 1 | Re-arm | `ScheduleWakeup` is one-shot per call and belongs at the round's head, in the session that keeps the loop |
-| 7 | Answer a parked or exited worker | a worker that is not this manager's is routed, not answered; row 5d is the manager's own parks, which you run |
-| 8 | Act on the open-items ledger | operator asks are the manager's to carry |
-| 9 | Verify a named cause | the cause is named in the round's **render**, which is the manager's — a delegate cannot verify a sentence it does not write |
-| 10 | Escalate | an escalation is the manager's voice, not a delegate's |
 | 11 | Needs-input batch + relay | an `AskUserQuestion` cannot be put by you |
 | 13 | Attention watchers | `Monitor` is the manager's tool |
 | 14 | Auto-compaction | compacting a session is a manager act; you only **report** `context70` and `self-context` |
 | 17 | Voice + notification | TTS and the notify gate are the manager's |
-| 19 | Round tail | it judges the manager's own `re-arm` epoch and the round's receipt — both written by the manager — and it must run before the render |
-| 20 | Render the output shape | the manager renders from your verdict and the payload |
+| 19 | Round tail | it judges the manager's own `re-arm` epoch and the round's receipt — both written by the manager — and it must run before the manager prints the render file |
 
 ## 3. Read your own fill level — do not guess it
 
@@ -244,10 +244,10 @@ open-status=<ok|unknown|not-run> · selected=<n> · opened=<n> · open-resumed=<
 managers-reaped=<n> · parks-answered=<n> · parks-routed=<n> · parks-escalated=<n> · context70=<n> · self-context=<pct>%|UNKNOWN
 ```
 
-⚠️ **`parks=` is the own-parks report, and it is the manager's row 7 input.** Write the
+⚠️ **`parks=` is the own-parks report, and it is row 7's input.** Write the
 `own-parks: answered … · routed … · escalated …` line and its per-park `route` rows to
 `<digest minus .digest>.parks`; the hand-back carries the three counts and the path. Without
-them the manager's row 7 has nothing to answer from, and a class-C question times out at 15
+them row 7 has nothing to route, and a class-C question times out at 15
 minutes — the defect `commands/steps/own-parks.md` exists to remove.
 
 ⚠️ **`digest=` and `parks=` are two different artifacts, never one `payload=`.** The digest is

@@ -10,11 +10,12 @@ When: every tick — after the re-arm (row 1), before the read half
 
 ⚠️ **The round's machine half runs in ONE delegate.** Dispatch `supervisor:fleet-round`
 **once**, passing the round id, this session's id, the vault and the absolute tasks dir. The
-delegate reads the step files, runs rows 0, 2–6, 12, 15, 16, 16b and 18 — dispatching the
-existing sweep, keep-alive, readings and open legs — persists the round, and returns the ≤ 1 KB
-verdict plus the artifact paths. You keep rows 7, 8, 9, 10, 11, 13, 14, 17, 19 and 20: the
-provenance acts, the cause check, the operator questions, the watchers, the voice, the round
-tail and the render. The split, and why the manager no longer reads the step files, is
+delegate reads the step files, runs rows 0, 2–10, 12, 15, 16, 16b, 18 and 20 — dispatching the
+existing sweep, keep-alive, readings and open legs, taking the provenance acts, the cause check
+and the escalation, and writing the render to `<round>.render` — persists the round, and returns
+the ≤ 1 KB verdict plus the artifact paths. You keep rows 1, 11, 13, 14, 17 and 19: the re-arm,
+the operator questions, the watchers, the voice and the round tail, and you print the render
+file **after** that tail. The split, and why the manager no longer reads the step files, is
 `agents/fleet-round.md`.
 
 ⚠️ **The verdict is CHECKED, not trusted — run the gate before you read a single count.**
