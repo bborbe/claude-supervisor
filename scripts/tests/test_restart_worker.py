@@ -14,7 +14,9 @@ return value.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -2030,6 +2032,151 @@ class RegisteredVaultShapes(unittest.TestCase):
                 self.assertIn(repr(value), text)
                 self.assertIn("private-personal", text)
                 self.assertNotIn("resolves to no existing directory", text)
+
+
+class ManagerLoopArmsOnResume(unittest.TestCase):
+    """A manager resume arms its own loop — no pane keystroke.
+
+    Measured 2026-11-19: 2 of 5 resumed manager panes never passed
+    `pane-wake-guard.py` within 90 s, so the loop the pane wake was to type was
+    never armed. The fix is that the resume prompt itself carries the loop command.
+    """
+
+    def command(self, **over):
+        argv = rw.resume_command(
+            "1c05c414-269b-4a65-887e-bb8dc25f5b1e", "Some Subject", "orange",
+            "/tmp", "/scripts/cc-private", **over,
+        )
+        return " ".join(argv)
+
+    def test_a_manager_resume_never_ends_unarmed(self):
+        """SC2: the loop command is the resume's first turn, not a pane keystroke."""
+        goal = self.command(resume_prompt=rw.manager_loop_prompt("goal", "Some Subject"))
+        self.assertIn('--resume', goal)
+        self.assertIn('/supervisor:goal-loop \\"Some Subject\\"', goal)
+        self.assertNotIn('/color orange', goal)
+
+        topic = self.command(resume_prompt=rw.manager_loop_prompt("topic", "Some Subject"))
+        self.assertIn('/supervisor:topic-loop \\"Some Subject\\"', topic)
+
+        fleet = self.command(resume_prompt=rw.manager_loop_prompt("fleet", "Some Subject"))
+        self.assertIn('/supervisor:fleet-loop', fleet)
+        # The root Fleet Manager resolves to no subject; it must still be armed.
+        self.assertEqual(rw.manager_loop_prompt("fleet", ""), "/supervisor:fleet-loop")
+
+    def test_a_worker_resume_keeps_the_colour(self):
+        """The negative control: a worker resume is unchanged — `/color`, no loop."""
+        worker = self.command()
+        self.assertIn('/color orange', worker)
+        self.assertNotIn('/supervisor:', worker)
+
+    def test_the_loop_prompt_is_escaped_for_the_bash_string(self):
+        """A subject carrying a quote or `$` must not break out of `bash -lc`."""
+        prompt = rw.manager_loop_prompt("goal", 'A "quoted" $subject')
+        command = self.command(resume_prompt=prompt)
+        self.assertIn('\\"quoted\\"', command)
+        self.assertIn('\\$subject', command)
+
+
+class ManagerArmingReport(unittest.TestCase):
+    """What the resume reports about arming — it must match what the spawn did.
+
+    An unresolved subject resumes on the `/color` fallback, so a report claiming the
+    loop was ARMED contradicts the stderr warning and tells the operator to skip the
+    re-arm the session needs (review round 3 on claude-supervisor#1011).
+    """
+
+    def report(self, resume_prompt):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rw.print_manager_arming(resume_prompt, [("load path", "newer")])
+        return buf.getvalue()
+
+    def test_an_armed_manager_says_do_not_re_arm(self):
+        out = self.report('/supervisor:goal-loop "G"')
+        self.assertIn("was ARMED by the resume prompt", out)
+        self.assertIn("do NOT type a second re-arm", out)
+        self.assertNotIn("NOT armed", out)
+
+    def test_an_unresolved_subject_says_the_loop_is_not_armed(self):
+        out = self.report(None)
+        self.assertIn("was NOT armed", out)
+        self.assertIn("re-arm it by hand", out)
+        self.assertNotIn("do NOT type a second re-arm", out)
+
+
+class ResumePromptVerb(unittest.TestCase):
+    """`--resume-prompt`: the one implementation `commands/open.md` § 3.1 calls.
+
+    Its stdout IS the prompt a resume carries, so the precedence it applies decides
+    whether a manager's loop is armed: a resolved subject, the page-less root Fleet
+    Manager, and the `/color` fallback for a manager whose subject will not resolve.
+    """
+
+    SID_MANAGER = "m1"
+    SID_ROOT = "r1"
+    SID_WORKER = "s1"
+    SID_UNRESOLVED = "m2"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        self.vault = os.path.join(d, "vault")
+        self.sessions = os.path.join(d, "sessions")
+        for sub in ("24 Goals", "25 Tasks"):
+            os.makedirs(os.path.join(self.vault, sub))
+        os.makedirs(self.sessions)
+        cfg = os.path.join(d, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": self.vault,
+                        "claude_script": "/scripts/cc-private"}], fh)
+        self._prev = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = cfg
+        self.write(self.SID_MANAGER, "G Manager")
+        self.write(self.SID_ROOT, "Fleet Manager")
+        self.write(self.SID_WORKER, "Some Worker")
+        self.write(self.SID_UNRESOLVED, "Orphan Manager")
+        self.page("24 Goals", "G", f"claude_session_id: {self.SID_MANAGER}")
+        self.page("25 Tasks", "T", f"claude_session_id: {self.SID_WORKER}")
+        # A declared manager with no goal or topic page: the subject cannot be resolved.
+        self.page("25 Tasks", "M", f"claude_session_id: {self.SID_UNRESOLVED}\nrole: manager")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("SUPERVISOR_VAULT_CONFIG", None)
+        else:
+            os.environ["SUPERVISOR_VAULT_CONFIG"] = self._prev
+        self.tmp.cleanup()
+
+    def write(self, sid, name):
+        with open(os.path.join(self.sessions, sid + ".json"), "w") as fh:
+            json.dump({"sessionId": sid, "pid": 4242, "status": "idle",
+                       "kind": "interactive", "name": name,
+                       "startedAt": "2020-01-01T00:00:00Z", "cwd": self.vault}, fh)
+
+    def page(self, sub, title, fm):
+        with open(os.path.join(self.vault, sub, f"{title}.md"), "w") as fh:
+            fh.write(f"---\n{fm}\n---\nbody\n")
+
+    def prompt(self, sid):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(rw.print_resume_prompt(sid, self.vault, self.sessions), 0)
+        return buf.getvalue().strip()
+
+    def test_a_manager_with_a_resolved_subject_prints_its_loop(self):
+        self.assertEqual(self.prompt(self.SID_MANAGER), '/supervisor:goal-loop "G"')
+
+    def test_the_root_fleet_manager_prints_the_fleet_loop(self):
+        """`resume_role` classifies the page-less root as `agent`; the registry name is the join."""
+        self.assertEqual(self.prompt(self.SID_ROOT), "/supervisor:fleet-loop")
+
+    def test_a_worker_prints_nothing_so_the_caller_falls_back_to_colour(self):
+        self.assertEqual(self.prompt(self.SID_WORKER), "")
+
+    def test_a_manager_with_an_unresolved_subject_prints_nothing(self):
+        """No loop is armed: arming the fleet loop here would sweep the wrong subject."""
+        self.assertEqual(self.prompt(self.SID_UNRESOLVED), "")
 
 
 if __name__ == "__main__":
