@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.350.2
 
 - docs: file the goal-tier feed bullet under the release that carried it — it sat under `## v0.349.3`, which `git tag --contains 94faed1c` does not list.
 
