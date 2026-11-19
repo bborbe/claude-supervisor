@@ -337,22 +337,36 @@ class AnswerContentTest(unittest.TestCase):
     def test_refused_while_picks_are_disabled(self):
         self.assertRefused("PICK_ANSWERING_ENABLED is false", enabled=False)
 
-    def test_real_flag_is_off_so_the_unpatched_path_refuses(self):
-        self.assertFalse(aa.picks_enabled())
+    def test_real_flag_is_on(self):
+        self.assertTrue(aa.picks_enabled())
 
-    def test_manager_answerer_is_refused(self):
-        self.assertRefused("operator's voice", answerer="manager")
+    def test_manager_answer_posts_its_answerer(self):
+        rc, out, posted, state = self._run(answerer="manager")
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.kwargs["answer"],
+                         {"kind": "text", "value": "go", "answerer": "manager"})
+        with open(os.path.join(state, self.ITEM["producer_id"] + ".answer.json")) as fh:
+            self.assertEqual(json.load(fh)["answerer_kind"], "manager")
 
-    def test_gate_answerer_arm_is_refused_under_any_answerer(self):
+    def test_gate_answerer_arm_answers_as_manager(self):
+        rc, _, posted, _ = self._run(by=aa.GATE_ANSWERER_ARM, answerer="manager")
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.kwargs["answer"]["answerer"], "manager")
+
+    def test_gate_answerer_arm_is_refused_as_operator(self):
         self.assertRefused("gate answerer", by=aa.GATE_ANSWERER_ARM, answerer="operator")
 
     def test_answerer_has_no_default(self):
         self.assertRefused("explicit --answerer", answerer="")
 
+    def test_unknown_answerer_is_refused(self):
+        self.assertRefused("explicit --answerer", answerer="boss")
+
     def test_operator_relay_content_reaches_the_body_and_no_target_is_printed(self):
         rc, out, posted, state = self._run()
         self.assertEqual(rc, 0)
-        self.assertEqual(posted.call_args.kwargs["answer"], {"kind": "text", "value": "go"})
+        self.assertEqual(posted.call_args.kwargs["answer"],
+                         {"kind": "text", "value": "go", "answerer": "operator"})
         self.assertIn("DELIVERY: delivered", out)
         self.assertNotIn("TARGET", out)
         with open(os.path.join(state, self.ITEM["producer_id"] + ".answer.json")) as fh:
@@ -893,6 +907,41 @@ class MirrorCardLookup(unittest.TestCase):
         self.assertEqual(rc, 1, text)
         self.assertIn("FAILED: store returned 500", text)
         self.assertNotIn("TARGET:", text)
+
+
+class DismissTest(unittest.TestCase):
+    """The dismiss verb retires a card without answering it.
+
+    Unlike the board's `skip` it stores no answer, so a dismissed card is not
+    recorded as a decline the operator never gave. `closed` is terminal, so a
+    second dismiss is a non-zero exit, not a silent no-op.
+    """
+
+    def test_dismiss_posts_close_and_prints(self):
+        out = io.StringIO()
+        with mock.patch.object(aa, "post_close", return_value={}) as post:
+            rc = aa.cmd_dismiss("item-1", "arm-1", out=out)
+        post.assert_called_once_with("item-1", "arm-1")
+        self.assertEqual(rc, 0)
+        self.assertIn("DISMISSED: item-1", out.getvalue())
+
+    def test_main_routes_dismiss(self):
+        with mock.patch.object(aa, "post_close", return_value={}) as post:
+            rc = aa.main(["dismiss", "item-9", "--by", "arm-9"])
+        post.assert_called_once_with("item-9", "arm-9")
+        self.assertEqual(rc, 0)
+
+    def test_already_closed_is_nonzero(self):
+        with mock.patch.object(aa, "post_close", side_effect=_conflict("ITEM_CLOSED")):
+            rc = aa.main(["dismiss", "item-2"])
+        self.assertEqual(rc, 1)
+
+    def test_unreachable_store_is_nonzero(self):
+        with mock.patch.object(
+            aa, "post_close", side_effect=urllib.error.URLError("refused")
+        ):
+            rc = aa.main(["dismiss", "item-3"])
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,11 @@ wrapping this script does it from the TARGET line printed here.
 
   next              list open items, oldest first, each with its delivery target
   answer ITEM_ID    POST /api/1.0/attention/{ITEM_ID}/answer, then print the target
+  dismiss ITEM_ID   POST /api/1.0/attention/{ITEM_ID}/close — retire a card
+                    without answering it. `closed` is terminal, so a second
+                    dismiss exits non-zero; nothing is delivered, and no
+                    answer is stored (unlike the board's `skip`, which records
+                    a decline the operator never gave)
 
 Order matters in `answer`: the store's open -> answered compare-and-set runs
 first, and a caller that loses it (409) must NOT route its answer -- another arm
@@ -65,14 +70,16 @@ that settles an irreversible prompt without an operator-supplied decision.
 A `message` answer may carry its CONTENT (`--answer-text TEXT`), and then it routes
 like a permission one: the store holds what was said, the attention-controller's
 carriers deliver it (pane, or a resumed headless turn), so no TARGET is printed and
-the same bounded delivery wait reports whether it landed. ⚠️ It is REFUSED while
-`gate-answer-check.py`'s `PICK_ANSWERING_ENABLED` is false, for the gate answerer's arm,
-and for `--answerer manager` — every carrier renders answer content in the operator's
-voice (see `answer_text_refusal`). `--answerer` has no default and must be stated.
+the same bounded delivery wait reports whether it landed. The `--answerer` is posted
+as `answer.answerer`, and every carrier delivers a `manager` answer in the manager's
+voice. ⚠️ It is REFUSED while `gate-answer-check.py`'s `PICK_ANSWERING_ENABLED` is false,
+and the gate answerer's arm may answer only as `manager` (see `answer_text_refusal`).
+`--answerer` has no default and must be stated.
 
 Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
                                   [--answer-text TEXT] [--answerer operator|manager]
      python3 attention-answer.py attempt ITEM_ID --outcome delivered|failed [--by ARM]
+     python3 attention-answer.py dismiss ITEM_ID [--by ARM]
 """
 
 import argparse
@@ -403,6 +410,38 @@ def post_answer(item_id, answered_by, resolved_by="", decision="", answer=None):
         return json.load(resp)
 
 
+def post_close(item_id, answered_by):
+    """Close an item — the dismiss verb's one store call.
+
+    `closed` is terminal: a dismissed card cannot be reopened (reopening is a
+    new item with a new id), and the store rejects `closed -> closed` as an
+    illegal transition, so a second dismiss exits non-zero rather than reading
+    as a silent no-op.
+    """
+    body = {"answered_by": answered_by}
+    req = urllib.request.Request(
+        f"{STORE}/api/1.0/attention/{item_id}/close",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+        return json.load(resp)
+
+
+def cmd_dismiss(item_id, answered_by, out=sys.stdout):
+    """Retire a card without answering it.
+
+    The board's `skip` was the only way to clear a card that asks nothing, and
+    it recorded a DECLINE — a negative the operator never gave. A dismiss names
+    what it is: the item leaves the queue, no answer is stored, and the record
+    says which arm closed it.
+    """
+    post_close(item_id, answered_by)
+    print(f"DISMISSED: {item_id}", file=out)
+    return 0
+
+
 # The answer endpoint returns HTTP 409 for more than one failure, and the status
 # alone cannot tell them apart -- only the `error.code` in the body can. The two
 # this arm can meet are different facts about the gate, so each gets its own
@@ -679,21 +718,18 @@ def picks_enabled():
 def answer_text_refusal(answered_by, answerer, enabled):
     """Why `--answer-text` must not run, or "" when it may.
 
-    ⚠️ **Every carrier renders a card's answer content in the OPERATOR's voice** — the pane
-    carrier types `Operator answer, via attention board:`, the controller's headless arm opens
-    "The operator answered on the attention board.", and claude-wrapper's `messageAnswer`
-    prefixes `Operator answer, via supervisor:`. So a manager's text would reach the worker as
-    the operator's own answer whatever marker it wrote here: `manager` is refused, the gate
-    answerer is refused under any answerer, and the whole path is off while picks are.
+    The answerer is posted as `answer.answerer`, and every carrier voices a `manager` answer
+    as `Manager answer, via supervisor: …` and an `operator` one as the operator's. So the
+    answerer must be stated, and the gate answerer — a manager's sub-agent — may only ever
+    answer as `manager`: an `operator` answer from it would be a forged provenance claim.
+    The whole path stays behind the `PICK_ANSWERING_ENABLED` kill switch.
     """
     if not enabled:
         return "--answer-text is disabled while PICK_ANSWERING_ENABLED is false"
-    if answered_by == GATE_ANSWERER_ARM:
-        return "the gate answerer never answers a card's content — every carrier would voice it as the operator"
-    if answerer == "manager":
-        return "a manager answer would be delivered in the operator's voice by every carrier"
-    if answerer != "operator":
-        return "--answer-text needs an explicit --answerer operator"
+    if answerer not in ("operator", "manager"):
+        return "--answer-text needs an explicit --answerer operator|manager"
+    if answered_by == GATE_ANSWERER_ARM and answerer != "manager":
+        return "the gate answerer answers only as --answerer manager — it is never the operator"
     return ""
 
 
@@ -719,7 +755,8 @@ def cmd_answer_content(item, answered_by, resolved_by, answer_text, answerer, ou
         resolved_by = resolved_session_id()
     try:
         answered = post_answer(item_id, answered_by, resolved_by,
-                               answer={"kind": "text", "value": answer_text})
+                               answer={"kind": "text", "value": answer_text,
+                                       "answerer": answerer})
     except urllib.error.HTTPError as err:
         if err.code == 409:
             print(answer_conflict_line(item_id, err, "deliver"), file=out)
@@ -864,6 +901,9 @@ def main(argv=None):
     # record an outcome the caller never observed. The refusal belongs to this
     # script so its wording stays testable.
     att.add_argument("--outcome", default="")
+    dis = sub.add_parser("dismiss")
+    dis.add_argument("item_id")
+    dis.add_argument("--by", default=DEFAULT_ARM)
     args = parser.parse_args(argv)
     registry = load_registry()
     try:
@@ -871,6 +911,8 @@ def main(argv=None):
             return cmd_next(registry)
         if args.cmd == "attempt":
             return cmd_attempt(args.item_id, args.by, args.outcome)
+        if args.cmd == "dismiss":
+            return cmd_dismiss(args.item_id, args.by)
         return cmd_answer(args.item_id, args.by, registry, decision=args.decision,
                           answer_text=args.answer_text, answerer=args.answerer)
     except urllib.error.HTTPError as err:

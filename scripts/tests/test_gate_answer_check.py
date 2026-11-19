@@ -96,6 +96,14 @@ class Answerable(unittest.TestCase):
         self.assertEqual(out["verdict"], gac.ANSWERABLE)
         self.assertIn("ownership claim", out["why"])
 
+    def test_adopted_dead_spawner(self):
+        # Spawner is NOT in the live set → a live manager auto-adopts (operator-approved
+        # 2026-11-19, card 0a5572c2fcb2edae48e00277b277cb55), rubric-limited.
+        out = run(ledger={WORKER: {"spawner_session_id": OTHER}}, live=set())
+        self.assertEqual(out["verdict"], gac.ANSWERABLE, out)
+        self.assertIn("spawner", out["why"])
+        self.assertIn("not live", out["why"])
+
 
 class Escalate(unittest.TestCase):
     def assertEscalate(self, out, fragment):
@@ -122,6 +130,16 @@ class Escalate(unittest.TestCase):
 
     def test_other_spawner(self):
         self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}), "not this session's worker")
+
+    def test_live_spawner_still_escalates(self):
+        # Spawner IS live → never adopted; the spawner owns its worker.
+        self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}, live={OTHER}),
+                            "not this session's worker")
+
+    def test_unreadable_live_fails_closed(self):
+        # Registry unreadable (live=None) → escalate, never adopt.
+        self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}, live=None),
+                            "not this session's worker")
 
     def test_claim_by_peer_is_not_ownership(self):
         self.assertEscalate(run(ledger={WORKER: {"spawner_session_id": OTHER}}, claims={WORKER: OTHER}),
@@ -195,12 +213,17 @@ def pick(options=None, payload="pick — 1. split the helper (recommended) · 2.
     return base
 
 
+class PickEnabled(unittest.TestCase):
+    def test_kill_switch_is_on(self):
+        self.assertTrue(gac.PICK_ANSWERING_ENABLED)
+
+
+@mock.patch.object(gac, "PICK_ANSWERING_ENABLED", False)
 class PickDisabled(unittest.TestCase):
-    def test_every_pick_is_skipped_while_carriers_speak_as_the_operator(self):
-        self.assertFalse(gac.PICK_ANSWERING_ENABLED)
+    def test_every_pick_is_skipped_while_the_kill_switch_is_off(self):
         out = run(item=pick())
         self.assertEqual(out["verdict"], gac.SKIP)
-        self.assertEqual(out["why"], "pick answering disabled until carriers render manager voice")
+        self.assertEqual(out["why"], "pick answering disabled by the PICK_ANSWERING_ENABLED kill switch")
 
     def test_disabled_pick_gets_no_answer_argv(self):
         verdict = dict(run(item=pick()), verdict=gac.ANSWERABLE, recommended="x")

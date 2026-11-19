@@ -12,12 +12,12 @@ Two card kinds, one verdict line each — `kind` says which:
 
   permission  a wrapper-backed worker's parked tool call (`answer_mechanism: permission`)
   pick        a worker's closer `pick —` card (`answer_mechanism: message`,
-              `interrupt_class: pick`, `producer_kind: session`). ⚠️ **DISABLED**
-              (`PICK_ANSWERING_ENABLED = False`): every carrier that delivers a card answer
-              renders it as the OPERATOR's (attention-controller `pkg/pane-carrier.go`,
+              `interrupt_class: pick`, `producer_kind: session`). Answered with the recommended
+              label as `--answerer manager`; the store records `answer.answerer: manager`
+              and every carrier (attention-controller `pkg/pane-carrier.go`,
               `pkg/headless-answer.go` `AnswerTurnText`; claude-wrapper `pkg/board.go`
-              `messageAnswer`), so a manager's pick would reach the worker as an operator
-              answer. Every pick card is `skip` until the carriers render the manager's voice.
+              `messageAnswer`) delivers it as `Manager answer, via supervisor: …`, never in
+              the operator's voice. `PICK_ANSWERING_ENABLED` is the kill switch.
 
 One JSON line per `--item`, carrying `verdict`:
 
@@ -136,10 +136,11 @@ WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
 #: escalate nearly every build a worker runs.
 RUNNER_WORDS = ("uv", "uvx", "npx", "pnpx", "bunx", "pipx", "poetry", "pdm", "hatch", "rye")
 
-#: Off until every carrier renders a manager's answer in the manager's voice — see the module
-#: docstring. The pick branch below stays, tested with this flipped, so turning it on is one line.
-PICK_ANSWERING_ENABLED = False
-PICK_DISABLED_WHY = "pick answering disabled until carriers render manager voice"
+#: The kill switch for pick answering. On since every carrier renders an `answerer: manager`
+#: answer in the manager's voice (attention-controller v0.104+, claude-wrapper v0.45+); an
+#: older carrier would voice it as the operator, so turn this off if either is rolled back.
+PICK_ANSWERING_ENABLED = True
+PICK_DISABLED_WHY = "pick answering disabled by the PICK_ANSWERING_ENABLED kill switch"
 
 #: The only tools an unattended manager answer may release. The tier classifier understands
 #: these; an `mcp__*` call, `WebFetch` or `Agent` reaches something it cannot read.
@@ -397,7 +398,7 @@ def _role_human(session_id, ledger):
 
 def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
            tier_mod, allowlist, own_mod, scope=None, seen=None, answering=False, expect=None,
-           is_human=None):
+           is_human=None, live=None):
     """One verdict dict. Every input that could not be read arrives as `None`.
 
     `item` is the store record, `None` when unreadable, or `{}` when absent (404).
@@ -460,7 +461,19 @@ def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
         if (claims or {}).get(producer) == self_id and self_id:
             why = "adopted by this session (ownership claim)"
         else:
-            return done(ESCALATE, "not this session's worker: %s" % why)
+            # Auto-adopt a dead-spawner gate — operator-approved 2026-11-19, card
+            # 0a5572c2fcb2edae48e00277b277cb55: "auto-adopt for dead-spawner gates only,
+            # rubric-limited". A gate whose spawner is not live would otherwise wait for a
+            # manager turn (or time out) because no live spawner owns it. Adoption does NOT
+            # bypass the rubric: every later check (UNATTENDED_TOOLS, tier allowlist/manager,
+            # no script file, readable brief) still runs, so a production-touching or
+            # operator-tier prompt is refused below. FAIL CLOSED: `live is None` (registry
+            # unreadable) or an unnameable spawner escalates, never adopts.
+            spawner = own_mod.spawner_of((ledger or {}).get(producer))
+            if spawner and self_id and live is not None and spawner not in live:
+                why = "adopted: spawner %s not live" % spawner[:8]
+            else:
+                return done(ESCALATE, "not this session's worker: %s" % why)
 
     if out["kind"] == "pick":
         out["expect"] = pick_hash(item)
@@ -728,6 +741,10 @@ def load_inputs(self_id=""):
         "holds": read_holds(), "sessions": read_sessions(),
         "allowlist": tier_mod.load_allowlist(), "index": stamp_index(fleet_mod),
         "scope": scope_mod.load(self_id),
+        # Live session ids from the Claude Code registry, or None when unreadable. Used only
+        # to decide whether a gate's spawner is dead (auto-adoption, below); None means
+        # unknown, and adoption refuses rather than guessing.
+        "live": filt.live_ids(),
     }
 
 
@@ -765,7 +782,7 @@ def main(argv=None):
                              inputs["allowlist"], inputs["own_mod"],
                              scope=inputs.get("scope"), seen=seen,
                              answering=args.answer, expect=args.expect or None,
-                             is_human=inputs["is_human"])
+                             is_human=inputs["is_human"], live=inputs.get("live"))
             print(json.dumps(verdict))
             if not args.answer:
                 if verdict["verdict"] in (ANSWERABLE, ESCALATE):
