@@ -219,7 +219,7 @@ turns exit 10 into a push.
 """
 from __future__ import annotations
 
-import argparse, glob, importlib.util, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import argparse, glob, importlib.util, json, math, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
@@ -610,6 +610,48 @@ def period_floor_applies(spans, declared: int) -> bool:
     return not any(iv == declared and gap < declared / 2 for gap, iv in spans)
 
 
+def read_high_water(s: str) -> float:
+    """The persisted high-water mark for a subject, or 0.0 when unusable.
+
+    ⚠️ **There is deliberately NO expiry timer.** An earlier version expired the mark
+    by mtime, and because the file is only rewritten when the mark grows, a stable mark
+    aged out while still in use — the bound then dropped back to the p90 shortly after
+    the ring rolled, which is the exact regression the mark exists to prevent. Decay is
+    handled by the `2 x median` cap applied on every read instead: as the subject's own
+    median falls, the cap falls with it, and a mark seeded by an outage cannot hold the
+    limit up.
+
+    A non-finite or non-positive value is discarded rather than honoured: `nan` parses
+    happily and then poisons every comparison, silently disabling `--state`.
+    """
+    p = path(s, "hwm")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            val = float(fh.read().strip())
+    except (OSError, ValueError):
+        return 0.0
+    if not math.isfinite(val) or val <= 0:
+        return 0.0
+    return val
+
+
+def write_high_water(s: str, seconds: float) -> None:
+    """Persist a mark beside the arm ring so it outlives the ring's roll.
+
+    ⚠️ **This is the fix for the regression a ring-recomputed maximum has.** `.arms`
+    keeps only `ARMS_KEEP` rows, so a long gap ages out within ~10 arms and a value
+    recomputed from the ring alone falls back to the ordinary cadence — the false
+    `STALE` returns a couple of hours after it was fixed. The mark is written on every
+    read, so it tracks the ring without needing a separate write path. Failure to
+    persist is swallowed deliberately: an unwritable state dir must degrade to today's
+    behaviour, never break a liveness read.
+    """
+    try:
+        write_atomic(path(s, "hwm"), f"{int(seconds)}\n")
+    except OSError:
+        pass
+
+
 def observed_period(s: str):
     """The p90 ROUND-to-round gap, capped at PERIOD_CAP x the median; None without history.
 
@@ -688,9 +730,45 @@ def observed_period(s: str):
             p90 = percentile(gaps, 0.90)
             med = median(gaps)
     declared = declared_interval(s)
+    # ⚠️ FLEET ONLY: the p90 is the wrong statistic for the fleet subject, because the
+    # round's own duration sits in the tail the p90 discards BY CONSTRUCTION. An arm
+    # gap is start-to-start, so a round that runs long sets a floor on its own gap —
+    # and a healthy long round then reads STALE. Measured 2026-11-18: one round ran
+    # 1355 s start-to-start against a 1157 s limit (p90 977 + SLACK 180).
+    #
+    # The fleet therefore takes the MAXIMUM of (its ring, its persisted high-water
+    # mark). The mark is load-bearing, not a nicety: `.arms` keeps only ARMS_KEEP rows,
+    # so a ring-recomputed maximum forgets the 1355 s gap within ~10 arms and the limit
+    # drops back to the ordinary cadence — the false STALE returns hours after the fix.
+    # The mark is what makes the bound survive the ring's roll.
+    #
+    # Its upper bound is 2x the median, not PERIOD_CAP (2.5x): the goal's own detection
+    # bound is two observed periods, and a 2.5x cap would let a single historic stop
+    # breach it. Every other branch keeps the p90 and the 2.5x cap — a topic or goal
+    # manager's limit must not move with this change.
+    fleet = s.startswith("fleet--")
+    if fleet:
+        # ⚠️ Seed only from a population with NO idle gap in it. A ring that straddles
+        # an outage carries that outage as a span, and seeding the mark from it would
+        # pin the limit at the cap for ever — the mark would then cause the over-wide
+        # limit the p90 was chosen to avoid. Decay is the `2 x median` cap below, applied
+        # on every read: as the median falls the cap falls, so the mark cannot pin the
+        # bound. There is no timer — a timer would age out a mark that is still in use,
+        # which is the regression this mark exists to prevent.
+        clean = not any(g > IDLE_GAP_SECONDS for g, _ in spans)
+        ring_max = max(gaps) if clean else 0.0
+        mark = read_high_water(s)
+        seed = min(ring_max, 2.0 * med) if ring_max else 0.0
+        if seed > mark:
+            write_high_water(s, seed)
+            mark = seed
+        period = max(mark, ring_max) or p90
+    else:
+        period = p90
     if declared and period_floor_applies(spans, declared):
-        return max(declared, min(p90, PERIOD_CAP * max(med, declared)))
-    return min(p90, PERIOD_CAP * med)
+        floor_cap = 2.0 * max(med, declared) if fleet else PERIOD_CAP * max(med, declared)
+        return max(declared, min(period, floor_cap))
+    return min(period, 2.0 * med if fleet else PERIOD_CAP * med)
 
 
 # ⚠️ `stopped` is NOT here, and its absence is the fix this list is part of. Migration

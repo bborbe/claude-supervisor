@@ -6,7 +6,7 @@
     "agents/fleet-sweep-reader.md": 44898,
     "agents/goal-drive.md": 146968,
     "agents/goal-sweep-reader.md": 168247,
-    "commands/fleet-loop.md": 4914,
+    "commands/fleet-loop.md": 6375,
     "commands/goal-drive.md": 10191,
     "commands/goal-loop.md": 32178,
     "commands/goal-status.md": 48645,
