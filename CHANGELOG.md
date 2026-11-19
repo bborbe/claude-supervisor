@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`check-handback-size.py` can now measure a LIVE round's emitted hand-back, and an absent one is a failure rather than 0 B.** The gate asserted only the authored template, so every live delegate could overrun the cap on every round and nothing failed — measured 2026-11-18 on the eight `supervisor:fleet-round` delegates of one manager session: **seven emitted a 54–111 B closing remark and no verdict at all**, and the eighth emitted prose at **1 510 B**, 486 B over the 1 024 B cap. A literal "≤ 1 KB" test passes all seven. `--transcript <path>` measures one delegate and `--transcript-dir <dir>` measures a subagents directory, filtering on `.meta.json` `agentType` (default `supervisor:fleet-round`). ⚠️ **Two block shapes count, because the live delegates emit the second:** the contract's `**Hand-back**` fence, or a block naming the round id (`**Round <id> — final verdict**`) — the discriminator SC3 names. ⚠️ **A transcript with neither exits 1**, naming how many assistant text blocks it read, so the check can fail on a live round instead of only on the authored template. Change set: `scripts/check-handback-size.py`, `scripts/tests/test_check_handback_size.py`, `CHANGELOG.md`.
+
 ## v0.350.3
 
 - fix: **the decision-park leg fires for a re-approved row.** `vault-cli task approve` preserves `approved_at` on a re-approval, so a row the operator re-approved to clear a wait carried a stamp older than the worker's last turn and kind (a) could never fire — the wait was real, recent, and invisible. The leg now compares `reapproved_at` when present and keeps the preserved `approved_at` as the fallback, so a row that was never re-approved still emits nothing.

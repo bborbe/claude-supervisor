@@ -20,7 +20,9 @@ values, and a leg that overruns the cap on a real round has broken its own contr
 review question rather than something a static check can see.
 """
 
+import argparse
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -69,7 +71,144 @@ def fixed_bytes(fence: str, variable: tuple[str, ...]) -> int:
     return len("\n".join(kept).rstrip("\n").encode("utf-8"))
 
 
-def main(root: Path | None = None) -> int:
+def assistant_texts(transcript: Path) -> list[str]:
+    """Every non-empty assistant text block in a transcript, in order.
+
+    ⚠️ **Text blocks only.** The delegate's hand-back is authored prose; the same tokens
+    appear inside tool calls and results (`self-context=` is the recorded case), so reading
+    those would measure something the manager never sees as a verdict.
+    """
+    texts: list[str] = []
+    with transcript.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("type") != "assistant":
+                continue
+            content = (record.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text.strip():
+                        texts.append(text)
+    return texts
+
+
+#: A block that names the round it reports on — the delegate's own verdict heading, e.g.
+#: `**Round 1795010883.8338208 — final verdict**`. This is the discriminator SC3 names.
+ROUND_ID = re.compile(r"\bround[\s=]\d{6,}", re.IGNORECASE)
+
+
+def emitted_reading(transcript: Path, variable: tuple[str, ...] = ()) -> tuple[int | None, str]:
+    """The EMITTED hand-back's byte size, or None and the reason there is none.
+
+    ⚠️ **Two shapes count, because the live delegates emit the second.** The contract's
+    `**Hand-back**` fence is the authored shape, but measured 2026-11-18 on eight live
+    `supervisor:fleet-round` delegates **none** emitted that fence: the one that handed
+    back at all wrote prose — `**Round <id> — final verdict**` plus bullets — at 1 510 B.
+    So a block is the hand-back when it carries the fence **or** names the round id.
+
+    ⚠️ **An absent hand-back is a FAILURE, not 0 B — the reason this mode exists.** Seven
+    of those eight emitted a 54–111 B closing remark and no verdict at all, so a literal
+    "≤ 1 KB" test passed them while the contract was violated.
+    """
+    texts = assistant_texts(transcript)
+    if not texts:
+        return None, "no assistant text block"
+    for text in reversed(texts):
+        fence = handback_fence(text)
+        if fence is not None:
+            return fixed_bytes(fence, variable), "fence found"
+        if ROUND_ID.search(text):
+            return len(text.rstrip().encode("utf-8")), "round-id block found"
+    return None, (
+        f"no `**Hand-back**` fence and no round-id block in {len(texts)} assistant "
+        f"text block(s)"
+    )
+
+
+def transcript_readings(directory: Path, agent_type: str) -> tuple[list[str], list[str]]:
+    """Measure every delegate transcript under `directory`. (readings, failures)."""
+    readings: list[str] = []
+    failures: list[str] = []
+    for transcript in sorted(directory.glob("*.jsonl")):
+        meta = transcript.with_suffix(".meta.json")
+        if meta.exists():
+            try:
+                declared = json.loads(meta.read_text(encoding="utf-8")).get("agentType")
+            except (OSError, json.JSONDecodeError):
+                declared = None
+            if declared and declared != agent_type:
+                continue
+        size, reason = emitted_reading(transcript)
+        if size is None:
+            failures.append(
+                f"{transcript.name}: {reason} — an absent fence is a failure, not 0 B"
+            )
+            continue
+        readings.append(f"{transcript.name}={size}B")
+        if size > MAX_BYTES:
+            failures.append(
+                f"{transcript.name}: emitted hand-back is {size} B over its {MAX_BYTES} B cap"
+            )
+    return readings, failures
+
+
+def main(argv=None, root: Path | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--transcript", type=Path,
+        help="measure the EMITTED hand-back of one subagent transcript, not the authored template",
+    )
+    parser.add_argument(
+        "--transcript-dir", type=Path,
+        help="measure every *.jsonl under this subagents directory",
+    )
+    parser.add_argument(
+        "--agent-type", default="supervisor:fleet-round",
+        help="with --transcript-dir, keep only transcripts whose .meta.json agentType matches",
+    )
+    args = parser.parse_args(argv)
+
+    if args.transcript is not None:
+        size, reason = emitted_reading(args.transcript)
+        if size is None:
+            print(
+                f"handback-size FAILED: {args.transcript.name}: {reason} — an absent fence "
+                f"is a failure, not 0 B",
+                file=sys.stderr,
+            )
+            return 1
+        if size > MAX_BYTES:
+            print(
+                f"handback-size FAILED: {args.transcript.name}: emitted hand-back is {size} B "
+                f"over its {MAX_BYTES} B cap",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"handback-size ok: {args.transcript.name}={size}B (emitted)")
+        return 0
+
+    if args.transcript_dir is not None:
+        readings, failures = transcript_readings(args.transcript_dir, args.agent_type)
+        if failures:
+            print(f"handback-size FAILED: {len(failures)} transcript problem(s)", file=sys.stderr)
+            for failure in failures:
+                print(f"  - {failure}", file=sys.stderr)
+            return 1
+        print(
+            f"handback-size ok: {len(readings)} emitted hand-back(s) under {MAX_BYTES} B — "
+            f"{', '.join(readings)}"
+        )
+        return 0
+
     root = Path(root) if root is not None else REPO
     legs = load_legs()
     failures: list[str] = []

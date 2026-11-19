@@ -17,6 +17,7 @@ Fixtures are built from `check-handback-keys.LEGS` rather than hand-listed, so t
 checkers cannot drift apart.
 """
 import importlib.util
+import json
 import pathlib
 import shutil
 import subprocess
@@ -112,6 +113,61 @@ class CheckHandbackSizeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("agents/fleet-round.md", result.stderr)
         self.assertIn("missing", result.stderr)
+
+
+def transcript_line(text):
+    return json.dumps({"type": "assistant",
+                       "message": {"role": "assistant",
+                                   "content": [{"type": "text", "text": text}]}})
+
+
+class TranscriptModeTest(unittest.TestCase):
+    """`--transcript`: the EMITTED hand-back, where absent is a failure and not 0 B.
+
+    Measured 2026-11-18 on eight live `supervisor:fleet-round` delegates: seven emitted a
+    54–111 B closing remark and no verdict at all, and the eighth emitted prose at 1 510 B.
+    A literal "≤ 1 KB" test passes all seven, which is why absence must fail.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write(self, name, *texts):
+        path = pathlib.Path(self.dir) / name
+        path.write_text("\n".join(transcript_line(t) for t in texts), encoding="utf-8")
+        return path
+
+    def run_transcript(self, path):
+        return subprocess.run([sys.executable, str(SIZE_SCRIPT), "--transcript", str(path)],
+                              capture_output=True, text=True)
+
+    def test_a_round_id_block_under_the_cap_passes(self):
+        path = self.write("a.jsonl", "**Round 1795010883.8338208 — final verdict**\n\n- digest: x")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("(emitted)", result.stdout)
+
+    def test_an_oversize_round_id_block_fails(self):
+        path = self.write("b.jsonl", "**Round 1795010883 — final verdict**\n\n" + "- x\n" * 400)
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("over its", result.stderr)
+
+    def test_an_absent_hand_back_fails_rather_than_reading_zero(self):
+        path = self.write("c.jsonl", "I'll start by reading the router and the step files.")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no `**Hand-back**` fence and no round-id block", result.stderr)
+
+    def test_the_authored_fence_shape_also_counts(self):
+        keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-round"]["required"]
+        path = self.write("d.jsonl",
+                          "**Hand-back**\n\n```text\n"
+                          + " · ".join(f"{k}=<n>" for k in keys)
+                          + "\n```\n</output_format>")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
