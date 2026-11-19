@@ -113,6 +113,22 @@ class AdmissionTest(unittest.TestCase):
         """`exclusion()` keeps a manager's own row; admission refuses it — self-approval."""
         admit, why = self.scope.admission(SELF, SELF)
         self.assertFalse(admit)
+        self.assertIn("self-approval", why)
+
+    def test_refuses_its_own_card_even_when_it_is_stamped_on_an_in_scope_task(self):
+        """The refusal is explicit, not inferred from the session having no page.
+
+        A manager resumed from a worker role, or recorded in a task's `metrics_sessions`,
+        resolves to `own_titles` — so without this arm the scope lookup would admit it.
+        """
+        stamped = _scope(
+            sessions={SELF: [ss.Entry("Task In Subject", "task", [GOAL])]},
+            own_titles={"Task In Subject", GOAL},
+            self_goals=[GOAL],
+        )
+        admit, why = stamped.admission(SELF, SELF)
+        self.assertFalse(admit)
+        self.assertIn("self-approval", why)
 
     def test_refuses_a_worker_scoped_session(self):
         """A task-stamped session inherits its goal's task set but may not answer with it."""

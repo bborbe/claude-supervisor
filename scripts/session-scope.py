@@ -403,10 +403,14 @@ class Scope:
             return False, "not a manager session — no goal page names %s" % self_id[:8]
         if not session_id:
             return False, "card names no producing session"
-        # ⚠️ NOT `session_id == self_id`. `exclusion()` keeps a manager's own row because the
-        # feed must not hide it; admission must refuse it, or the background answerer approves
-        # the manager's own parked card — self-approval, and a widening this change never
-        # claimed. Before it existed such a card was refused for having no spawn-ledger row.
+        # ⚠️ **EXPLICIT self-refusal, never an inference.** `exclusion()` keeps a manager's own
+        # row because the feed must not hide it; admission must refuse it, or the background
+        # answerer approves the manager's own parked card — self-approval.
+        # ⚠️ This cannot be left to the scope lookup below: a manager session that is ALSO
+        # stamped on a task page of its own goal (resumed from a worker role, or recorded in a
+        # task's `metrics_sessions`) resolves to `own_titles` and would be admitted there.
+        if session_id == self_id:
+            return False, "this session's own card — self-approval"
         entries = self.sessions.get(session_id) or []
         titles = {entry.title for entry in entries}
         if not titles:
