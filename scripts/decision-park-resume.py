@@ -6,6 +6,18 @@ write none and nothing resumed them: an **approval** that landed after the worke
 a **`blocked_by` set** that has gone terminal. This script is that decision, so it is testable
 rather than prose a sub-agent interprets at round time.
 
+A re-approval is a second act, and it has its own stamp
+-------------------------------------------------------
+`vault-cli task approve` **preserves** `approved_at` when it re-approves a row — the documented
+contract, because re-stamping it would make a first approval indistinguishable from a re-approval.
+That made this leg's kind (a) structurally dead for exactly the shape a re-park produces: a row the
+operator re-approved to clear a wait carried a stamp older than the worker's last turn, so nothing
+fired and the silence read as a broken leg. `vault-cli` now also writes **`reapproved_at`** at the
+moment of the re-approval, and that is the stamp this leg compares when it is present. The preserved
+`approved_at` stays the fallback for a row approved once and never re-approved — so a row that was
+never re-approved still emits nothing, which is the control limb that stops the ordering guard being
+deleted outright.
+
 It decides. It does not resume: the caller performs the resume a verdict names, then records it
 with `--record`.
 
@@ -179,16 +191,28 @@ def last_turn(sid: str) -> float | None:
     return None
 
 
-def approval_cleared(approved: str, turn: float | None) -> bool | None:
+def approval_cleared(approved: str, reapproved: str, turn: float | None) -> bool | None:
     """Kind (a). `approved_at` alone is NOT the read — every candidate carries it.
 
     The event is ordering: the approval must be later than the session's last turn, which is what
     "the approval landed and nothing resumed it" means. `None` = could not compare.
+
+    ⚠️ **A re-approval is a second act, and `reapproved_at` is the stamp that records it.** The
+    preserved `approved_at` is the *first* approval, so a row the operator re-approved to clear a
+    wait carried a stamp older than the worker's last turn and this leg could never fire for it —
+    the wait was real, recent, and invisible. When `reapproved_at` is present it is the most recent
+    act and therefore the only stamp worth comparing; `approved_at` is the fallback for a row that
+    was approved once and never re-approved.
+
+    ⚠️ **Never fall back to `approved_at` when a `reapproved_at` exists but does not parse.** That
+    would silently substitute the older event for the newer one and resume on a stale ordering; an
+    unreadable re-approval is `None` (reported), exactly as an unreadable `approved_at` is.
     """
-    if not approved:
+    stamp_text = reapproved or approved
+    if not stamp_text:
         return False
     try:
-        stamp = parse_iso(approved)
+        stamp = parse_iso(stamp_text)
     except Exception:
         return None
     if turn is None:
@@ -383,7 +407,9 @@ def decide(vault: str, tasks_dir: str, now: float) -> dict:
 
         candidates += 1
         turn = last_turn(sid)
-        approved = approval_cleared(k.scalar(fm, "approved_at"), turn)
+        approved = approval_cleared(
+            k.scalar(fm, "approved_at"), k.scalar(fm, "reapproved_at"), turn
+        )
         blocked = blocked_by_cleared(blocked_by(fm), tasks_dir, turn)
 
         # ⚠️ Per-wait, never all-or-nothing: one unreadable wait must not strand a row whose
