@@ -925,6 +925,33 @@ def manager_loop_prompt(branch, subject):
     return f'/supervisor:{branch}-loop "{subject}"'
 
 
+def print_resume_prompt(sid, cwd, sessions_dir=None):
+    """Print the prompt a session's resume must carry, then exit 0. Read-only.
+
+    A manager's loop is armed by the resume prompt; a worker's is `/color`. This is the
+    ONE implementation, exposed as `--resume-prompt` so `commands/open.md` § 3.1's shell
+    recipe calls it instead of hand-building (and hand-quoting) the prompt.
+
+    A worker, or a manager whose subject cannot be resolved, prints nothing — the caller
+    falls back to `/color`. The root Fleet Manager is recognised by its registry name,
+    because `resume_role` classifies it as `agent` (it has no topic or goal page).
+    """
+    fb = load_sibling("fleet-board.py")
+    name = None
+    entries = registry_entries(sessions_dir)
+    if entries is not None:
+        path, rec = find_target(entries, sid)
+        if path and path != "ambiguous":
+            name = rec.get("name")
+    if name == fb.ROOT_NAME:
+        print(manager_loop_prompt("fleet", ""))
+        return 0
+    role, subject, _error = resume_role(sid, cwd, fb)
+    if role == "manager" and subject:
+        print(manager_loop_prompt(subject[0], subject[1]))
+    return 0
+
+
 def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
                    wezterm="wezterm", resume_prompt=None):
     """The resume recipe, copied from `commands/open.md` Step 3.1.
@@ -1688,8 +1715,8 @@ def resume_absent(sid, sessions_dir, dry_run):
     pane = (spawned.stdout or "").strip().splitlines()
     print(f"   ✅ resumed session {sid} in a new tab (pane {pane[-1] if pane else '?'}); "
           "nothing was signalled")
-    print("   ↪ manager: the resumed session must RE-ARM its loop (`/supervisor:fleet-loop`) — "
-          "a dead session's scheduled jobs died with it")
+    print("   ↪ manager: its loop was ARMED by the resume prompt "
+          "(`/supervisor:fleet-loop`) — no second re-arm is needed")
     return 0
 
 
@@ -1736,6 +1763,11 @@ def main():
                          "the check through this one implementation instead of copying it")
     ap.add_argument("--cwd", help="with --task-guard: the directory the task lookup starts "
                                   "from, normally the session's vault")
+    ap.add_argument("--resume-prompt", action="store_true",
+                    help="read-only: print the prompt a resume must carry — the loop command "
+                         "for a manager, nothing for a worker. Signals nothing, spawns "
+                         "nothing, always exits 0. `commands/open.md` § 3.1 calls this so its "
+                         "shell recipe never hand-builds (or hand-quotes) the prompt")
     args = ap.parse_args()
     if args.fresh_prompt and args.fresh_prompt_task:
         ap.error("--fresh-prompt and --fresh-prompt-task are exclusive")
@@ -1762,6 +1794,9 @@ def main():
         if token is not None:
             return refuse(token, detail)
         return 0
+
+    if args.resume_prompt:
+        return print_resume_prompt(sid, args.cwd or os.getcwd(), args.sessions_dir)
 
     if args.absent:
         return resume_absent(sid, args.sessions_dir, args.dry_run)
@@ -2000,13 +2035,21 @@ def main():
     # resume keeps `/color <chip>`.
     resume_prompt = None
     if role == "manager":
-        # A subject of None is the ROOT Fleet Manager: `manager_subject` resolves only
-        # topic and goal pages, so skipping it left the fleet manager unarmed — the
-        # exact failure this path exists to fix. Its loop takes no subject.
-        resume_prompt = (
-            manager_loop_prompt(subject[0], subject[1]) if subject
-            else manager_loop_prompt("fleet", "")
-        )
+        if subject:
+            resume_prompt = manager_loop_prompt(subject[0], subject[1])
+        elif name == fb.ROOT_NAME:
+            # The ROOT Fleet Manager has no topic/goal page, so `manager_subject`
+            # returns None for it; its loop takes no subject. Distinguished from a
+            # manager whose subject merely failed to resolve — arming THAT with the
+            # fleet loop would sweep the wrong subject.
+            resume_prompt = manager_loop_prompt("fleet", "")
+        else:
+            print(
+                "   ⚠️ manager: its subject could not be resolved, so its loop is NOT "
+                "armed — re-arm it by hand (`/supervisor:goal-loop <subject>` or "
+                "`/supervisor:topic-loop <subject>`)",
+                file=sys.stderr,
+            )
     try:
         spawned = subprocess.run(
             resume_command(sid, title, chip, cwd, launcher, fresh_prompt, wezterm,
@@ -2034,10 +2077,9 @@ def main():
     )
     if role == "manager":
         print(
-            "   ↪ manager: tell the resumed session it was restarted and must RE-ARM its "
-            "loop (`/supervisor:goal-loop <subject>` or `/supervisor:topic-loop <subject>`, "
-            "or `/supervisor:fleet-loop`) — a "
-            f"killed session's scheduled jobs die with it. Changed: {describe_changed(changed)}"
+            "   ↪ manager: its loop was ARMED by the resume prompt "
+            f"(`{resume_prompt}`) — do NOT type a second re-arm. Tell it what changed: "
+            f"{describe_changed(changed)}"
         )
     else:
         print(
