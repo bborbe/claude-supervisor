@@ -726,6 +726,7 @@ node "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor
 # this session's own launcher.
 RESOLVED=$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/resolve-launcher.py" "<session_id>" --cwd "<cwd>") || exit 1
 LAUNCHER=$(printf '%s' "$RESOLVED" | cut -f1)
+ROLE=$(printf '%s' "$RESOLVED" | cut -f3)
 CHIP=$(printf '%s' "$RESOLVED" | cut -f4)
 
 # The resume prompt. A manager's resume carries its LOOP COMMAND so the loop is armed on
@@ -734,7 +735,15 @@ CHIP=$(printf '%s' "$RESOLVED" | cut -f4)
 # `restart-worker.py --resume-prompt` (one implementation, no hand-quoting of the subject)
 # and passed through `env` so the inner `bash -lc` expands it as ONE argument.
 RESUME_PROMPT=$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/restart-worker.py" "<session_id>" --resume-prompt --cwd "<cwd>")
-[ -n "$RESUME_PROMPT" ] || RESUME_PROMPT="/color $CHIP"
+if [ -z "$RESUME_PROMPT" ]; then
+  RESUME_PROMPT="/color $CHIP"
+  # ⚠️ A manager whose subject cannot be resolved prints NO prompt, so this `/color` fallback
+  # resumes it UNARMED. Say so: a silent fallback leaves a manager that reads as alive and
+  # does no manager work (2026-11-19). A worker's `/color` is correct and says nothing.
+  if [ "$ROLE" = "manager" ]; then
+    echo "⚠️ manager resumed UNARMED (subject unresolved) — re-arm it by hand: /supervisor:goal-loop <subject> or /supervisor:topic-loop <subject>" >&2
+  fi
+fi
 
 # Terminal-task guard: read-only, spawns nothing; `task-terminal` means stop the row.
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/restart-worker.py" "<session_id>" --task-guard --cwd "<cwd>" || exit 1
