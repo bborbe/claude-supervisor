@@ -59,7 +59,7 @@ STEPS = COMMANDS / "steps"
 #: Phrase from the carve-out's own first sentence. A plain substring, so a reflow of the
 #: surrounding prose leaves it intact; rewording that sentence is a deliberate act, and the
 #: failure is the reminder that this home assertion moves with it.
-CARVEOUT = "5b, 5d, 16 and 16b are acting legs"
+CARVEOUT = "5b, 5d and 16b are acting legs"
 CARVEOUT_HOME = COMMANDS / "fleet-drive.md"
 CARVEOUT_NEEDS = ("write tools", "read-only")
 
@@ -70,11 +70,6 @@ POINTER = "commands/fleet-drive.md"
 LEGS = {
     "5b": STEPS / "keepalive.md",
     "5d": STEPS / "own-parks.md",
-    # 16 joined on 2026-11-08 with the open leg's split into `agents/fleet-open-actor.md`. It
-    # acts the same way — it opens every row the rank selected, through `/supervisor:open` —
-    # and it was delegated by the same rule, so it needs the same two guarantees: a write
-    # grant when it is delegated, and its own file saying so.
-    "16": STEPS / "open.md",
     # 16b joined on 2026-11-09 with the manager-subject reap: it posts the reap card and
     # hands every reap line to the caller to send, so it is delegated by the same rule and
     # needs the same two guarantees.
@@ -147,7 +142,7 @@ def main() -> int:
         failures.append(
             f"no file under {COMMANDS.relative_to(REPO)}/ carries the carve-out {CARVEOUT!r}.\n"
             f"      Without it the delegate rule reads as 'anything not the sweep', which\n"
-            f"      swallows rows 5b, 5c, 5d, 16 and 16b — the legs whose whole purpose is to act."
+            f"      swallows rows 5b, 5c, 5d and 16b — the legs whose whole purpose is to act."
         )
     elif total > 1:
         where = ", ".join(f"{p.relative_to(REPO)} ×{n}" for p, n in found)

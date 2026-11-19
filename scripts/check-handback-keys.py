@@ -148,14 +148,6 @@ LEGS = {
     # whose session ENDED is not started). Without them, `opened + refused == selected` is false on
     # any round that activated a live session or resumed a dead one, so a leg that dropped either
     # key would silently leave the caller unable to reconcile at all.
-    "supervisor:fleet-open-actor": {
-        "agent": "agents/fleet-open-actor.md",
-        "sites": ("commands/steps/open.md",),
-        "required": (
-            "status", "selected", "opened", "resumed", "jumped", "refused", "render",
-            "reason", "truncated", "payload",
-        ),
-    },
     # The round itself, since 2026-11-17: the manager dispatches ONE `fleet-round` delegate
     # that reads the step files, runs the legs and persists the round, so the manager's
     # context holds the verdict instead of the rules. Its hand-back is the ONLY channel for

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the fleet round's open leg is gone — the wrapper's flagged tick now opens goal and topic rows.** Row 16 and `commands/steps/open.md` are removed, `agents/fleet-open-actor.md` is retired, and its `check-open-leg-raw-name` guard is deleted; the acting-legs carve-out and `manager-reap.md`'s `When:` now read `every tick`. The wrapper (`bborbe/claude-wrapper#126`, deployed) opens a never-opened goal/topic whose manager-chain probe reads no live manager, so the model-dispatched leg this replaces is no longer the only opener. Adopt orphans (row 4) stays until the wrapper's adopt job is wired.
+
 ## v0.356.2
 
 - fix: **a live manager auto-adopts a dead-spawner gate, so a non-routine permission is answered at the fast path instead of the manager's next turn.** `gate-answer-check.py` escalated every gate whose spawner was not the answering session, so a gate routed away from a dead manager waited for a turn — or timed out at 15 min — which is the p90 tail this closes. Adoption is bounded to a dead spawner (a registry `live_ids()` read; an unreadable registry escalates, never adopts) and runs the full rubric, so a production-touching or `operator`-tier prompt is still refused. Change set: `scripts/gate-answer-check.py`, `scripts/tests/test_gate_answer_check.py`.
