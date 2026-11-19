@@ -1655,6 +1655,27 @@ class FollowTheEndpoint(unittest.TestCase):
             self.assertEqual(fr.liveness_of(self.LIVE_SID), "UNKNOWN")
             self.assertIsNone(fr.live_sessions())
 
+    def test_an_unrecognised_verdict_reads_unknown_not_absent(self):
+        # The endpoint's answer is binary, but a value that is neither is malformed —
+        # and ABSENT licenses a second spawn, so malformed must not reach it.
+        for bogus in ("", "unknown", "ambiguous", "malformed", "LIVE"):
+            self._reset()
+            with self._serve([{"session_id": self.LIVE_SID, "liveness": bogus,
+                               "name": "A Manager"}]):
+                self.assertEqual(fr.liveness_of(self.LIVE_SID), "UNKNOWN",
+                                 "liveness=%r must not read ABSENT" % bogus)
+
+    def test_a_daemon_without_names_withholds_the_identity_map(self):
+        # A daemon predating claude-wrapper#131 serves verdicts with no `name`. The
+        # identity map would then hold an empty name for every live session, which
+        # empties `managers` and makes `open-manager` fire against live managers —
+        # the duplicate-spawn hazard. An answer missing the field is unreadable.
+        with self._serve([
+            {"session_id": self.LIVE_SID, "liveness": "live"},
+            {"session_id": self.CONTRADICTED_SID, "liveness": "live"},
+        ]):
+            self.assertIsNone(fr.live_sessions())
+
 
 if __name__ == "__main__":
     unittest.main()

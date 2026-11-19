@@ -415,6 +415,18 @@ def live_sessions():
     verdicts = read_liveness()
     if verdicts is None:
         return None
+    # A daemon predating `bborbe/claude-wrapper#131` serves verdicts with no `name`
+    # at all. Building the identity map from those yields a live session with an
+    # empty name for EVERY row, `live_session_names` skips empties, so `managers`
+    # becomes an empty set — and `subject_live` then answers False for every
+    # subject, emitting `open-manager` against live managers. That is the
+    # duplicate-spawn hazard this file exists to prevent, reached through a field
+    # the old daemon does not carry. An answer missing the field entirely is an
+    # unreadable answer: return None, never an empty map.
+    if verdicts and not any("name" in verdict for verdict in verdicts):
+        print("flagged-rows: liveness endpoint carries no names (daemon predates "
+              "claude-wrapper#131) — identity map unavailable", file=sys.stderr)
+        return None
     sessions = {}
     for verdict in verdicts:
         if verdict.get("liveness") != "live":
@@ -482,8 +494,19 @@ def liveness_of(sid):
     if verdicts is None:
         return "UNKNOWN"
     for verdict in verdicts:
-        if verdict.get("session_id") == sid:
-            return "LIVE" if verdict.get("liveness") == "live" else "ABSENT"
+        if verdict.get("session_id") != sid:
+            continue
+        # ⚠️ Only the two documented values decide. The endpoint's answer is binary
+        # (`live` / `not-live`), but a value that is neither is a malformed answer,
+        # and malformed must not become ABSENT: ABSENT licenses spawning a second
+        # session, so folding an unrecognised value into it re-opens the
+        # duplicate-spawn hazard this file exists to close.
+        state = verdict.get("liveness")
+        if state == "live":
+            return "LIVE"
+        if state == "not-live":
+            return "ABSENT"
+        return "UNKNOWN"
     return "UNKNOWN"
 
 
