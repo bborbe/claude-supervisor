@@ -126,6 +126,12 @@ def main() -> int:
             f"only-router={sorted(router[0] - agent[0])} "
             f"only-agent={sorted(agent[0] - router[0])}"
         )
+    if router[1] != dispatch[1]:
+        problems.append(
+            f"router and dispatch disagree on the manager's rows: "
+            f"only-router={sorted(router[1] - dispatch[1])} "
+            f"only-dispatch={sorted(dispatch[1] - router[1])}"
+        )
     if router[1] != agent[1]:
         problems.append(
             f"router and the agent's § 2 disagree: "
