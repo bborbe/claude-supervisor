@@ -17,6 +17,7 @@ Fixtures are built from `check-handback-keys.LEGS` rather than hand-listed, so t
 checkers cannot drift apart.
 """
 import importlib.util
+import json
 import pathlib
 import shutil
 import subprocess
@@ -112,6 +113,132 @@ class CheckHandbackSizeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("agents/fleet-round.md", result.stderr)
         self.assertIn("missing", result.stderr)
+
+
+def transcript_line(text):
+    return json.dumps({"type": "assistant",
+                       "message": {"role": "assistant",
+                                   "content": [{"type": "text", "text": text}]}})
+
+
+class TranscriptModeTest(unittest.TestCase):
+    """`--transcript`: the EMITTED hand-back, where absent is a failure and not 0 B.
+
+    Measured 2026-11-18 on eight live `supervisor:fleet-round` delegates: seven emitted a
+    54–111 B closing remark and no verdict at all, and the eighth emitted prose at 1 510 B.
+    A literal "≤ 1 KB" test passes all seven, which is why absence must fail.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write(self, name, *texts):
+        path = pathlib.Path(self.dir) / name
+        path.write_text("\n".join(transcript_line(t) for t in texts), encoding="utf-8")
+        return path
+
+    def run_transcript(self, path):
+        return subprocess.run([sys.executable, str(SIZE_SCRIPT), "--transcript", str(path)],
+                              capture_output=True, text=True)
+
+    def test_a_round_id_block_under_the_cap_passes(self):
+        path = self.write("a.jsonl", "**Round 1795010883.8338208 — final verdict**\n\n- digest: x")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("(emitted)", result.stdout)
+
+    def test_an_oversize_round_id_block_fails(self):
+        path = self.write("b.jsonl", "**Round 1795010883 — final verdict**\n\n" + "- x\n" * 400)
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("over its", result.stderr)
+
+    def test_an_absent_hand_back_fails_rather_than_reading_zero(self):
+        path = self.write("c.jsonl", "I'll start by reading the router and the step files.")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no `**Hand-back**` fence and no round-id block", result.stderr)
+
+    def test_a_fence_wrapped_in_prose_is_measured_as_the_whole_block(self):
+        """The fence branch must not measure only the fenced body.
+
+        A delegate using the authored shape still wraps it in a heading, a table and a
+        trailing note; measuring the fence alone under-reported a 1 098 B message as 40 B
+        and passed it 74 B over the cap.
+        """
+        keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-round"]["required"]
+        wrapped = (
+            "The round is complete. Hand-back delivered.\n\n"
+            "**Round 1795010883 — final verdict**\n\n"
+            "**Hand-back**\n\n```text\n"
+            + " · ".join(f"{k}=<n>" for k in keys)
+            + "\n```\n</output_format>\n\n"
+            + "- a payload bullet that the contract says belongs elsewhere\n" * 20
+        )
+        path = self.write("e.jsonl", wrapped)
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("over its", result.stderr)
+
+    def test_the_largest_matching_block_is_measured_not_the_last(self):
+        """A verdict followed by a short round-id remark must not read as the remark."""
+        verdict = "**Round 1795010883 — final verdict**\n\n" + "- x\n" * 400
+        path = self.write("i.jsonl", verdict, "Round 1795010883 complete — hand-back delivered.")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("over its", result.stderr)
+
+    def test_variable_lines_are_excluded_in_transcript_mode(self):
+        """The contract declares these rows unbounded, so a long row list still passes."""
+        keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-keepalive-actor"]["required"]
+        rows = "\n".join(f"crash-loop: subject-{i} · WORKER" for i in range(40))
+        path = self.write("j.jsonl",
+                          "**Hand-back**\n\n```text\n"
+                          + " · ".join(f"{k}=<n>" for k in keys)
+                          + "\n" + rows + "\n```\n</output_format>")
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript", str(path),
+             "--agent-type", "supervisor:fleet-keepalive-actor"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_missing_transcript_dir_fails(self):
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript-dir", str(pathlib.Path(self.dir) / "nope")],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a directory", result.stderr)
+
+    def test_a_dir_matching_no_agent_type_fails(self):
+        """A typo'd agent type must not print `ok: 0` — an empty set is a failure."""
+        self.write("f.jsonl", "**Round 1795010883 — final verdict**\n")
+        (pathlib.Path(self.dir) / "f.meta.json").write_text(
+            json.dumps({"agentType": "supervisor:other-leg"}), encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript-dir", self.dir],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no transcript matched", result.stderr)
+
+    def test_dir_mode_measures_matching_transcripts(self):
+        self.write("g.jsonl", "**Round 1795010883 — final verdict**\n")
+        self.write("h.jsonl", "I'll start by reading the router.")
+        result = subprocess.run(
+            [sys.executable, str(SIZE_SCRIPT), "--transcript-dir", self.dir],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("h.jsonl", result.stderr)   # the absent one is named
+        self.assertNotIn("g.jsonl", result.stderr)  # the present one is not
+
+    def test_the_authored_fence_shape_also_counts(self):
+        keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-round"]["required"]
+        path = self.write("d.jsonl",
+                          "**Hand-back**\n\n```text\n"
+                          + " · ".join(f"{k}=<n>" for k in keys)
+                          + "\n```\n</output_format>")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
