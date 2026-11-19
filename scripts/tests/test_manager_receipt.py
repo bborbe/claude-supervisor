@@ -2736,3 +2736,84 @@ class RoundBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoundEndPersisted(unittest.TestCase):
+    """`--handback` persists the round's end, and a rewrite cannot move it.
+
+    The defect this closes was measured 2026-11-19: a 24 h overlap sample had **no end**
+    for 18 of 19 rounds, because the receipt keeps only the current and previous one —
+    and the max-mtime fallback it used instead was gameable in both directions. The
+    hand-back is the one artifact written once per round, so it is where the end lives.
+
+    Both directions are pinned: the stamp is written, and a SECOND `--handback` for the
+    same round keeps the FIRST stamp. Without the second test, a late delegate would move
+    the end and reintroduce the confound the field exists to remove.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+        self.topic = "Fleet Manager"
+        self.slug = "fleet--fleet-manager"
+
+    def tearDown(self):
+        for t in (self.tmp, self.live):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+        os.environ.pop("MANAGER_HANDBACK_STATE_DIR", None)
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def fleet(self, *argv):
+        return self.cli(*argv, "--subject", self.topic, "--branch", "fleet")
+
+    def started(self):
+        with open(os.path.join(self.tmp.name, self.slug + ".json"), encoding="utf-8") as fh:
+            return json.load(fh)["round_started_at"]
+
+    def test_handback_persists_the_round_end(self):
+        self.fleet("--start")
+        started = self.started()
+        before = time.time()
+        self.assertEqual(self.fleet("--handback", "--round", repr(started),
+                                    "--text", "summary")[0], 0)
+        end = self.m.round_end_from_handback(started)
+        self.assertIsNotNone(end)
+        self.assertGreaterEqual(end, before - 1)
+        with open(self.m.handback_path(started), encoding="utf-8") as fh:
+            self.assertTrue(fh.readline().startswith("ended_at="))
+
+    def test_a_second_handback_keeps_the_first_end(self):
+        # The late-delegate rewrite. If it moved the end, the metric would read rewrite
+        # time again — the exact confound this field exists to remove.
+        self.fleet("--start")
+        started = self.started()
+        self.fleet("--handback", "--round", repr(started), "--text", "first")
+        first = self.m.round_end_from_handback(started)
+        time.sleep(0.05)
+        self.fleet("--handback", "--round", repr(started), "--text", "second, late")
+        self.assertEqual(self.m.round_end_from_handback(started), first)
+
+    def test_a_handback_without_the_field_reads_none(self):
+        # A file written before this change (or by an older delegate) carries no stamp —
+        # the reader must answer None rather than inventing one.
+        self.fleet("--start")
+        started = self.started()
+        with open(self.m.handback_path(started), "w", encoding="utf-8") as fh:
+            fh.write("legacy body, no stamp\n")
+        self.assertIsNone(self.m.round_end_from_handback(started))
+
+
+if __name__ == "__main__":
+    unittest.main()
