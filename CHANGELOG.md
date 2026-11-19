@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.8
 
 - fix: **`commands/steps/fleet-round-tail.md` now runs BEFORE the manager prints the render, which is the ordering its own text used to make impossible.** PR 3 of the seven-PR lever-(b) order. Row 20 is the delegate's — it writes `<round>.render` and returns — so the tail (row 19) runs afterwards, in the manager, judging its own `re-arm` epoch and the receipt it wrote; **only then** does the manager print the render. ⚠️ **Three passages said the opposite** ("carry both to the `Legs` render at row 20", "still render row 20, then end the turn"); under the old split they were satisfiable, and after PRs 1–2 they were not — the tail's receipt check and `fleet-legs --status` verdict could never reach the operator's block, which is the exact failure this tail step exists to prevent. The file now states the order at its head and points its two carry-forward lines at the print that follows it. Change set: `commands/steps/fleet-round-tail.md`, `CHANGELOG.md`.
 
