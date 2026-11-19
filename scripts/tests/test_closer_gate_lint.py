@@ -717,6 +717,69 @@ class CloserGateLintTest(unittest.TestCase):
                 self.assertIsNone(record["class"])
                 self.assertIsNone(record["phrase"])
 
+    def test_a_liveness_probe_on_a_full_session_id_is_durable(self):
+        # Measured 2026-11-19 in the Fleet Manager session: the lint blocked this
+        # compliant line as `run-in-background-shell`. No DURABLE arm covered a local
+        # probe, so the `(background shell …)` mechanism slot — which CLAUDE.md
+        # § Async State Closer REQUIRES — decided the outcome. The probe is re-runnable
+        # after the session ends, which is the closer contract's own test.
+        for body in (
+            "⏰ Ends:   `session-liveness.py --check 345a6131-f063-45bf-a2fb-7caba6718425`"
+            " reads LIVE (background shell bnu7e6xx6)",
+            "⏰ Ends:   `session-liveness.py --check` reads LIVE for"
+            " `345a6131-f063-45bf-a2fb-7caba6718425` and"
+            " `49b471f1-a8a6-48b0-b2b2-14b9cb2437e3` (background shell bnu7e6xx6)",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.session_bound_class(body))
+        # The other half, and the guard against a permissive fix: the arm keys on the
+        # probe AND a full uuid, so either half alone still blocks.
+        for body in (
+            # an 8-char prefix is not re-probeable (`/supervisor:open` refuses it)
+            "⏰ Ends:   `session-liveness.py --check 345a6131` reads LIVE"
+            " (background shell bnu7e6xx6)",
+            # the same uuid against a non-probe script
+            "⏰ Ends:   `foo.py --check 345a6131-f063-45bf-a2fb-7caba6718425` reads LIVE"
+            " (background shell bnu7e6xx6)",
+            # the probe with no id at all
+            "⏰ Ends:   `session-liveness.py --check` reads LIVE"
+            " (background shell bnu7e6xx6)",
+            # a uuid with no probe name
+            "⏰ Ends:   345a6131-f063-45bf-a2fb-7caba6718425 is the id"
+            " (background shell bnu7e6xx6)",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual("run-in-background-shell",
+                                 self.mod.session_bound_class(body))
+
+    def test_a_vault_cli_task_field_read_is_durable(self):
+        # Second measured repro, same run: a task-file field stays readable after the
+        # session ends, so it is durable — but the `(sub-agent spawn)` slot matched
+        # `background-sub-agent` and no DURABLE arm covered the read.
+        for body in (
+            '⏰ Ends:   vault-cli --vault private-personal task get'
+            ' "A Manager Is Never Headless and Arms Its Own Loop on Resume"'
+            " claude_session_id is non-empty (sub-agent spawn)",
+            '⏰ Ends:   `vault-cli task get "Some Task" phase` prints execution'
+            " (background shell bnu7e6xx6)",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.session_bound_class(body))
+        # A bare `task get` names no field, so it re-reads nothing observable.
+        self.assertEqual("background-sub-agent", self.mod.session_bound_class(
+            '⏰ Ends:   vault-cli task get "Some Task" prints execution'
+            " (sub-agent spawn)"))
+
+    def test_a_non_durable_observable_is_still_blocked_by_its_slot(self):
+        # ⚠️ The regression guard for the durable-first ordering, NOT a discriminator for
+        # the new arms — it passes before and after. A background shell dies with the
+        # session, so the slot decides; that is exactly why stripping the parenthetical
+        # (the rejected fix) would newly allow this line.
+        self.assertEqual("run-in-background-shell", self.mod.session_bound_class(
+            "⏰ Ends: the background shell finishes (background shell bnu7e6xx6)"))
+        self.assertIsNone(self.mod.session_bound_class(
+            "⏰ Ends:   `/tmp/x.log` exists (background shell bnu7e6xx6)"))
+
     def test_an_unqualified_pr_reference_is_blocked(self):
         # ⚠️ Both recorded bare shapes, verbatim: `PR #516` and `PR 738` (no hash). A
         # matcher built to `PR #N` alone passes the second, which is just as unprobeable.

@@ -402,6 +402,26 @@ DURABLE = (
         r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
         r"|\b(?:files?|mtime)\b", re.IGNORECASE)),
     ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
+    # ⚠️ Two LOCAL probes, each re-runnable after the session ends — the closer
+    # contract's own test. Measured 2026-11-19 in the Fleet Manager session: both were
+    # blocked, and the session-bound word that decided each one was the
+    # `(mechanism, id)` slot CLAUDE.md § Async State Closer REQUIRES. Neither is a
+    # loosening: a background shell dies with the session, which is why it still blocks
+    # (`test_a_non_durable_observable_is_still_blocked_by_its_slot`).
+    #
+    # The liveness arm needs BOTH halves — the probe name and a full uuid. An 8-char
+    # prefix is not re-probeable (`commands/open.md` refuses one as `❌ TRUNCATED ID`),
+    # and a uuid with no probe names nothing to re-run.
+    ("liveness-probe", re.compile(
+        r"\bsession-liveness\.py\b[^\n]*?"
+        r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", re.IGNORECASE)),
+    # The task-field arm is keyed to a KNOWN field name, never to "any trailing token":
+    # `task get "<title>" prints execution` is a statement, not a field read, and a
+    # looser pattern would clear it. Extend this list when a new field becomes load-bearing.
+    ("task-field-read", re.compile(
+        r"\bvault-cli\b[^\n]*?\btask\s+get\b[^\n]*?[\"'][^\"']+[\"']\s+"
+        r"(?:phase|status|assignee|claude_session_id|task_identifier|defer_date|due_date"
+        r"|priority|category|mode|role|flag|title)\b", re.IGNORECASE)),
     ("clock", re.compile(
         r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}"
         r"(?:[Tt ]\d{2}(?::\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?"
