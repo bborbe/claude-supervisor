@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`attention-ask.py` refuses a card that asks the operator to type into a pane.** A card carrying "you run: type anything in pane 229 and press Enter" asked for a keystroke the asking session owns — it has `wezterm cli send-text` — and the pane in the reported case had not existed for hours; the card reopened seven times. `pane_ask_refusal` now matches the instruction in the payload or the context and refuses in **both** pane states, naming `wezterm cli send-text --pane-id N` as the action the posting session must take itself: a live pane is still not the operator's to poke, and a dead one has nothing to poke at. The rule is stated once in `commands/steps/needs-input.md`. Change set: `scripts/attention-ask.py`, `scripts/tests/test_attention_ask.py`, `commands/steps/needs-input.md`.
+
 ## v0.352.14
 
 - fix: **`commands/steps/act.md` separates the two slash commands it names — one the delegate may run, one it may not.** PR 7 of the seven-PR lever-(b) order. Row 8's act step files a task with `/vault-cli:create-task` and spawns with `/supervisor:open`; **the first is legal for the delegate now that it holds `Skill`, the second never is** — `/supervisor:open` is a manager-only verb (`docs/session-tiers.md`) and a worker must not run it. The step now says so, **conditionally on the reader**: create-task runs here either way; a spawn stays a spawn **while the manager still owns row 8** (today), and becomes a **route** — task and readiness rendered, the manager opens it — the moment the row moves to the delegate. ⚠️ **Row 8 has not moved yet** — the four-place move is its own change, landing last. ⚠️ **This is the last of the six step files (the seventh PR is the contract row); the move is what makes any of them live.** Change set: `commands/steps/act.md`, `CHANGELOG.md`.
