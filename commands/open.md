@@ -726,12 +726,29 @@ node "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor
 # this session's own launcher.
 RESOLVED=$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/resolve-launcher.py" "<session_id>" --cwd "<cwd>") || exit 1
 LAUNCHER=$(printf '%s' "$RESOLVED" | cut -f1)
+ROLE=$(printf '%s' "$RESOLVED" | cut -f3)
 CHIP=$(printf '%s' "$RESOLVED" | cut -f4)
+
+# The resume prompt. A manager's resume carries its LOOP COMMAND so the loop is armed on
+# the first turn (the pane wake cannot be relied on — measured 2026-11-19: 2 of 5 resumed
+# panes never passed `pane-wake-guard.py` within 90 s); a worker's is the colour. Built by
+# `restart-worker.py --resume-prompt` (one implementation, no hand-quoting of the subject)
+# and passed through `env` so the inner `bash -lc` expands it as ONE argument.
+RESUME_PROMPT=$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/restart-worker.py" "<session_id>" --resume-prompt --cwd "<cwd>")
+if [ -z "$RESUME_PROMPT" ]; then
+  RESUME_PROMPT="/color $CHIP"
+  # ⚠️ A manager whose subject cannot be resolved prints NO prompt, so this `/color` fallback
+  # resumes it UNARMED. Say so: a silent fallback leaves a manager that reads as alive and
+  # does no manager work (2026-11-19). A worker's `/color` is correct and says nothing.
+  if [ "$ROLE" = "manager" ]; then
+    echo "⚠️ manager resumed UNARMED (subject unresolved) — re-arm it by hand: /supervisor:goal-loop <subject> or /supervisor:topic-loop <subject>" >&2
+  fi
+fi
 
 # Terminal-task guard: read-only, spawns nothing; `task-terminal` means stop the row.
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/restart-worker.py" "<session_id>" --task-guard --cwd "<cwd>" || exit 1
 
-wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" CLAUDE_CODE_ENTRYPOINT=cli bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "'"$LAUNCHER"'" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
+wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" CLAUDE_CODE_ENTRYPOINT=cli RESUME_PROMPT="$RESUME_PROMPT" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "'"$LAUNCHER"'" --resume <session_id> -n "<title>" "$RESUME_PROMPT"'
 ```
 
 ⚠️ **No `exec` in this shape — adding one back silently destroys the exit status.** `exec` replaces the pane's shell with Claude, so nothing is left to `waitpid` and `137` (a value only the *parent* can read) stops existing. Measured 2026-10-27: with the launcher as a child behind `trap _sx EXIT`, a `kill -9` prints `rc=137`; behind `exec`, the trap cannot fire at all and nothing is recorded. The trap is what turns a death into a line in `~/.claude/state/session-exit/pane-<pane>.log`.
@@ -752,9 +769,11 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 **`--cwd` is the other half of the same trap, and it is not inherited either.** Without it the tab inherits *wezterm's* working directory — `$HOME` for a server started from a home directory — and Claude Code stops on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* before registering a pid, so a resume that worked reads as a no-op. Resolve the value **before** the spawn, and never guess it. ⚠️ **The resolution rule — its two sources, its orphan branch, and the refusal — has its single home in [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker), at *the resume decisions list, item 3* — "`cwd` (or `vault`) is not inherited on a resume". Read it there; state no resolution rule here.** ⚠️ **Cite it by that name, never as a bare "item 3":** § Spawn a worker holds two numbered lists, and a bare `item N` in this repo means the **readiness ladder**, whose item 3 is an unrelated check. ⚠️ **In particular, `session-liveness.py --list --json` is NOT that rule** — it lists live sessions only, and this block is § 3.1, *the resume branch*, whose session is by definition one whose liveness could not be determined. A live-only source is structurally empty for exactly the case this block exists to serve.
 
-**Order matters here: pass `/color` as the spawn prompt → send the work command after.** The colour is the *only* thing that belongs in this spawn's prompt argument. Do NOT pass the work prompt there — a session spawned with it is busy from its first instant.
+**Order matters here: pass `$RESUME_PROMPT` as the spawn prompt → send the work command after.** For a WORKER that is `/color $CHIP`, the only thing that belongs in its prompt argument — do NOT pass the work prompt there, a session spawned with it is busy from its first instant.
 
-The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at startup and reports `Session color set to: <chip>`, then idles. `$CHIP` is § 3.0's role-resolved value, so the colour follows the role rather than a fixed default. Override the colour with `--color <name>`; valid: `red, blue, green, yellow, purple, orange, pink, cyan, default`.
+⚠️ **A MANAGER resume is the exception: its prompt carries the loop command, because the pane wake cannot be relied on to arm it.** Measured 2026-11-19: 2 of 5 resumed manager panes never passed `pane-wake-guard.py` within 90 s, so the loop the pane wake was to type was never armed, and the manager read as alive while doing no manager work. For a manager, `<resume_prompt>` is `/supervisor:goal-loop "<subject>"`, `/supervisor:topic-loop "<subject>"`, or `/supervisor:fleet-loop`; the colour is dropped on that path (a manager's armed loop is load-bearing, its chip is not). The single implementation is `scripts/restart-worker.py`'s `manager_loop_prompt` + `resume_command(resume_prompt=…)`; a hand-written copy of the recipe must produce the same prompt, and the subject's inner quotes must be escaped for the `bash -lc` string exactly as `bash_dq_escape` does it.
+
+The trailing `"$RESUME_PROMPT"` is the initial prompt. For a worker it is `/color $CHIP` — Claude executes it at startup and reports `Session color set to: <chip>`, then idles; `$CHIP` is § 3.0's role-resolved value. For a manager it is the loop command, so the loop is armed on the first turn. Override the colour with `--color <name>`; valid: `red, blue, green, yellow, purple, orange, pink, cyan, default`.
 
 **The resume branch selects its path; not always this one.** `mode:` first, then liveness — single home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker)'s resume table. `interactive` → this path; headless/absent + **ABSENT** → § 3 headless resume (`cwd`, paced); **LIVE** → neither; **UNKNOWN**/**AMBIGUOUS** → this path.
 
