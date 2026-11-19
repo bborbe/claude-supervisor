@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the exit-observer keeper records a routine re-arm on disk and cards only on failure, so a clean death no longer reaches the attention board.** `scripts/exit-observer-keeper.py` posted an `ack` card for every manager-pane exit-observer death before re-arming; a death that re-arms cleanly needs no operator action, so it now appends a line to `keeper-rearms.jsonl` before the re-arm and files a card only when the record cannot be written or the re-arm fails — the card is the fallback trace, never the routine one. ⚠️ **The ordering is the point:** the record is written BEFORE the re-arm, because a re-armed pane reads `covered` again and a record written after it would be the only sign the writer ever died. Supersedes the "card is filed before the re-arm" rule (operator decision 2026-11-19: *"is useless … dont put this on the attention board"*); the 2026-11-06 `fleet-keeper` no-kill pin is unrelated and stays. Change set: `scripts/exit-observer-keeper.py`, `scripts/tests/test_exit_observer_keeper.py`, `CHANGELOG.md`.
+
 ## v0.356.2
 
 - fix: **a live manager auto-adopts a dead-spawner gate, so a non-routine permission is answered at the fast path instead of the manager's next turn.** `gate-answer-check.py` escalated every gate whose spawner was not the answering session, so a gate routed away from a dead manager waited for a turn — or timed out at 15 min — which is the p90 tail this closes. Adoption is bounded to a dead spawner (a registry `live_ids()` read; an unreadable registry escalates, never adopts) and runs the full rubric, so a production-touching or `operator`-tier prompt is still refused. Change set: `scripts/gate-answer-check.py`, `scripts/tests/test_gate_answer_check.py`.

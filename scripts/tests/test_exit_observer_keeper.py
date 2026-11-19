@@ -3,8 +3,9 @@
 
 The load-bearing properties:
 
-- a silent pane files ONE card and is re-armed only after that card exists;
-- **no card, no re-arm** — the other order hides the death behind a covered pane;
+- a silent pane leaves ONE ledger line and is re-armed, with NO card (a routine death);
+- the ledger line is written BEFORE the re-arm, so a re-armed pane cannot hide the death;
+- a card is the fallback: exactly one when the record cannot be written or the re-arm fails;
 - a failed re-arm is reported, never swallowed;
 - a sweep that resolves nothing reports its `unknown` count instead of calling the fleet clean.
 
@@ -56,51 +57,95 @@ class _Base(unittest.TestCase):
         os.utime(path, (NOW - age, NOW - age))
 
 
-class CardBeforeRearm(_Base):
+class RecordThenRearm(_Base):
     def setUp(self):
         super().setUp()
+        self._orig_record = k.record
+        self.addCleanup(lambda: setattr(k, "record", self._orig_record))
         self.panes = {"7": {"pid": 4242, "session": "sess", "name": "Fleet Manager",
                             "session_id": SILENT["session_id"]}}
+        self.cards = 0
 
-        def run(argv, **kw):
-            self.calls.append(argv)
-            return _Done("item-42") if pathlib.Path(argv[1]).name == "attention-ask.py" else _Done("")
-        k.subprocess.run = run
-
-    def test_silent_pane_is_carded_then_rearmed(self):
-        self.write_log()
-        self.assertEqual(k.check(NOW, self.panes), 0)
-        scripts = [pathlib.Path(a[1]).name for a in self.calls]
-        self.assertEqual(scripts, ["attention-ask.py", "session-exit-record.py"])
-        self.assertIn("observe", self.calls[-1])
-        self.assertIn("4242", self.calls[-1])
-
-    def test_failed_card_means_no_rearm(self):
         def run(argv, **kw):
             self.calls.append(argv)
             if pathlib.Path(argv[1]).name == "attention-ask.py":
-                return _Done("", returncode=1)
+                self.cards += 1
+                return _Done("item-42")
+            return _Done("")
+        k.subprocess.run = run
+
+    def ledger(self):
+        path = self.store / "keeper-rearms.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    def scripts(self):
+        return [pathlib.Path(a[1]).name for a in self.calls]
+
+    def test_routine_death_is_recorded_then_rearmed_with_no_card(self):
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes), 0)
+        rows = self.ledger()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pane"], "7")
+        self.assertEqual(rows[0]["session"], SILENT["session_id"])
+        self.assertEqual(rows[0]["beat_at"], int(NOW - 600))
+        self.assertEqual(self.cards, 0, "a routine death must not reach the board")
+        self.assertIn("session-exit-record.py", self.scripts())
+
+    def test_record_is_written_before_the_rearm(self):
+        seen = {}
+
+        def run(argv, **kw):
+            self.calls.append(argv)
+            if pathlib.Path(argv[1]).name == "session-exit-record.py":
+                seen["rows"] = self.ledger()
             return _Done("")
         k.subprocess.run = run
         self.write_log()
-        self.assertEqual(k.check(NOW, self.panes), 1)
-        self.assertNotIn("session-exit-record.py",
-                         [pathlib.Path(a[1]).name for a in self.calls])
+        self.assertEqual(k.check(NOW, self.panes), 0)
+        self.assertEqual(len(seen.get("rows", [])), 1,
+                         "the ledger line must exist before the re-arm runs")
 
-    def test_failed_rearm_is_reported(self):
+    def test_failed_record_posts_one_card_and_still_rearms(self):
+        k.record = lambda *a, **kw: False
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes), 0)
+        self.assertEqual(self.cards, 1)
+        self.assertIn("session-exit-record.py", self.scripts())
+
+    def test_failed_rearm_posts_exactly_one_card(self):
         def run(argv, **kw):
             self.calls.append(argv)
             if pathlib.Path(argv[1]).name == "attention-ask.py":
+                self.cards += 1
                 return _Done("item-42")
             return _Done("", returncode=1)
         k.subprocess.run = run
         self.write_log()
         self.assertEqual(k.check(NOW, self.panes), 1)
+        self.assertEqual(self.cards, 1)
+
+    def test_both_failures_post_exactly_one_card(self):
+        k.record = lambda *a, **kw: False
+
+        def run(argv, **kw):
+            self.calls.append(argv)
+            if pathlib.Path(argv[1]).name == "attention-ask.py":
+                self.cards += 1
+                return _Done("item-42")
+            return _Done("", returncode=1)
+        k.subprocess.run = run
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes), 1)
+        self.assertEqual(self.cards, 1)
 
     def test_fresh_log_does_nothing(self):
         self.write_log(age=10)
         self.assertEqual(k.check(NOW, self.panes), 0)
         self.assertEqual(self.calls, [])
+        self.assertEqual(self.ledger(), [])
 
 
 class Sweep(_Base):

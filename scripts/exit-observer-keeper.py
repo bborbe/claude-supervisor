@@ -14,9 +14,11 @@ exists to break, so every pass rewrites `~/.claude/state/session-exit/keeper-hea
 One existing reader, no second instrument. A long-lived process is only safe to run because
 that heartbeat exists.
 
-**The card is filed before the re-arm, and the re-arm runs only when the card exists.** The
-other order hides the death: a re-armed pane reads `covered` again, so a card that failed to
-reach the board would leave no trace that the writer ever died.
+**A routine death is recorded on disk, not carded.** The keeper appends one line to
+`keeper-rearms.jsonl` before it re-arms, so a death that re-arms cleanly needs no operator
+action and never reaches the board (operator decision 2026-11-19). It files an `ack` card only
+when the record cannot be written or the re-arm fails — the card is the fallback trace, so a
+death is never silent. This supersedes the earlier "card is filed before the re-arm" rule.
 
 **Why this is not a step in `fleet-keeper.py`:** that script is pinned by `NoKillPathTest` to
 hold no kill, resume, re-arm or spawn path (operator decision 2026-11-06, card `7653b7b6`).
@@ -195,12 +197,30 @@ def _alive(pid):
         return False
 
 
+def record(pane, session_id, beat_at):
+    """Append one line to the re-arm ledger. Returns True when it landed on disk.
+
+    This is the durable trace a routine death leaves instead of a board card. It is written
+    BEFORE the re-arm: a re-armed pane reads `covered` again, so a record that landed after the
+    re-arm would be the only sign the writer ever died — and losing it would lose the death.
+    """
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "keeper-rearms.jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"pane": str(pane), "session": session_id or "",
+                                     "beat_at": int(beat_at)}) + "\n")
+        return True
+    except OSError:
+        return False
+
+
 def card(pane, name, session_id, beat_at):
     """File one `ack` card for this death. Returns the item id, or `None` when it did not land."""
     payload = (
         f"The exit observer for {name or '?'} (pane {pane}, session {str(session_id)[:8]}) has "
         f"died: the pane's last heartbeat is stale, so the session runs with no writer and its "
-        f"next death would leave no record. The keeper re-arms it once this card exists."
+        f"next death would leave no record. The keeper's on-disk record or its re-arm failed, "
+        f"so this card is the trace."
     )
     try:
         out = subprocess.run(
@@ -229,35 +249,48 @@ def rearm(pane, pid, session):
 
 
 def check(now, panes, dry_run=False):
-    """One `stat` pass over the watched panes. Returns the exit code for this pass."""
+    """One `stat` pass over the watched panes. Returns the exit code for this pass.
+
+    The trace is written BEFORE the re-arm. A routine death leaves a ledger line and no card;
+    a card is the fallback only when the record cannot be written or the re-arm fails.
+    """
     rc = 0
     for pane, ident in panes.items():
         path = os.path.join(STATE_DIR, f"pane-{pane}.log")
         try:
-            age = now - os.stat(path).st_mtime
+            beat_at = int(os.stat(path).st_mtime)
         except OSError:
             continue
-        if age <= OBSERVER_STALE:
+        if now - beat_at <= OBSERVER_STALE:
             continue
         if dry_run:
-            print(f"exit-observer-keeper: would card and re-arm pane {pane} "
-                  f"(pid {ident.get('pid')}, silent {int(age)} s)")
+            print(f"exit-observer-keeper: would record and re-arm pane {pane} "
+                  f"(pid {ident.get('pid')}, silent {int(now - beat_at)} s)")
             continue
-        item = card(pane, ident.get("name", ""), ident.get("session_id", ""),
-                    int(os.stat(path).st_mtime))
-        if not item:
-            # Deliberately no re-arm: see the module docstring.
-            print(f"exit-observer-keeper: pane {pane} card did not land — leaving it unrecorded "
-                  f"rather than hiding the death", file=sys.stderr)
+        recorded = record(pane, ident.get("session_id", ""), beat_at)
+        item = None
+        if not recorded:
+            # The ledger is the trace; if it cannot be written, the card is the fallback.
+            item = card(pane, ident.get("name", ""), ident.get("session_id", ""), beat_at)
+        rearm_ok = rearm(pane, ident.get("pid"), ident.get("session") or "")
+        if not rearm_ok and not item:
+            item = card(pane, ident.get("name", ""), ident.get("session_id", ""), beat_at)
+        if not rearm_ok:
+            print(f"exit-observer-keeper: pane {pane} RE-ARM FAILED "
+                  f"({'carded ' + item if item else 'no card landed'})", file=sys.stderr)
             rc = 1
             continue
-        if not rearm(pane, ident.get("pid"), ident.get("session") or ""):
-            print(f"exit-observer-keeper: pane {pane} carded ({item}) but the RE-ARM FAILED — it "
-                  f"stays unrecorded", file=sys.stderr)
+        if not recorded and not item:
+            print(f"exit-observer-keeper: pane {pane} re-armed with no record and no card",
+                  file=sys.stderr)
             rc = 1
             continue
-        print(f"exit-observer-keeper: pane {pane} carded ({item}) and re-armed "
-              f"(pid {ident.get('pid')})")
+        if item:
+            print(f"exit-observer-keeper: pane {pane} carded ({item}) and re-armed "
+                  f"(pid {ident.get('pid')})")
+        else:
+            print(f"exit-observer-keeper: pane {pane} recorded and re-armed "
+                  f"(pid {ident.get('pid')})")
     return rc
 
 
