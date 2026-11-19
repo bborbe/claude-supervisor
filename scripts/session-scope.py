@@ -344,6 +344,7 @@ class Scope:
     own_titles: set
     self_goals: list
     reason: str
+    manager_scope: bool = False
 
     @property
     def resolved(self):
@@ -377,6 +378,52 @@ class Scope:
         if goal:
             return True, f"foreign-goal:{goal}"
         return True, "owner-unknown"
+
+    def admission(self, session_id, self_id):
+        """`(admit?, reason)` for one gated session — the fail-CLOSED twin of `exclusion()`.
+
+        ⚠️ **The two answer different questions and therefore take opposite defaults.**
+        `exclusion()` asks "may this row be hidden from the feed", where hiding on a failed
+        read silences the fleet — so it fails open. This asks "may this manager ANSWER this
+        row's gate", where admitting on a failed read is the blanket widening the manager
+        contract forbids — so it fails closed. Same four reads, same vault, opposite default;
+        a caller that swaps one for the other turns it into the other.
+
+        Admit only when the session resolves to exactly one page whose title is in this
+        manager's own scope. Everything else refuses: unresolved scope, no page, two pages, a
+        foreign goal, a page declaring none.
+        """
+        if not self.resolved:
+            return False, "scope unresolved: %s" % (self.reason or "no page for this manager")
+        # ⚠️ Only a MANAGER may answer, and `manager_scope` is the only proof of that: it is
+        # set by `load()`'s goal-page branch alone. Without it a session stamped on a TASK
+        # page — a worker — inherits its goal's whole task set and could answer its siblings'
+        # cards. `exclusion()` may keep those rows (it fails open); admission may not.
+        if not self.manager_scope:
+            return False, "not a manager session — no goal page names %s" % self_id[:8]
+        if not session_id:
+            return False, "card names no producing session"
+        # ⚠️ **EXPLICIT self-refusal, never an inference.** `exclusion()` keeps a manager's own
+        # row because the feed must not hide it; admission must refuse it, or the background
+        # answerer approves the manager's own parked card — self-approval.
+        # ⚠️ This cannot be left to the scope lookup below: a manager session that is ALSO
+        # stamped on a task page of its own goal (resumed from a worker role, or recorded in a
+        # task's `metrics_sessions`) resolves to `own_titles` and would be admitted there.
+        if session_id == self_id:
+            return False, "this session's own card — self-approval"
+        entries = self.sessions.get(session_id) or []
+        titles = {entry.title for entry in entries}
+        if not titles:
+            return False, "no vault page stamps %s" % session_id[:8]
+        if len(titles) != 1:
+            return False, "%d vault pages stamp %s" % (len(titles), session_id[:8])
+        entry = entries[0]
+        if entry.title in self.own_titles:
+            return True, "in this manager's subject: %s" % entry.title
+        goal = entry.goals[0] if entry.goals else None
+        if goal:
+            return False, "foreign-goal:%s" % goal
+        return False, "owner-unknown"
 
 
 def _read_task(path):
@@ -494,7 +541,7 @@ def load(self_id, vault_paths=None, ownership=None):
             if match:
                 managers.setdefault(match.group(1), []).append(title)
 
-    own_titles, self_goals, why = set(), [], ""
+    own_titles, self_goals, why, manager = set(), [], "", False
     if self_id in managers:
         stamped = sorted(set(managers[self_id]))
         # THE OWNERSHIP READ — one per `load()`, never per page, and only for the asking
@@ -506,7 +553,7 @@ def load(self_id, vault_paths=None, ownership=None):
                 f"{', '.join(stamped)} but is not an owner ({o.reason})"
             )
         else:
-            self_goals = stamped
+            self_goals, manager = stamped, True
     else:
         entries = sessions.get(self_id) or []
         titles = {entry.title for entry in entries}
@@ -533,7 +580,7 @@ def load(self_id, vault_paths=None, ownership=None):
                 f"{self_goals[0] if self_goals else 'a page'} with no tasks"
             )
 
-    return Scope(sessions, goals, own_titles, self_goals, why)
+    return Scope(sessions, goals, own_titles, self_goals, why, manager)
 
 
 def main(argv=None):
