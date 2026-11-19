@@ -763,7 +763,7 @@ def main(argv=None):
             verdict = decide(item_id, item, self_id, inputs["ledger"], inputs["claims"],
                              inputs["holds"], inputs["sessions"], pages, inputs["tier_mod"],
                              inputs["allowlist"], inputs["own_mod"],
-                             scope=inputs["scope"], seen=seen,
+                             scope=inputs.get("scope"), seen=seen,
                              answering=args.answer, expect=args.expect or None,
                              is_human=inputs["is_human"])
             print(json.dumps(verdict))
