@@ -89,6 +89,15 @@ tier down. The sweep is the product; everything else is delegated.
    `busy-target` — that means the manager is mid-turn; wait a tick rather than kill in-flight
    work.
 
+   ⚠️ **Every `resume` and `restart` takes the session's claim FIRST — this leg and the fleet
+   leg both.** Run `topic-keepalive.py --vault "<vault>" --subject "<goal>" --branch goal
+   --claim-resume <sid>` and act only on `claim-taken`; a `claimed` verdict means another
+   writer already owns this resume, so return no row for it. This is the guard the 2026-11-18
+   ruling made load-bearing: the fleet tier now also resumes goals under a dead or
+   `cannot-tell` topic, and a claim taken by only one leg refuses only that leg's second
+   attempt — it does not refuse the other's. `--record-resume` releases the claim once the id
+   reads live.
+
 2. **Rank the free slots.** A slot is free when its goal's verdict is not `jump`. When at
    least one is free:
 

@@ -4,7 +4,7 @@
 user-invocable: false
 ---
 
-# Keep alive — goal managers whose goal no topic declares
+# Keep alive — goal managers whose goal no topic declares, or whose declaring topic manager is unkept
 
 When: every tick, as `agents/fleet-keepalive-actor.md` § 1b (that body is at its 30 KB budget, so this procedure lives here)
 
@@ -17,16 +17,20 @@ the actor's step 1, one tier down. **Restart is not open.**
 
 **Population: `scripts/topicless-goal-keepalive.py` selects it and decides each verdict.** It
 takes every goal page at `status: in_progress` + `phase: execution` that carries a
-`claude_session_id` and that no topic page's `## Goals` list names (`crashed-managers.py`
-`fleet_keeps`, one home). For each one it asks `topic-keepalive.py --branch goal`. It never
-acts and never writes the cap. It resolves the vault's goals and topics folders itself, by the
-vault's path (`resolve-folders.py --vault`), never from the first config entry.
+`claude_session_id` and that either no topic page's `## Goals` list names, or only topics whose
+own manager reads `resume` (dead) or `cannot-tell` (`crashed-managers.py` `fleet_keeps`, one
+home). For each one it asks `topic-keepalive.py --branch goal`. It never acts and never writes
+the cap. It resolves the vault's goals and topics folders itself, by the vault's path
+(`resolve-folders.py --vault`), never from the first config entry.
 - ⚠️ **The phase filter is not optional.** `topic-keepalive.py` reads liveness and cadence only,
   so on its own it answers `resume` for a backlog goal. Measured 2026-11-08: 5 of the 8
   `resume` verdicts were outside `execution`.
-- ⚠️ **A goal a topic declares is never selected, even while that topic's manager is down.** The
-  actor's step 1 restarts the topic manager, and the topic manager restarts its goal managers.
-  Taking the goal here as well makes a second keeper, which is a double writer.
+- ⚠️ **A goal a topic declares is selected ONLY when that topic's manager is itself unkept.**
+  While the topic manager is live and armed, the actor's step 1 keeps it and the topic round
+  keeps its goal managers; taking the goal here as well makes a second keeper, which is a
+  double writer. When the topic manager is dead or `cannot-tell`, no round restarts it, so every
+  goal manager under it is nobody's population — that is the 2026-11-18 ruling, and this leg
+  takes it. Each such row's reason is prefixed `declaring topic <name> reads <verdict>`.
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
@@ -43,11 +47,17 @@ run (below). A refusal is never "nothing to resume".
 
 **Act on each row as the actor's step 1 does**, including step 0's heldness read on the goal
 page's session id: a held goal manager is neither restarted nor resumed.
+- **Claim first.** Before acting on any `resume` / `restart` row, take the session's claim:
+  `topic-keepalive.py --vault "<vault>" --subject "<name>" --branch goal --claim-resume <id>`.
+  A `claimed` verdict means another writer already owns this resume — **skip the row and count
+  it**, never act. This is the double-writer guard for the case where both the topic round and
+  this one read the same goal manager as `ABSENT`; `O_EXCL` makes exactly one of them win.
 - `restart` → run the command column, `/supervisor:restart <id>`.
 - `resume` → run the command column, `/supervisor:open --goal "<name>"`.
 - After either, once `session-liveness.py --check` shows the id live, record the resume with
   `topic-keepalive.py --vault "<vault>" --subject "<name>" --branch goal --record-resume <id>`.
-  That write is the 3-per-30-minute cap; a resume that did not take is never recorded.
+  That write is the 3-per-30-minute cap and also releases the claim; a resume that did not take
+  is never recorded, and its claim expires after `RESUME_WINDOW` so the retry is not blocked.
 - `crash-loop` → report its `⚠️ MANAGER CRASH-LOOP` line and stop on that goal for the round.
 - `jump` → hand the operator the pane. `leave` → nothing. `cannot-tell` → report it, never act.
 
