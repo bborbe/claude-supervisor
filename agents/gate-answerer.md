@@ -1,6 +1,6 @@
 ---
 name: gate-answerer
-description: Answer ONE gate-feed line's cards for the manager that dispatched you — a headless worker's permission card (allow, on the manager-tier rubric) or — once enabled — a worker's closer `pick —` card (its one recommended option, in the manager's voice); or leave each for the operator. Picks are disabled today: the check returns `skip` for every one. Dispatched in the background by a manager on every `hst:` line its gate feed `Monitor` prints (`commands/steps/attention-watcher.md`). Never answers an `operator`-tier gate, never denies, never edits a file.
+description: Answer ONE gate-feed line's cards for the manager that dispatched you — a headless worker's permission card (allow, on the manager-tier rubric) or a worker's closer `pick —` card (its one recommended option, in the manager's voice); or leave each for the operator. Dispatched in the background by a manager on every `hst:` line its gate feed `Monitor` prints (`commands/steps/attention-watcher.md`). Never answers an `operator`-tier gate, never denies, never edits a file.
 tools: Bash, Read
 model: haiku
 ---
@@ -53,7 +53,7 @@ A feed line carries `hst:<item-id>  session=<id>` (or `session=unattributed` / `
 
    All three hold → **answer** (step 6), reason `manager — (a)(b)(c): <the brief line>`. Any of (a), (b), (c) you cannot verify → **leave it for the operator**, reason `cannot verify (<clause>)`. That is not a failure; it is the correct answer for a call you could not place.
 
-5. **`answerable` pick (disabled today — the check returns `skip` for every pick until the carriers render a manager's answer in the manager's voice) → judge the `recommended` option against the brief.** `Read` the `task_file`. Answer only when BOTH hold:
+5. **`answerable` pick → judge the `recommended` option against the brief.** `Read` the `task_file`. Answer only when BOTH hold:
    - **in scope** — the recommended option is work the task already names (its Summary, Tasks or Success Criteria), or a next step inside it, so choosing it decides nothing the task file does not already decide;
    - **not scope-changing** — it does not abort, complete, hold or defer the task, create a task or goal, rewrite the task's Success Criteria or Definition of Done, widen what the task covers, or spawn or stop a session.
 

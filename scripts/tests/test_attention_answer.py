@@ -337,22 +337,36 @@ class AnswerContentTest(unittest.TestCase):
     def test_refused_while_picks_are_disabled(self):
         self.assertRefused("PICK_ANSWERING_ENABLED is false", enabled=False)
 
-    def test_real_flag_is_off_so_the_unpatched_path_refuses(self):
-        self.assertFalse(aa.picks_enabled())
+    def test_real_flag_is_on(self):
+        self.assertTrue(aa.picks_enabled())
 
-    def test_manager_answerer_is_refused(self):
-        self.assertRefused("operator's voice", answerer="manager")
+    def test_manager_answer_posts_its_answerer(self):
+        rc, out, posted, state = self._run(answerer="manager")
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.kwargs["answer"],
+                         {"kind": "text", "value": "go", "answerer": "manager"})
+        with open(os.path.join(state, self.ITEM["producer_id"] + ".answer.json")) as fh:
+            self.assertEqual(json.load(fh)["answerer_kind"], "manager")
 
-    def test_gate_answerer_arm_is_refused_under_any_answerer(self):
+    def test_gate_answerer_arm_answers_as_manager(self):
+        rc, _, posted, _ = self._run(by=aa.GATE_ANSWERER_ARM, answerer="manager")
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.kwargs["answer"]["answerer"], "manager")
+
+    def test_gate_answerer_arm_is_refused_as_operator(self):
         self.assertRefused("gate answerer", by=aa.GATE_ANSWERER_ARM, answerer="operator")
 
     def test_answerer_has_no_default(self):
         self.assertRefused("explicit --answerer", answerer="")
 
+    def test_unknown_answerer_is_refused(self):
+        self.assertRefused("explicit --answerer", answerer="boss")
+
     def test_operator_relay_content_reaches_the_body_and_no_target_is_printed(self):
         rc, out, posted, state = self._run()
         self.assertEqual(rc, 0)
-        self.assertEqual(posted.call_args.kwargs["answer"], {"kind": "text", "value": "go"})
+        self.assertEqual(posted.call_args.kwargs["answer"],
+                         {"kind": "text", "value": "go", "answerer": "operator"})
         self.assertIn("DELIVERY: delivered", out)
         self.assertNotIn("TARGET", out)
         with open(os.path.join(state, self.ITEM["producer_id"] + ".answer.json")) as fh:
