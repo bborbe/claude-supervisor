@@ -49,10 +49,11 @@ epoch and the receipt **you** wrote — an arm that has not landed yet reads `sk
 a round that armed perfectly — and it must run before the render, or a skip it finds cannot
 reach the block the operator reads.
 
-⚠️ **Row 7 reads the delegate's `parks=` file.** The delegate runs row 5d and hands back
-`parks-answered` / `parks-routed` / `parks-escalated` plus the `parks=` path; the routed parks
-there are yours to answer, and nothing else carries them. A round that skips that read leaves a
-class-C question to the 15-minute timeout.
+⚠️ **Row 7 is the delegate's now, and it reads its own `parks=` file.** The delegate runs
+row 5d and hands back `parks-answered` / `parks-routed` / `parks-escalated` plus the `parks=`
+path; row 7 routes what it finds there and **you** answer it at row 11, because a headless
+delegate must not speak in the operator's voice. Nothing else carries those parks, so a round
+that skips the read leaves a class-C question to the 15-minute timeout.
 
 ⚠️ **The digest path is the delegate's to derive, never yours to pass.** It is
 `~/.claude/state/fleet-handback/<round timestamp>.digest`, written by the sweep reader the

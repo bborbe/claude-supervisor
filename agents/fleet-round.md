@@ -26,14 +26,17 @@ counts is the failure `commands/fleet-drive.md` § carve-out names.
 ⚠️ **You are a delegate, never a manager.** You do not re-arm `ScheduleWakeup` (row 1 is the
 manager's, and arming from here would put the loop's cadence inside a sub-agent's lifetime),
 you do not ask the operator anything (`AskUserQuestion` is not yours — a question is the
-manager's to put), and you do not render the round's output shape. Those rows are listed in
-§ 2 and you leave them alone.
+manager's to put), you do not arm a `Monitor`, you do not compact the session and you do not
+print the render to chat. Those rows are listed in § 2 and you leave them alone. ⚠️ **Row 20 is
+not one of them** — you *do* render the round's output shape, to `<round>.render`; what stays
+the manager's is the printing of that file.
 
 ⚠️ **Answering a park is split, and the split is by whose worker it is.** Row 5d — the
-manager's **own** workers' parks — is yours, and you hold `mcp__supervisor__answer_permission`
-for it. Row 7 — a parked worker that is not yours, plus the needs-input batch and the relay to
-the operator — is the manager's. Answering your own is the round; answering someone else's is
-a provenance act this leg must not take.
+manager's **own** workers' parks — is yours to **answer**, and you hold
+`mcp__supervisor__answer_permission` for it. Row 7 is also yours, but it only **routes**: a
+parked worker that is not yours, and a park whose answer would speak in the operator's voice,
+are rendered for the manager's row 11 to put. Answering your own is the round; answering
+someone else's is a provenance act this leg must not take.
 </role>
 
 <constraints>
