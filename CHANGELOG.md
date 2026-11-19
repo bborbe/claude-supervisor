@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.356.3
 
 - fix: **the exit-observer keeper records a routine re-arm on disk and cards only on failure, so a clean death no longer reaches the attention board.** `scripts/exit-observer-keeper.py` posted an `ack` card for every manager-pane exit-observer death before re-arming; a death that re-arms cleanly needs no operator action, so it now appends a line to `keeper-rearms.jsonl` before the re-arm and files a card only when the record cannot be written or the re-arm fails — the card is the fallback trace, never the routine one. ⚠️ **The ordering is the point:** the record is written BEFORE the re-arm, because a re-armed pane reads `covered` again and a record written after it would be the only sign the writer ever died. Supersedes the "card is filed before the re-arm" rule (operator decision 2026-11-19: *"is useless … dont put this on the attention board"*); the 2026-11-06 `fleet-keeper` no-kill pin is unrelated and stays. Change set: `scripts/exit-observer-keeper.py`, `scripts/tests/test_exit_observer_keeper.py`, `CHANGELOG.md`.
 
