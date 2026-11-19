@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.353.1
 
 - fix: **`attention-ask.py` refuses a card that asks the operator to type into a pane.** A card carrying "you run: type anything in pane 229 and press Enter" asked for a keystroke the asking session owns — it has `wezterm cli send-text` — and the pane in the reported case had not existed for hours; the card reopened seven times. `pane_ask_refusal` now matches the instruction in the payload or the context and refuses in **both** pane states, naming `wezterm cli send-text --pane-id N` as the action the posting session must take itself: a live pane is still not the operator's to poke, and a dead one has nothing to poke at. The rule is stated once in `commands/steps/needs-input.md`. Change set: `scripts/attention-ask.py`, `scripts/tests/test_attention_ask.py`, `commands/steps/needs-input.md`.
 
