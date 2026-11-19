@@ -662,19 +662,22 @@ class CloserGateLintTest(unittest.TestCase):
              "stop_hook_active": True, "session_id": "test-session"}, environ=env)
 
     def test_a_changed_ends_line_on_the_retry_is_allowed(self):
-        # ⚠️ SC2: the observable is part of "unchanged", not decoration. A continued turn
+        # ⚠️ The observable is part of "unchanged", not decoration. A continued turn
         # that keeps `👤 You:` byte-identical and fixes ONLY its `⏰ Ends:` line has done
         # what the block asked for; comparing `closer` alone re-blocked it, and the only
         # escape left was rewording a line that was already correct.
         code, _text, record = self._blocked_then_retry(
             "approve: `gh -R Seibert-Data/shared pr ready 24` then `/github-pr-review-trigger 24`",
             "a background shell dies with the turn",
-            "`~/Documents/state/probe.json` is written")
+            # ⚠️ An absolute path, not a `~` one: the fixture only needs the `file` arm to
+            # match, and a home-directory path in test data reads as a machine-local
+            # reference to the self-containment rule.
+            "`/tmp/state/probe.json` is written")
         self.assertEqual(0, code, "a corrected Ends line must release the retry")
         self.assertEqual("stop-hook-active", record["reason"])
 
     def test_a_changed_ends_retry_reports_the_current_reason(self):
-        # ⚠️ SC5: whatever this stop emits is built from the CURRENT evaluation, never the
+        # ⚠️ Whatever this stop emits is built from the CURRENT evaluation, never the
         # previous stop's. The previous complaint (`session-bound-ends`, whose wording names
         # `run-in-background-shell`) must not be re-printed on a retry that changed its
         # observable — re-printing it is what made a correct fix look unheeded.
@@ -682,8 +685,8 @@ class CloserGateLintTest(unittest.TestCase):
         # ⚠️ The exit code is deliberately NOT asserted. With the fix a changed Ends line is
         # RELEASED, so `text` is empty and the property holds trivially; without it the retry
         # is blocked and the property STILL holds, because `_retry_message()` is handed the
-        # current evaluation's text. SC5 already held at head — this pins it rather than
-        # driving a second code path, exactly as the task's SC5 wording allows.
+        # current evaluation's text — this pins that property rather than driving a second
+        # code path, which is what the property already did before the retry fix.
         _code, text, _record = self._blocked_then_retry(
             "approve: `gh -R Seibert-Data/shared pr ready 24` then `/github-pr-review-trigger 24`",
             "a background shell dies with the turn",
@@ -692,7 +695,7 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertNotIn("dies with the turn", text)
 
     def test_the_block_record_carries_the_ends_it_judged(self):
-        # ⚠️ SC3: the comparison is possible only because the record carries the line it
+        # ⚠️ The comparison is possible only because the record carries the line it
         # decided on, and it comes from the SAME single scan `evaluate` already performs —
         # no second transcript read is introduced.
         path = self._retry_transcript(
