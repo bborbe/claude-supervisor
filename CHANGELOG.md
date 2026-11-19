@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`attention-answer.py dismiss ITEM_ID` retires a card without recording an answer.** `skip` was the only way to clear a card that asks nothing, and the store records it as a DECLINE the operator never gave; `dismiss` closes the item, stores no answer, and names the arm that closed it. `closed` is terminal, so a second dismiss exits non-zero rather than reading as a silent no-op. Change set: `scripts/attention-answer.py`, `scripts/tests/test_attention_answer.py`.
+- docs: **`docs/closer-classes.md` gains the hand-over split.** A `you run:` closer is a hand-over, but only some hand-overs are the operator's: an agent-doable one (a command, a session action, answering a card) mints no card, an operator-only one (chore, people-communication, no-command-form action, live-pane typing) still mints `done` / `not now`. Default is mint — a stranded gate is the cost the split must never buy. Operator-specific rows stay out of this repo and are read from `CLOSER_HANDOVER_POLICY`. Change set: `docs/closer-classes.md`.
+
 ## v0.353.1
 
 - fix: **`attention-ask.py` refuses a card that asks the operator to type into a pane.** A card carrying "you run: type anything in pane 229 and press Enter" asked for a keystroke the asking session owns — it has `wezterm cli send-text` — and the pane in the reported case had not existed for hours; the card reopened seven times. `pane_ask_refusal` now matches the instruction in the payload or the context and refuses in **both** pane states, naming `wezterm cli send-text --pane-id N` as the action the posting session must take itself: a live pane is still not the operator's to poke, and a dead one has nothing to poke at. The rule is stated once in `commands/steps/needs-input.md`. Change set: `scripts/attention-ask.py`, `scripts/tests/test_attention_ask.py`, `commands/steps/needs-input.md`.
