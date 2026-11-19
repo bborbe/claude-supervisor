@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.352.11
 
 - fix: **a manager answers the gate cards of its own subject, not only those of workers it spawned.** `own-park-check.verdict()` admitted a worker only when THIS session had spawned it, so every card raised by a peer's worker escalated — measured 2026-11-19, 0 answered in 24 dispatches while the operator answered 14. The predicate now takes a second, durable input: `session-scope.Scope.admission()` resolves the producing session's vault page to a goal and admits it when that goal is the asking manager's own subject. The spawn edge still admits on its own, and `scope` is optional, so a caller with no vault walk keeps the old behaviour. ⚠️ The new method is the fail-CLOSED twin of `exclusion()`: the feed filter fails open because hiding a row on a failed read silences the fleet, while the answerer fails closed because admitting on a failed read is the blanket widening the manager contract forbids. Every `operator`-tier, `role: human`, held and unresolvable-owner card still escalates, and a manager with no page of its own — the Fleet Manager — still answers nothing.
 ## v0.352.10
