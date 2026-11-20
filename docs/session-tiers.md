@@ -84,9 +84,9 @@ rule 2.** The round once opened every flagged goal and topic with no live manage
 retired, so a flagged goal or topic is now opened only by the tier that owns it — the topic
 manager's `topic-spawn --topic-open` and its `topic-keepalive` `open` verdict start a goal
 manager for a flagged goal, up to the free manager slots, and decline `phase: todo` (the
-operator's approval inbox, reported `WAITING`). The fleet tier's remaining flag reader is its
-open leg (router row 16), which executes `/supervisor:open --flagged` for flagged **worker**
-rows; a flagged goal or topic reaches the fleet round as a row to report, never as an open.
+operator's approval inbox, reported `WAITING`). The fleet tier opens nothing itself: the wrapper's
+flagged tick opens flagged rows, so a flagged goal or topic reaches the fleet round as a row to
+report, never as an open.
 Proposing is what rule 4 forbids — asking the operator *which* unmanaged goal deserves a
 manager — and a fleet-tier goal manager is the operator's own `/supervisor:open --goal`, not
 the round's.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A row the open leg holds must be blocked by the CLI's own computation too.
+"""A row `open-queue.py` holds must be blocked by the CLI's own computation too.
 
 Why this exists
 ---------------
@@ -7,10 +7,10 @@ Why this exists
 the raw array drifts from the truth. Two independent readers now decide "is this row
 blocked": the selection path (`scripts/open-queue.py`, through
 `manager-predispatch.blocked_by_verdict`) and `vault-cli task list`'s `blocked` field. They
-agree today only because both were fixed on 2026-11-15 — before that, the open leg held on
+agree today only because both were fixed on 2026-11-15 — before that, `open-queue.py` held on
 the array's *presence* while the CLI resolved the entries and returned `false`.
 
-Agreement is the property worth pinning, not either implementation. A row the open leg
+Agreement is the property worth pinning, not either implementation. A row `open-queue.py`
 reports as held while the CLI says nothing blocks it is a row the operator is told is
 waiting on a dependency that is already done — measured 2026-11-15 on
 `Rebuild Nuke Cluster - 2026W46-sun`, held for an hour against two `completed` blockers.
@@ -203,7 +203,7 @@ def fixture():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="A row the open leg holds must be blocked by vault-cli's computation too"
+        description="A row `open-queue.py` holds must be blocked by vault-cli's computation too"
     )
     parser.add_argument("--tasks-dir", help="the vault's task directory (live mode)")
     parser.add_argument("--vault", help="the vault-cli vault name (live mode)")

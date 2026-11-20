@@ -1757,7 +1757,7 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
     its tail, and both land in the same ring inside the same window. Counting them alike
     made the tail beat able to CLEAR a head arm that never ran: `--check` correctly reports
     `skipped: re-arm` when the round's head is missing, and then `output-shape.md` item
-    13's row-20 `--debt` re-evaluation re-reads the ring, finds the tail epoch inside the
+    12's row-20 `--debt` re-evaluation re-reads the ring, finds the tail epoch inside the
     window, and pays the debt — so the round that skipped its head arm reads complete one
     step later. That is the precise false green this predicate exists to prevent, and it
     is why the tail marker has to be honoured here rather than only in `observed_period`.

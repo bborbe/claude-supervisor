@@ -5,9 +5,8 @@ Two families are covered, and both are silent when broken:
   (1) the fleet tick's router `When` cells against `agents/fleet-sweep-reader.md`'s
       hand-back, and
   (2) the delegated legs — `commands/steps/round-readings.md` → `agents/round-readings-reader.md`,
-      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's two
-      acting legs, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md` and
-      `commands/steps/open.md` → `agents/fleet-open-actor.md`.
+      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's
+      acting leg, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md`.
 
 The load-bearing cases are the PRE-CHANGE ones. Both reader agents shipped on 2026-11-06
 with a hand-back that omitted values its own contract requires — the readings leg collapsed
@@ -220,18 +219,6 @@ class CheckHandbackKeysTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         for key in ("legs", "legs-reason", "dead-scan", "crash-loop-truncated", "cannot-tell-truncated"):
             self.assertIn(f"`{key}=`", result.stderr)
-
-    def test_open_leg_without_a_branch_count_fails(self):
-        """The open leg's reconciliation is four-way: `opened + resumed + jumped + refused == selected`."""
-        for dropped in ("resumed", "jumped"):
-            with self.subTest(dropped=dropped):
-                self.write(
-                    "agents/fleet-open-actor.md",
-                    fence(self.legs["supervisor:fleet-open-actor"]["required"], drop=(dropped,)),
-                )
-                result = self.run_check()
-                self.assertEqual(result.returncode, 1)
-                self.assertIn(dropped, result.stderr)
 
 
 if __name__ == "__main__":

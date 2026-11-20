@@ -42,7 +42,7 @@ Verbs, all against one digest path:
 pins, and it is why `--count` creating the section is a convenience for a hand-run, never the
 round's path: a round that creates its own section has already lost the not-run reading.
 
-⚠️ **The three keys and their leg live here, once.** `commands/steps/output-shape.md` item 14
+⚠️ **The three keys and their leg live here, once.** `commands/steps/output-shape.md` item 13
 renders the lines and `agents/fleet-sweep-reader.md` seeds them; neither restates the mapping.
 
 Exit codes: 0 ok, 1 the digest is missing a line (`--check`), 2 the digest could not be read

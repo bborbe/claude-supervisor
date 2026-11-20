@@ -558,7 +558,7 @@ def main(argv: list[str]) -> int:
             print("open-unflagged")
             print(f"{a.subject} has no session id and does not carry the flag "
                   f"(`flag: true` set by the operator) — rule 4 forbids opening a manager for "
-                  f"it; the fleet round's open leg still opens its workers, so the work "
+                  f"it; the wrapper's flagged tick still opens its workers, so the work "
                   f"moves without one")
         return 0
 
