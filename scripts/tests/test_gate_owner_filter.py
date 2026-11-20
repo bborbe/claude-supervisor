@@ -1566,6 +1566,14 @@ class UpstreamRefusalFailsLoudly(unittest.TestCase):
         self.assertIn("upstream refused", result.stderr)
         self.assertIn("mux socket silent", result.stderr)
 
+    def test_a_refused_upstream_is_a_stdout_event(self):
+        """The refusal must reach the arm's notification channel (stdout), not
+        only stderr, or the Monitor dies with an empty stdout and the manager
+        reads a dead arm as a quiet fleet — the silent drop this fix removes."""
+        result = self.invoke("--feed", "--self", ME, feed=self.REFUSAL + "\n")
+        self.assertIn(gf.REFUSAL_MARKER, result.stdout, result.stdout)
+        self.assertNotIn("gates:", result.stdout, result.stdout)
+
     # --- SC(c): the control, pinned beside it --------------------------------
 
     def test_an_unmarked_empty_feed_still_exits_zero(self):
@@ -1751,7 +1759,11 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         refusal = f"{gf.REFUSAL_MARKER}: WezTerm pane list unreadable\n"
         result = self.poll([refusal, self.ONE])
         self.assertNotEqual(0, result.returncode, result.stdout)
-        self.assertEqual(result.stdout.split(), [], result.stdout)
+        # The refusal is a STDOUT event, not a silent death: the arm fires on
+        # stdout, so a refusal that reaches only stderr leaves the Monitor dying
+        # with an empty stdout, indistinguishable from a quiet fleet.
+        self.assertIn(gf.REFUSAL_MARKER, result.stdout, result.stdout)
+        self.assertNotIn("gates:", result.stdout, result.stdout)
 
     def test_a_refusal_prints_no_gate_count(self):
         """The line that lies is the line that must not be printed."""
