@@ -147,6 +147,14 @@ subject's Step 1.
      own open-item list is the authority — quote it, never paraphrase it into a count of your
      own.
 
+   ⚠️ **Honour the page's recorded measurement before the verb.** A goal may carry an optional
+   `## Final measurement` block (`- SC1 bar = … measured = … verdict = MET|NOT MET`). Read it
+   first: if any criterion records `verdict = NOT MET`, do not run the verb — report that
+   criterion and leave the page open. The verb counts boxes only and never reads this block, so
+   without this read a goal whose boxes are all `[x]` but whose measurement misses a bar would
+   close on boxes alone. A page with no block, or one whose verdicts are all `MET`, closes on the
+   verb as normal.
+
    ⚠️ **`--vault` is not optional** — without it the write targets the default vault, so a
    subject in any other vault lands on the wrong page or nowhere at all. It is the same
    explicit-`--vault` contract `commands/steps/goal-resolve.md` carries for the manager's write.
@@ -174,8 +182,8 @@ subject's Step 1.
    open page.** `goal complete` and `topic complete` run the same `checkClosureGate` the task
    verb runs (`pkg/ops/closure_gate.go`), so a goal refusal names the same open boxes a task
    refusal does, and a goal whose boxes are all `[x]` closes on the verb — not on this step's own
-   reading. A grandfathered goal (no DoD, `created` before `2026-06-26`) closes too: the verb
-   applies the cutoff. (Before vault-cli v0.199.0 the goal and topic verbs checked only their
+   reading. A grandfathered goal (no DoD, `created` before `DOD_REQUIRED_AS_OF` = `2026-06-26`)
+   closes too: the verb applies the cutoff. (Before vault-cli v0.199.0 the goal and topic verbs checked only their
    open-task gate; they now read Success Criteria and DoD / Completion Gate themselves, which is
    why the reader script this step used to run is gone.)
 
