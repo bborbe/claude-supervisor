@@ -119,12 +119,20 @@ Skip when `--task` / `--goal` / `--topic` was given. Otherwise probe all three a
 matched:
 
 ```bash
+TOPICS_DIR=$(vault-cli config list --output json | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+vaults = data if isinstance(data, list) else data.get("vaults", [])
+match = [v for v in vaults if v.get("name") == "<vault>"]
+print((match[0].get("topics_dir") if match else "") or "23 Topics")')
 vault-cli --vault "<vault>" task get "<name>" status  2>/dev/null
 vault-cli --vault "<vault>" goal get "<name>" status  2>/dev/null
-find "<topics_dir>" -maxdepth 1 -iname "*<name>*.md"
+find "$TOPICS_DIR" -maxdepth 1 -iname "*<name>*.md"
 ```
 
-`<topics_dir>` is the vault's configured value (default `23 Topics`). For the topic probe,
+`TOPICS_DIR` is the vault's configured value, defaulting to `23 Topics` — read from the config
+rather than assumed, because a vault that keeps its topics elsewhere would otherwise probe a
+directory that does not exist and report the name as matching no kind. For the topic probe,
 confirm `page_type: topic` **inside the frontmatter block**, not anywhere in the file:
 
 ```bash
@@ -154,22 +162,38 @@ open_rows(rows=[{kind: <task|goal|topic>, vault: "<vault>", name: "<name>", firs
 
 ```bash
 python3 - "$VAULT" "$KIND" "$NAME" "$FIRST_STEP" <<'PY'
-import json, os, sys, urllib.request
+import json, os, sys, urllib.error, urllib.request
 vault, kind, name, first = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 row = {"kind": kind, "vault": vault, "name": name}
 if first:
     row["first_step"] = first
+rows = [row]
 req = urllib.request.Request(
     "http://127.0.0.1:18090/api/1.0/open",
-    data=json.dumps({"rows": [row]}).encode(),
+    data=json.dumps({"rows": rows}).encode(),
     headers={
         "Content-Type": "application/json",
         "X-Claude-Code-Session-Id": os.environ.get("CLAUDE_CODE_SESSION_ID", ""),
     },
 )
-print(urllib.request.urlopen(req, timeout=600).read().decode())
+# A create/resume verdict returns only once the tab exists and its ready-gated start
+# commands are sent (a goal manager's second send waits up to 300 s), so the budget has to
+# scale with the row count — a batch of N rows can legitimately take N times one row's wait.
+timeout = 600 * max(1, len(rows))
+try:
+    print(urllib.request.urlopen(req, timeout=timeout).read().decode())
+except urllib.error.HTTPError as exc:
+    body = exc.read().decode(errors="replace")
+    sys.exit("open refused: HTTP %s — %s" % (exc.code, body))
+except urllib.error.URLError as exc:
+    sys.exit("open unreachable at http://127.0.0.1:18090 — %s" % exc.reason)
 PY
 ```
+
+⚠️ **A failure here is a reported refusal, never a silent empty result.** The wrapper answers a
+rejected request with a 4xx and a body naming the reason; print it. An unreachable endpoint means
+the daemon is down, which is a different problem from a refused row — say which one you hit
+rather than reporting "nothing happened".
 
 ⚠️ **Build the JSON in code, never by string interpolation.** A title may contain a quote, a
 backslash or a newline; the endpoint refuses a name carrying a path separator or a control

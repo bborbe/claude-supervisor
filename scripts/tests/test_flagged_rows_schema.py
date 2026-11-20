@@ -219,8 +219,10 @@ class EnumsMatchTheirProducers(unittest.TestCase):
 
     def test_window_and_chip_come_from_the_role_table(self):
         schema = load_schema()
+        # Only manager and human resolve to a window; an agent row emits "" because it
+        # never opens a tab (matrix Rule 2) and the `Agents` purpose no longer exists.
         self.assertEqual(set(schema["properties"]["window"]["enum"]),
-                         set(fr.ROLE_WINDOW.values()))
+                         set(fr.ROLE_MAP_KEY.values()) | {""})
         self.assertEqual(set(schema["properties"]["chip"]["enum"]),
                          set(fr.ROLE_CHIP.values()) | {fr.MISSING_MAP_CHIP})
 
