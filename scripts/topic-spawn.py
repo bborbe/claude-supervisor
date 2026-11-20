@@ -27,7 +27,7 @@ on it without parsing prose, and the exit code is non-zero for every one of them
                            agent-set or absent `flag_set_by` is refused (the 2026-09-28
                            provenance rule, generalised to every tier 2026-11-10) — an
                            unadmitted goal is reported with its rank and never started;
-                           its WORKERS are still opened by the fleet round's open leg.
+                           its WORKERS are still opened by the wrapper's flagged tick.
   topic-unflagged        `--topic-open` only: the TOPIC page does not carry `flag: true`.
                            Same rule one tier up — a flagged topic is opened when the fleet
                            manager ceiling admits another manager. Never printed under
@@ -547,7 +547,7 @@ def main(argv: list[str]) -> int:
                 REFUSE_TOPIC_UNFLAGGED,
                 f"<{a.topic}> is not flagged. Opening a topic manager is an open, and this "
                 f"tier only opens what carries the flag — set `flag: true` on the topic page. "
-                f"Worker sessions are opened by the fleet round's open leg regardless.",
+                f"Worker sessions are opened by the wrapper's flagged tick regardless.",
             )
         ceiling = fleet_manager_ceiling()
         count = fleet_manager_count() if ceiling is not None else None
@@ -601,7 +601,7 @@ def main(argv: list[str]) -> int:
             f"<{a.goal}> is not flagged. Opening a goal manager is an open, and this tier "
             f"only opens what carries the flag — set `flag: true` on the goal page. Only an "
             f"operator-set flag opens; an agent-set or absent `flag_set_by` is refused. Its "
-            f"workers are opened by the fleet round's open leg regardless.",
+            f"workers are opened by the wrapper's flagged tick regardless.",
         )
 
     # (5) Startability — the operator's approval, read from disk.

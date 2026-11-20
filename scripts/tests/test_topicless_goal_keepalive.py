@@ -120,7 +120,7 @@ class LegTest(unittest.TestCase):
         # Exclusion: not in execution — no loop runs on it, so it is never resumed.
         self.goal("Backlog Goal", "sid-todo", phase="todo")
         self.verdicts["sid-todo"] = "ABSENT"
-        # Exclusion: no recorded id — that is an open, the flagged-open leg's job.
+        # Exclusion: no recorded id — that is an open, the flagged tick's job.
         self.goal("Unopened Goal", "")
 
         rc, out, _ = self.run_leg()
