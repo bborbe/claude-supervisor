@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.356.4
 
 - fix: **A card wait whose `⏰ Ends:` names a past check time reads `declared`, not `expired`.** `declared-wait.py` took the latest ISO date in the slot as a deadline, so a session parked on an unanswered attention card — whose clock is only a re-check time — read `expired` once its `Stop` record aged past `MAX_AGE_S`, dropping a live park to `resume`. A card wait is now detected by the word "card" plus a backtick-quoted hex id and exempted from the clock-expiry rule; `MAX_AGE_S` still expires every non-card wait exactly as before. The exemption is bounded structurally, not by a card-store poll: an answered card resumes its session and writes a new `Stop` (newest-wins), and `flagged-rows.py`'s `parked` branch sits after every liveness branch, so a dead session is never parked on this reader. Change set: `scripts/declared-wait.py`, `scripts/tests/test_declared_wait.py`, `CHANGELOG.md`.
 
