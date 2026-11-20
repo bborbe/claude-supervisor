@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **`docs/sweep-output.md` cites the gate that exists, not a `scripts/sweep-gate.py` that never did.** Three citations (lines 53, 91, 101) named a file absent from this repo's history and from every commit in it. They now name the live gate in `bborbe/claude-wrapper` `pkg/sweepgate/` — `WriteTickFile()` (`state.go`, strips the OSC 8 escapes and creates the tick file `0600`), `CheckboxCount()` (`task.go`, returns `—` for an empty or mixed gate), and no `orphaned` bucket — each verified against that repo's source rather than assumed. The rules themselves are unchanged; only the owner they point at is. Change set: `docs/sweep-output.md`, `CHANGELOG.md`.
+
 ## v0.362.0
 
 - feat: **the Python snapshot write is retired; the wrapper is the sole owner.** `bborbe/claude-wrapper`'s sweep tick persists `~/.claude/state/fleet-snapshot.json` over the whole registry roster — verified 2026-11-20 at 2496 ids against 49 live with **0 missing**, a superset of what the round wrote. Two writers to a diff baseline is a race, so `fleet-snapshot.py` now writes only this round's `.digest` marker, which the wrapper does not write and whose absence reads as a lapse to the watcher. ⚠️ **A run with no `--digest-path` now REFUSES**: with the snapshot gone, that call had nothing left to write yet printed `snapshot written:` and exited 0 — a recovery path reporting success while doing nothing. The recovery path in `commands/fleet-drive.md` row 18 and `commands/steps/persist.md` now passes the flag. Change set: `scripts/fleet-snapshot.py`, `scripts/tests/test_fleet_snapshot.py`, `agents/fleet-sweep-reader.md`, `commands/fleet-drive.md`, `commands/steps/persist.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
