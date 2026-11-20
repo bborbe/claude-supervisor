@@ -40,7 +40,6 @@ MAX_BYTES = 1024
 #: its whole hand-back must fit.
 VARIABLE = {
     "supervisor:fleet-keepalive-actor": ("crash-loop:", "cannot-tell:", "park-nudge:"),
-    "supervisor:fleet-open-actor": ("refused:",),
 }
 
 

@@ -134,20 +134,6 @@ LEGS = {
             "payload",
         ),
     },
-    # The fleet round's open leg (row 16). Unlike the keep-alive leg it writes
-    # NO digest key — `fleet-legs.py` carries two and neither is this leg's; its persisted reading
-    # is the `.open` block payload that `commands/steps/output-shape.md` item 3 renders. So the
-    # hand-back is the only channel for every verdict the step acts on, and `render` / `reason`
-    # are the two a dropped key silently breaks: a `status=ok` with no `render=` prints no block
-    # at all, and a `status=not-run` with no `reason=` renders `open leg: not run — ` with nothing
-    # after the dash. `refused` is the command's own tally, `truncated` is the difference between
-    # it and the `refused:` lines that fit, and `selected` is what `opened` is reconciled against.
-    # ⚠️ **`resumed` and `jumped` are required because the reconciliation is four-way, not two.**
-    # `/supervisor:open` reports three branches — `↪️ jumped` / `♻️ resumed <sid>` / `🆕 created
-    # <sid>` — and a resumed row is reachable for a selected row (`approved-not-started.py`: a row
-    # whose session ENDED is not started). Without them, `opened + refused == selected` is false on
-    # any round that activated a live session or resumed a dead one, so a leg that dropped either
-    # key would silently leave the caller unable to reconcile at all.
     # The round itself, since 2026-11-17: the manager dispatches ONE `fleet-round` delegate
     # that reads the step files, runs the legs and persists the round, so the manager's
     # context holds the verdict instead of the rules. Its hand-back is the ONLY channel for

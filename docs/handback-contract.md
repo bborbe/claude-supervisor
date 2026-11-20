@@ -31,20 +31,11 @@ The shape a sweep's **read half** and **act half** return to their caller. Ten a
     the zeros — plus the decision-park readings and their write verdict (`decision-candidates`,
     `decision-resumed-a`, `decision-resumed-d`, `decision-unread`, `decision-persist`), whose
     persisted home is the round's `.decision` (§ Which readings survive the round).
-  - the **open leg** returns the **selection, the acts and the block's path** — `status`
-    (`ok` / `unknown` / `not-run`), `selected` and the four act counts the caller reconciles
-    (`opened + resumed + jumped + refused == selected`: `opened` is a new worker, `resumed` a
-    re-entered conversation, `jumped` an activated live session, `refused` a row `/supervisor:open`
-    turned away), `refused` carrying one `refused:` line per refusal **verbatim**, `render` (the
-    path of the block the caller prints), `reason` (why the leg did not run, `—` otherwise), and its
-    truncation pair `truncated` / `payload`. It carries **no digest count** — its persisted reading
-    is the block payload, which `commands/steps/output-shape.md` item 3 renders.
   - the **round delegate** returns the **round's bucket counts, its leg tallies and its own fill
     level** — `round` and the two artifact paths (`digest`, `parks`), every peer bucket
     (`progressing`, `stalled`, `parked`, `finished`, `held`, `orphan`, `collision`, `unmanaged`), the
     drive tallies (`revived`, `blocked`, `reaped`), the keep-alive tallies (`legs`, `restarted`,
-    `resumed`, `parked-due`, `nudged`, `undelivered`), the open leg's (`open-status`, `selected`,
-    `opened`, `open-resumed`, `jumped`, `refused`), `managers-reaped`, the own-parks split
+    `resumed`, `parked-due`, `nudged`, `undelivered`), `managers-reaped`, the own-parks split
     (`parks-answered`, `parks-routed`, `parks-escalated` — `parks-routed` is row 11's
     trigger (and row 7's routing input)), `context70`, and
     `self-context` — the manager's **own** fill level, the one reading `context-usage.py

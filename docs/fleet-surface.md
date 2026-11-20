@@ -1173,7 +1173,6 @@ the split below. A surface that needs either half points here instead of restati
 | **Open** — `/supervisor:open --flagged` | `commands/open.md` § Step 0.5, `scripts/flagged-rows.py` | yes — selects | **yes, at every tier** — only `OPENING_ACTORS` (`operator`, `legacy`) open; an agent-set or absent setter is `REFUSED` with `agent-set-flag`. The decision is `scripts/flag_provenance.py` `flag_admits()`, and every open path routes through it |
 | **Operator-named marker** — the cap exemption | `commands/open.md` § Step 1.5 | yes | **yes** — `operator_named` needs the pair, `flag` true **and** an opening actor |
 | **Spawn** — a manager's `To open` rows | `commands/steps/goal-spawn.md` | yes — not a parked marker | **yes** — the selection routes through the shared predicate |
-| **Fleet open leg** — the fleet round's task opens | `agents/fleet-open-actor.md` § constraints, `scripts/open-queue.py` | yes — **gates**: only a flagged row is selected; an unflagged one is skipped as `not flagged` | **yes** — `open-queue.is_flagged()` delegates to the shared predicate |
 | **Goal / topic opens** | `scripts/topic-spawn.py --goal`, `--topic-open`; `scripts/topic-keepalive.py` | yes | **yes** — both `flagged()` helpers delegate to the shared predicate |
 | **Focus rank** — read-only ranking | `scripts/next-focus.py` | yes | **yes** — an operator-set flag ranks; it opens nothing |
 | **Resume** — the drive leg's auto-resume gate | `agents/goal-drive.md` step 3 | **no** — the `not parked` clause is phase and status only | **no** |
