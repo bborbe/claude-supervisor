@@ -97,7 +97,7 @@ Full text and the `⚠️` clauses live in `steps/rules.md`.
 - **Dispatch is the manager's verb alone** — a worker routes out-of-scope work to its manager.
 - **Before spawning, check for a supervised worker** — the session registry is the guard.
 - **Never answer another manager's workers** — route to the owning manager; own-goal admits excepted.
-- **`mcp__supervisor__list_agents` sees only workers this session spawned** — empty is not absence.
+- **`mcp__supervisor__list_agents` lists every worker; only this session's parks are this session's to answer** — empty is not absence.
 - **An empty `mcp__supervisor__pending_permissions` is not absence of a gate** — take the worker's own reading first.
 - **`~/.claude/sessions/*.json` is the authoritative liveness store** — never stamp a session from a ledger reading.
 - **The PR is the boundary** — opening a PR is never management; worktree, branch and commits go to a worker.
