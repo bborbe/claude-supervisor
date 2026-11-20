@@ -20,7 +20,7 @@ Manager-tier, like `/supervisor:open` (`docs/session-tiers.md` § Command → ti
 
 ```
 /supervisor:open-a2a "<name>"
-  ├─ resolve + gate → /supervisor:open § Step 0 · § Step 1 · § P2–P3, run by reference
+  ├─ resolve + gate → /supervisor:open § Step 0 · § Step 1 · § P2–P3 · § Step B, run by reference
   └─ dispatch (this file's own), by the row's `target:` frontmatter:
        absent         → the controller's `local` backend, `a2a-local-control.py create`
        docker | k8s | k8s:<cluster> → `spawn_agent`, the value passed verbatim
@@ -42,7 +42,7 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 ## Step 0–1.5 — resolve and gate, by reference
 
-**Read `${CLAUDE_PLUGIN_ROOT}/commands/open.md` and execute its § Step 0, § Step 1 and § P2–P3 exactly as written.** They own, in order: the vault resolution, the `--flagged` batch with the `role` / `mode` classification, the type resolution, and the three spawn gates (approval, readiness, the fleet cap). None of them is restated here — a second copy is a second counter, and this file's whole point is that it is thin where that one is thick.
+**Read `${CLAUDE_PLUGIN_ROOT}/commands/open.md` and execute its § Step 0, § Step 1, § P2–P3 and § Step B exactly as written.** They own, in order: the vault resolution, the `--flagged` batch with the `role` / `mode` classification, the type resolution, and the three spawn gates (approval, readiness, the fleet cap). None of them is restated here — a second copy is a second counter, and this file's whole point is that it is thin where that one is thick.
 
 ⚠️ **The batch split, and it is the only difference:** this command does NOT call the wrapper's
 open endpoint. It selects rows with the same gates (`§ Step 0` / `§ Step 1` / `§ P2–P3` by

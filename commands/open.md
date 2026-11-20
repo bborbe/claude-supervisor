@@ -373,12 +373,20 @@ resumable. Rule: `skills/hold/SKILL.md`.
 Read the row's recorded session id and refuse **before** sending it:
 
 ```bash
-SID=$(vault-cli --vault "<vault>" task get "<name>" claude_session_id 2>/dev/null)
+SID=$(vault-cli --vault "<vault>" task get "<name>" claude_session_id 2>/dev/null) || {
+  echo '❓ UNVERIFIED — the session id could not be read; a hold cannot be ruled out'
+  exit 1   # refuse: never send a row whose hold state is unknown
+}
 if [ -n "$SID" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-holds.py" is-held "$SID"
   # exit 0 → held, reason on stdout · exit 1 → not held · exit 2 → bad target
 fi
 ```
+
+⚠️ **A failed read is a refusal, not a pass.** The old file refused when the
+`claude_session_id` read itself failed; keep that. An unread id is the absence of an answer,
+and the endpoint has no hold check of its own, so sending on an unread id would resume exactly
+the session the operator parked. Exit 2 from `is-held` (bad target) is treated the same way.
 
 ⚠️ **Exit 0 refuses the row and nothing is sent for it.** Print
 `⏸️ HELD — <reason> · <age> · <task> · refused; only the operator releases it` and STOP for
