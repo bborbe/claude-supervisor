@@ -90,7 +90,13 @@ def hold_window_id():
 
 
 def role_for_session(session_id):
-    """The `role:` of the task recording `session_id`, or None.
+    """The RESOLVED `role:` of the task recording `session_id`, or None when no task records it.
+
+    ⚠️ **A task that records the session but omits `role:` returns `agent`, not None.** Matrix
+    Rule 1 makes an absent `role:` an agent, so returning None here let the very case this hook
+    exists to refuse — a roleless agent row resumed as a tab — pass as "no task found". The two
+    answers are different: None means "no task claims this session", `agent` means "this is an
+    agent row".
 
     A bounded scan of the vault task dirs: the hook has 5 s, so it walks the known
     dirs only and stops at the first match.
@@ -113,7 +119,10 @@ def role_for_session(session_id):
                     continue
                 for line in head.splitlines():
                     if line.startswith("role:"):
-                        return line.split(":", 1)[1].strip().strip('"').strip("'")
+                        resolved = line.split(":", 1)[1].strip().strip('"').strip("'")
+                        return resolved or "agent"
+                # The task records this session but declares no role: Rule 1 makes it agent.
+                return "agent"
     return None
 
 
