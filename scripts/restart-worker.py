@@ -733,9 +733,8 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     `manager_launcher:`, else the vault's configured `manager_launcher` (`manager-default`),
     else the `-claude` sibling for a vault-cli too old to emit that key, else `claude_script`.
 
-    A `role: human` task takes the Claude launcher (`_human_launcher`), mirroring
-    `applyHumanLauncherRule` in `server/spawn-cwd.mjs` — the operator's own session is not a
-    delegate. Its own `launcher:` still wins.
+    A `role: human` task is NOT special-cased (operator ruling 2026-11-20): it resolves
+    exactly like a worker, so only an explicit `launcher:` overrides the worker default.
     """
     override = os.environ.get("SUPERVISOR_LAUNCHER")
     if override:
@@ -799,52 +798,9 @@ def resolve_launcher(sid, cwd, fb, subject=None):
         name = os.path.join(os.path.dirname(vault_launcher), name)
     name = os.path.expanduser(name)
 
-    # A `role: human` row takes the vault's CLAUDE launcher, never the worker default — the
-    # operator's own session is not a delegate (operator ruling 2026-11-06, matrix Rule 4).
-    # Mirrors `applyHumanLauncherRule` in `server/spawn-cwd.mjs`, including its ordering: the
-    # `-claude` sibling sits AHEAD of a configured `manager_launcher`, because private-personal
-    # and seibert-brogrammers both point that key at a `-deepseek` script and taking it first
-    # would leave a human row on the worker model while the rule reported success. A task's
-    # own `launcher:` still wins — it is the operator's explicit choice for that row.
-    if claimant and source != "task" and _role_field(claimant[0]) == "human":
-        name, source = _human_launcher(vault_launcher, vault)
-        if name is None:
-            return None, source
-
     if not os.path.isfile(name):
         return None, f"launcher {name} ({source}) does not exist"
     return name, source
-
-
-def _human_launcher(vault_launcher, vault):
-    """`(name, source)` for a `role: human` row: the `-claude` sibling, else the manager chain.
-
-    Reuses `manager-launcher.py`'s `sibling()` and `resolve()` rather than restating the
-    naming convention, so the compatibility rung has one home.
-
-    ⚠️ **The last rung is the vault's `claude_script`, never the worker default.** That is
-    what matrix Rule 4 states and what `applyHumanLauncherRule` does (it falls through to
-    `resolveManagerLauncher`, whose final arm is `vaultLauncher`). Returning the worker
-    resolution here would put a `role: human` row on the `-deepseek` worker launcher in a
-    vault that configures `worker_launcher` but has neither a `-claude` sibling nor a
-    `manager_launcher` — the very outcome this rule exists to prevent. Caught in review.
-
-    `(None, reason)` when the configured `manager_launcher` is unsafe or missing: the
-    reason is `manager-launcher.py`'s own sentence and the caller refuses with it, rather
-    than turning it into a second, misleading "does not exist".
-    """
-    ml = load_sibling("manager-launcher.py")
-    sibling = os.path.expanduser(ml.sibling(vault_launcher))
-    if sibling == vault_launcher:
-        return vault_launcher, "vault"
-    if os.path.isfile(sibling):
-        return sibling, "claude-sibling"
-    manager_default = str(vault.get("manager_launcher") or "").strip()
-    if not manager_default:
-        return vault_launcher, "vault"
-    if "/" not in manager_default:
-        manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
-    return ml.resolve(manager_default, None, "manager-default")
 
 
 def changed_inputs(load_path, load_mtime, argv, launcher, started):
