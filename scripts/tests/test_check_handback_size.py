@@ -121,6 +121,13 @@ def transcript_line(text):
                                    "content": [{"type": "text", "text": text}]}})
 
 
+def tool_use_line(name, **inputs):
+    return json.dumps({"type": "assistant",
+                       "message": {"role": "assistant",
+                                   "content": [{"type": "tool_use", "id": "toolu_1",
+                                                "name": name, "input": inputs}]}})
+
+
 class TranscriptModeTest(unittest.TestCase):
     """`--transcript`: the EMITTED hand-back, where absent is a failure and not 0 B.
 
@@ -239,6 +246,110 @@ class TranscriptModeTest(unittest.TestCase):
                           + "\n```\n</output_format>")
         result = self.run_transcript(path)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class SubagentHandbackTest(unittest.TestCase):
+    """The `SubagentHandback` tool call is the fleet legs' primary delivery shape.
+
+    Measured 2026-11-20 on round `agent-ab4dfffd5c9330c85`: a 61 B closing remark in the
+    assistant text and a 514 B hand-back in the tool call. The checker read text blocks only,
+    so it reported "absent" — grading every compliant leg a failure.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write(self, name, *lines):
+        path = pathlib.Path(self.dir) / name
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+
+    def run_transcript(self, path, agent_type=None):
+        argv = [sys.executable, str(SIZE_SCRIPT), "--transcript", str(path)]
+        if agent_type is not None:
+            argv += ["--agent-type", agent_type]
+        return subprocess.run(argv, capture_output=True, text=True)
+
+    def test_a_hand_back_delivered_through_the_tool_call_passes(self):
+        """The measured shape: a short remark in text, the verdict in the tool call."""
+        path = self.write(
+            "a.jsonl",
+            transcript_line("I'll start by reading the router and the step files."),
+            tool_use_line("SubagentHandback", message="**Round 1795181706.6291862 — final**\n"
+                                                      + "- progressing=22 · stalled=0\n" * 12),
+        )
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("(emitted)", result.stdout)
+
+    def test_an_oversize_tool_hand_back_fails_naming_the_size(self):
+        path = self.write("b.jsonl",
+                          tool_use_line("SubagentHandback", message="- x\n" * 400))
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("over its", result.stderr)
+
+    def test_a_send_message_is_not_a_hand_back(self):
+        """`SendMessage` carries a `message` input too — keying on it would pass a silent leg.
+
+        Measured on the same transcript: five `SendMessage` calls at 295–547 B alongside the
+        one 514 B hand-back.
+        """
+        path = self.write(
+            "c.jsonl",
+            transcript_line("I'll start by reading the router."),
+            tool_use_line("SendMessage", to="manager", message="- " + "x" * 300),
+        )
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no `**Hand-back**` fence and no round-id block", result.stderr)
+        self.assertIn("SubagentHandback", result.stderr)
+
+    def test_the_largest_candidate_wins_across_text_and_tool(self):
+        """A short round-id remark must not mask an oversize tool hand-back."""
+        path = self.write(
+            "d.jsonl",
+            transcript_line("**Round 1795181706 — final verdict**\n\n- x"),
+            tool_use_line("SubagentHandback", message="- y\n" * 400),
+        )
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("over its", result.stderr)
+
+    def test_variable_lines_are_excluded_in_the_tool_shape_too(self):
+        """The keepalive leg's `crash-loop:` rows are unbounded whichever shape it uses."""
+        rows = "\n".join(f"crash-loop: subject-{i} · WORKER" for i in range(40))
+        path = self.write("e.jsonl",
+                          tool_use_line("SubagentHandback",
+                                        message="- hand-back: x\n" + rows))
+        result = self.run_transcript(path, agent_type="supervisor:fleet-keepalive-actor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_tool_only_transcript_with_no_text_block_still_measures(self):
+        """The measured transcript's text block is a 61 B remark; a leg may emit none at all."""
+        path = self.write("f.jsonl",
+                          tool_use_line("SubagentHandback", message="- hand-back: x"))
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_an_empty_tool_message_is_not_a_hand_back(self):
+        path = self.write("g.jsonl", tool_use_line("SubagentHandback", message="   "))
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_the_committed_fixture_still_reproduces_the_defect(self):
+        """The frozen copy of the measured shape, so this case cannot rot with the session.
+
+        `fixtures/subagent-handback/round-514b.jsonl` carries the measured proportions: a
+        61 B text remark, `SendMessage` calls with `message` inputs, and one 514 B
+        `SubagentHandback` call. Against the pre-fix checker it exits 1 ("absent").
+        """
+        path = pathlib.Path(__file__).resolve().parent / "fixtures" / "subagent-handback" / "round-514b.jsonl"
+        self.assertTrue(path.is_file(), f"fixture missing: {path}")
+        result = self.run_transcript(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("=514B", result.stdout)
 
 
 if __name__ == "__main__":
