@@ -330,6 +330,13 @@ Goals and topics: an absent `phase` is exempt; `phase: todo` alone is gated — 
 `resume` is not gated, and a `role: human` row is not gated. **`task_type:` frontmatter rows are
 exempt**; show `— (pipeline contract)`.
 
+⚠️ **Decide the scope from the PAGE, never from a liveness probe.** Line 44 forbids probing
+liveness, and it still does: read the task's own `status:` / `phase:` — a row at `phase: todo`
+or `status: next` / `backlog` is one the endpoint would *create*, so it is gated; a row already
+`in_progress` / `execution` is one it would *resume*, so it is not. That is a page-state read,
+which this command already does, not a probe. If the page cannot answer it, gate the row — a
+needless audit costs one sub-agent dispatch, a skipped one opens a raw worker.
+
 ⚠️ **The decision is the readiness ladder, whose single home is `docs/fleet-surface.md` § Spawn a
 worker item 2** — read the branches there; the thresholds are never restated as a second counter.
 Orientation only: **≥ 9 opens; below 9 runs one improvement pass and re-audits; ≥ 7 after that
@@ -475,6 +482,10 @@ are not namespaced across vaults, so a table without a vault column opens the wr
 ### B1 — holds, applied before the request
 
 - **`blocked`** → `⛔ HOLD`, print its blockers, exclude the row.
+- **The operator's session hold (§ P4)** — a task row whose recorded session is held is excluded
+  and counted held, exactly as on the single-name path. The batch is not exempt: a hold is
+  operator policy about a session, and a batch that skipped it would reopen the very sessions
+  the operator parked. P4's task-only scoping applies here too.
 - **`owner_live`** — a flagged task whose goal (or, absent one, topic) already has a live manager
   is **held**, never opened: two sessions on one subject. The fact is already computed by
   `scripts/flagged-rows.py` — read it, never re-derive it:
@@ -507,8 +518,10 @@ are not namespaced across vaults, so a table without a vault column opens the wr
 
 ### B2 — one request, many rows
 
-Build the eligible rows in the printed stable order and send them in **ONE** call — a request
-with many rows is the batch, processed in request order. Same tool/endpoint as Step 2, with
+Build the eligible rows in the printed stable order and send them in **one call per chunk** —
+a request with many rows is a batch, processed in request order. **One chunk is the normal
+case**; split only when the chunk would outlast the Bash tool's 600 s cap (see Step 2's timeout
+note), and never send a row twice. A batch that fits in one call is sent in one call. Same tool/endpoint as Step 2, with
 `first_step` set only on a row the readiness ladder opened below its bar (its gap bullets).
 
 ```json
