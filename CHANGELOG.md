@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.3
 
 - docs: **`docs/sweep-output.md` cites the gate that exists, not a `scripts/sweep-gate.py` that never did.** Three citations (lines 53, 91, 101) named a file absent from this repo's history and from every commit in it. They now name the live gate in `bborbe/claude-wrapper` `pkg/sweepgate/` — `WriteTickFile()` (`state.go`, strips the OSC 8 escapes and creates the tick file `0600`), `CheckboxCount()` (`task.go`, returns `—` only for a section with no checkboxes and `n/m` over the boxes it finds, so a mixed gate silently drops the numbered items), and no `orphaned` bucket — each verified against that repo's source rather than assumed. The rules themselves are unchanged; only the owner they point at is. Change set: `docs/sweep-output.md`, `CHANGELOG.md`.
 
