@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.360.3
 
 - fix: **`exit-observer-keeper.py` records one ledger line per death, and cards the re-arm that never restored the writer.** `record()` appended a line on every 5 s pass for a pane that stayed stale — it carried no dedup, while the `card()` it replaced deduped by `pane+beat_at`. Measured 2026-11-20: `keeper-rearms.jsonl` held 195 lines for 3 distinct `(pane, beat_at)` deaths and zero `ack` cards. The record now dedups on `(pane, beat_at)` read back from the ledger, so one death is one line and a keeper restart cannot re-record a death already written. The second half is the loss the ledger alone hid: `rearm()` returns rc 0 from `session-exit-record.py observe` when its daemonise fails, having started no observer, and `check()` read that as success and carded nothing. A re-arm now counts as restored only when `beat_at` moves within `VERIFY_SECONDS` (equal to `OBSERVER_STALE`); a pane still stale a full window after the re-arm is carded once, with `--mechanism ack` and the dedup key `exit-observer-silent-<pane>-<beat_at>`. Change set: `scripts/exit-observer-keeper.py`, `scripts/tests/test_exit_observer_keeper.py`, `CHANGELOG.md`.
 
