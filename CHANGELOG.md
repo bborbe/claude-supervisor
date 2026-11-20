@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the feed filter's refusal is now a STDOUT event, so a slow or dead `/who-needs-me` can no longer drop gates silently.** The feed arm is a `Monitor` that fires on **stdout**; stderr carries only the per-poll `LIVENESS` heartbeat and is deliberately not merged (merging it would wake the manager every quiet poll). `refusal_exit` wrote the refusal **only** to stderr, so on a mid-run refusal the `Monitor` died with an empty stdout — **no event**, and the manager could only infer the refusal from a *missing* heartbeat, which is exactly the "gates are lost silently" shape the arm must not have. `refusal_exit` now writes the `WHO-NEEDS-ME-REFUSED` line to stdout as well, so the refusal is an event the manager receives and can render the feed `unread` and surface the refusal. Still **no `gates:` line** on this path — a marker beside the false claim is not a fix. Change set: `scripts/gate-owner-filter.py`, `scripts/tests/test_gate_owner_filter.py`, `CHANGELOG.md`.
+
 ## v0.361.1
 
 - docs: **the fleet-drive rule says what `list_agents` actually returns.** Two shipped lines — `commands/fleet-drive.md` (INLINE) and `commands/steps/rules.md` — claimed the roster is scoped to the workers this session spawned, which stopped being true when the rehydrated roster shipped: the roster lists **every** worker, including rows adopted from the ledger regardless of which process spawned them. Only this session's **parks** are this session's to answer. A manager reading the old line could answer another manager's worker, or fail to look for its own rehydrated worker, and neither error surfaces. Both lines now state that split, and `fleet-drive.md` still fits its 10 240-byte tick budget (10 142 bytes, 98 free). Change set: `commands/fleet-drive.md`, `commands/steps/rules.md`, `CHANGELOG.md`.
