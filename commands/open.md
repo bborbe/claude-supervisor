@@ -127,7 +127,8 @@ match = [v for v in vaults if v.get("name") == "<vault>"]
 print((match[0].get("topics_dir") if match else "") or "23 Topics")')
 vault-cli --vault "<vault>" task get "<name>" status  2>/dev/null
 vault-cli --vault "<vault>" goal get "<name>" status  2>/dev/null
-find "$TOPICS_DIR" -maxdepth 1 -iname "*<name>*.md"
+NAME_PAT=$(python3 -c 'import sys;n=sys.argv[1];print("".join("\\"+c if c in "*?[]" else c for c in n))' "<name>")
+find "$TOPICS_DIR" -maxdepth 1 -iname "*$NAME_PAT*.md"
 ```
 
 `TOPICS_DIR` is the vault's configured value, defaulting to `23 Topics` — read from the config
@@ -138,6 +139,11 @@ confirm `page_type: topic` **inside the frontmatter block**, not anywhere in the
 ```bash
 awk '/^---$/{n++; next} n==1' "<page>" | grep -q '^page_type: topic'
 ```
+
+**Escape the glob metacharacters in the name first.** `find -iname` takes a *pattern*, so a
+title containing `*`, `?` or `[` changes the match set — `Fix [bug]` reads `[bug]` as a
+character class, so the intended page silently fails to match and the probe reports the name
+as matching no kind. `NAME_PAT` above backslash-escapes those three characters.
 
 **Use `find -iname`, never a shell glob.** `ls "<topics_dir>/"*"<name>"*.md` is case-sensitive
 under zsh, so a lowercase argument matches nothing against Title Case filenames.
@@ -348,7 +354,31 @@ decide from the score alone.
 
 A held row is **not sent**. Report `⛔ NOT READY <score>/10 — <task>` with its gap bullets.
 
-### P4 — nothing else
+### P4 — the operator's session hold
+
+A hold is operator **policy about a session**, not the `hold` task status and not the `HOLD`
+marker for a `blocked` row. The endpoint does not know about it — its refusal set has
+`hold-window`, which is the operator's *window*, not a session hold — so this caller is the
+only place it can be enforced, and dropping it makes a session the operator explicitly parked
+resumable. Rule: `skills/hold/SKILL.md`.
+
+Read the row's recorded session id and refuse **before** sending it:
+
+```bash
+SID=$(vault-cli --vault "<vault>" task get "<name>" claude_session_id 2>/dev/null)
+if [ -n "$SID" ]; then
+  python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-holds.py" is-held "$SID"
+  # exit 0 → held, reason on stdout · exit 1 → not held · exit 2 → bad target
+fi
+```
+
+⚠️ **Exit 0 refuses the row and nothing is sent for it.** Print
+`⏸️ HELD — <reason> · <age> · <task> · refused; only the operator releases it` and STOP for
+that row: no request row, no verdict to render. On the `--flagged` path drop the row from the
+batch and count it held rather than silently omitting it — a dropped row that leaves no trace
+is the accounting defect the tick already fixed once.
+
+### P5 — nothing else
 
 The fleet cap, the operator-named exemption, the start rate, the terminal-task guard, the
 answer-path probe, the topic ceiling, the launcher choice and the window are **the endpoint's**.

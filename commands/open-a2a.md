@@ -44,7 +44,11 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 **Read `${CLAUDE_PLUGIN_ROOT}/commands/open.md` and execute its § Step 0, § Step 1 and § P2–P3 exactly as written.** They own, in order: the vault resolution, the `--flagged` batch with the `role` / `mode` classification, the type resolution, and the three spawn gates (approval, readiness, the fleet cap). None of them is restated here — a second copy is a second counter, and this file's whole point is that it is thin where that one is thick.
 
-⚠️ **One substitution inside the referenced batch, and it is the only one:** § Step B's per-row delegation invokes `/supervisor:open "<task>"`. Here it invokes **this** command, `/supervisor:open-a2a "<task>"` — otherwise the batch would spawn local tabs and this command would be bypassed on its own batch path.
+⚠️ **The batch split, and it is the only difference:** this command does NOT call the wrapper's
+open endpoint. It selects rows with the same gates (`§ Step 0` / `§ Step 1` / `§ P2–P3` by
+reference) and then dispatches each `docker` / `k8s` row through `spawn_agent` /
+`a2a-local-control` itself — the endpoint opens local tabs only, so routing a remote row
+through it would spawn a tab on this machine instead.
 
 ⚠️ **Gate 3 (the fleet cap) is a `spawn_agent`-side check.** Its numbers have one home — `docs/fleet-surface.md` § Spawn a worker item 5 — and are never restated. It runs on § 2.3's branch; the local-backend create at § 2.2 never reaches that call, so nothing here re-implements it and no `operator_named` marker is passed on that branch.
 
