@@ -150,10 +150,12 @@ subject's Step 1.
    ⚠️ **Honour the page's recorded measurement before the verb.** A goal may carry an optional
    `## Final measurement` block (`- SC1 bar = … measured = … verdict = MET|NOT MET`). Read it
    first: if any criterion records `verdict = NOT MET`, do not run the verb — report that
-   criterion and leave the page open. The verb counts boxes only and never reads this block, so
+   criterion and leave the page open. **A block that is present but unreadable — empty,
+   unparseable, or missing a criterion the page's `# Success Criteria` carry — also fails closed:**
+   report it and leave the page open. The verb counts boxes only and never reads this block, so
    without this read a goal whose boxes are all `[x]` but whose measurement misses a bar would
-   close on boxes alone. A page with no block, or one whose verdicts are all `MET`, closes on the
-   verb as normal.
+   close on boxes alone. Only a page with no block, or one whose verdicts are all `MET`, closes on
+   the verb as normal.
 
    ⚠️ **`--vault` is not optional** — without it the write targets the default vault, so a
    subject in any other vault lands on the wrong page or nowhere at all. It is the same
@@ -241,10 +243,11 @@ arm says — which is why the topic row exists rather than the rule being restat
   `ABSENT`. Such a task may still be *closed* here once its boxes read `[x]`. A member goal is
   never closed from the topic tier: it is routed to its goal manager, which runs Step 0b.
 - **Never set `status: completed` directly.** The verb writes it; nothing else may.
-- **Never close on a partial read.** A page whose DoD section is missing or empty is
-  *unmeasurable*, not complete — report it as a gap. **The one exception is an absent DoD on
-  a grandfathered goal**, which the verb closes by design (see the cutoff note in Step 1); an
-  *empty* DoD section is still unmeasurable at every cutoff.
+- **A missing or empty DoD section is unmeasurable, and the verb refuses on it** —
+  `checkClosureGate` treats a section holding no checkbox as `UNMEASURABLE`, so you do not detect
+  this yourself: report the verb's refusal verbatim and leave the page open. **The one exception
+  is an absent DoD on a grandfathered goal**, which the verb closes by design (see the cutoff note
+  in Step 1); an *empty* DoD section is still unmeasurable at every cutoff.
 - **Never close a page whose open boxes are another task's work.** Report which boxes are open
   and whose they are; closure is not a way to dispose of them.
 
