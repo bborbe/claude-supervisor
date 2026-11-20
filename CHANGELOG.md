@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.1
 
 - fix: **the feed filter's refusal is now a STDOUT event, so a slow or dead `/who-needs-me` can no longer drop gates silently.** The feed arm is a `Monitor` that fires on **stdout**; stderr carries only the per-poll `LIVENESS` heartbeat and is deliberately not merged (merging it would wake the manager every quiet poll). `refusal_exit` wrote the refusal **only** to stderr, so on a mid-run refusal the `Monitor` died with an empty stdout — **no event**, and the manager could only infer the refusal from a *missing* heartbeat, which is exactly the "gates are lost silently" shape the arm must not have. `refusal_exit` now writes the `WHO-NEEDS-ME-REFUSED` line to stdout as well, so the refusal is an event the manager receives and can render the feed `unread` and surface the refusal. Still **no `gates:` line** on this path — a marker beside the false claim is not a fix. Change set: `scripts/gate-owner-filter.py`, `scripts/tests/test_gate_owner_filter.py`, `CHANGELOG.md`.
 
