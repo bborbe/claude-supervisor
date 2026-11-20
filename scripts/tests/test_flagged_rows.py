@@ -478,6 +478,47 @@ class RowGate(unittest.TestCase):
         row = self.row(set(), {fr.FLEET_KEY: False, ("row", None): "none"})
         self.assertEqual(row["branch"], "create")
 
+    # ---- a stale declared id is not a dead row (2026-11-19 `Start Day`) -------------
+
+    STALE = "a88b5438-86fc-4aec-954f-39488ffa02a7"
+
+    def stale_row(self, managers):
+        root = tempfile.mkdtemp()
+        path = os.path.join(root, "25 Tasks", "A Task.md")
+        write(path, page("flag: true\nflag_set_by: operator\nrole: agent\n"
+                         "status: in_progress\nclaude_session_id: %s\n"
+                         "goals:\n    - '[[G]]'" % self.STALE))
+        cfg = {"tasks_dir": "25 Tasks", "path": root,
+               "worker_launcher": "/opt/l/cc-v", "claude_script": "/opt/l/cc"}
+        ctx = {"today": "2026-11-16", "role_map": ROLE_MAP,
+               "template_root": tempfile.mkdtemp(), "no_liveness": False,
+               "managers": (None if managers is None else set(managers)),
+               "topic_map": {}, "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {("row", self.STALE): "ABSENT"},
+               "fleet_sid": None}
+        row, reason = fr.row_for("v", cfg, "task", path, ctx)
+        self.assertIsNone(reason)
+        return row
+
+    def test_a_stale_sid_with_a_live_namesake_is_not_absent(self):
+        # The row declared a dead session while a live session carried the same name, so
+        # every open path re-opened a row that was already running. LIVE, never ABSENT —
+        # ABSENT is what licenses the duplicate spawn.
+        row = self.stale_row({"A Task"})
+        self.assertNotEqual(row["branch"], "resume")
+
+    def test_a_dead_session_with_no_live_namesake_still_resumes(self):
+        # The control: names are not ids, so a name hit proves *a* live session of that
+        # name. With no live namesake the row is genuinely dead and must still resume.
+        row = self.stale_row(set())
+        self.assertEqual(row["branch"], "resume")
+
+    def test_an_unreadable_registry_never_upgrades_absent(self):
+        # `None` is not `False`: a failed registry probe proves nothing, and reading it as
+        # "not live" would authorise the duplicate spawn the join exists to prevent.
+        row = self.stale_row(None)
+        self.assertEqual(row["branch"], "resume")
+
 
 class OwnerResolution(unittest.TestCase):
     """`docs/fleet-surface.md` § Which manager owns a subject — the rungs, in order.

@@ -369,7 +369,8 @@ def describe_answer(item):
 def verdict(item):
     """(ok, decision, reason) for a permission-class item — the three conditions, verbatim.
 
-    Mirrored from `permission-answer-poll.py` rather than re-derived, so the pod and the
+    Mirrored from the Go permission-answer hook (`bborbe/attention-controller`,
+    `cmd/permission-answer-hook`) rather than re-derived, so the pod and the
     in-pane hook cannot disagree about what releases a gate. The third condition is the
     legitimacy basis: a gate releases only on an arm answer.
     """

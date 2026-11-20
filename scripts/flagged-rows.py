@@ -1169,6 +1169,19 @@ def row_prepare(vault, cfg, kind, path, ctx):
 def _finish_row(vault, kind, path, ctx, block, name, page_kind, role, role_source,
                 mode, launcher, launcher_source, sid):
     live = "none" if ctx["no_liveness"] else row_liveness(ctx, sid)
+    # ⚠️ **A stale declared id is not a dead row.** The row's `claude_session_id` can lag
+    # behind the session actually running it — measured 2026-11-19 on `Start Day`: the row
+    # declared `a88b5438` (no live process) while four live tabs held its panes, so every
+    # open path re-opened a row that was already running. `ctx["managers"]` is built from
+    # `live_session_names(sessions)` (`:1239`), i.e. EVERY live session's name, raw and
+    # glyph-stripped — not a manager subset — so a name hit means "some live session carries
+    # this name". ⚠️ **`None` is not `False`:** `managers is None` means the registry probe
+    # failed, and reading that as "not live" would authorise a duplicate spawn. ⚠️ **Names
+    # are not ids:** two sessions can share a name, so this proves *a* live session of that
+    # name, never *this* one — which is why the guard is scoped to the ABSENT verdict only
+    # and leaves a genuinely dead row with no live namesake reading ABSENT.
+    if live == "ABSENT" and ctx["managers"] is not None and name in ctx["managers"]:
+        live = "LIVE"
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
     # 2000-line module per call — probing ABSENT rows too tripled the run time for
     # an answer that is `null` by construction.

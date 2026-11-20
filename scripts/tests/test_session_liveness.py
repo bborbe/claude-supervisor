@@ -396,6 +396,27 @@ class SessionLiveness(unittest.TestCase):
         self.assertNotEqual(rc, ABSENT)
         self.assertEqual(rc, LIVE)
 
+    def test_a_live_heartbeat_with_no_registry_entry_is_marked_unregistered(self):
+        # The unaddressable shape: alive and stamping, but no identity-registry entry — so every
+        # registry-keyed verb (`restart-precheck`, `close-worker`, `send_agent_message`) refuses
+        # it with `unknown-session-id` while this reader answers LIVE. The marker is what lets a
+        # caller see the split instead of having to join the two sources itself.
+        sid = "b7c8d9e0-1111-2222-3333-444455556666"
+        with self.fixture([row(sid, live=True, age_seconds=3)]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertIn("UNREGISTERED", out)
+
+    def test_a_live_heartbeat_with_a_registry_entry_is_not_marked_unregistered(self):
+        # The positive control: a registered live session must not carry the marker, or the
+        # marker would fire on the whole fleet and stop distinguishing anything.
+        sid = "c8d9e0f1-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with self.fixture([row(sid, live=True, age_seconds=3)]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertNotIn("UNREGISTERED", out)
+
     def test_a_not_live_row_without_a_measurable_age_stays_unknown(self):
         # `live: false` with no usable `age_seconds` does not prove how long it has been quiet.
         sid = "a9e0a9e0-1111-2222-3333-444455556666"
