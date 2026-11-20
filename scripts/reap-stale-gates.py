@@ -42,12 +42,13 @@ import subprocess
 import sys
 import time
 
-DEFAULT_STATE = os.path.expanduser("~/.claude/state/attention")
+DEFAULT_STATE = (os.environ.get("ATTENTION_STATE_DIR")
+                 or os.path.expanduser("~/.claude/state/attention"))
 DEFAULT_MAX_AGE_HOURS = 24
 HERE = os.path.dirname(os.path.abspath(__file__))
 WHO_NEEDS_ME = os.path.join(HERE, "who-needs-me.py")
 LIVENESS = os.path.join(HERE, "session-liveness.py")
-REAPER = "reap-stale-gates"
+REAPER = "ReapedStale"
 
 
 def load_who_needs_me():
@@ -141,13 +142,26 @@ def render(row, mod, pmap, registry):
 
 
 def close_line(rec, now):
-    """The one line `--apply` appends. Any non-`open` type closes the item."""
+    """The one line `--apply` appends.
+
+    ⚠️ **The shape is the store's, not this script's.** Two readers besides
+    `who-needs-me.py` fold the same log and each keys on a different test:
+    `attention-answer.py` calls an item closed when `closed_by` is present and
+    **no `type` field** is, and `open-queue.py` when `event` is absent and
+    `closed_by` is present. A line carrying `type: "close"` would close the item
+    for `who-needs-me.py` (which folds on `type == "open"`) and leave it open for
+    both of those — the silent-consumer break this script exists to avoid. So:
+    `closed_by`, and neither `type` nor `event`.
+
+    `closed_by` carries a non-hook value on purpose: the live vocabulary is hook
+    event names (`PreToolUse`, `SessionEnd`, `Expired`, …), and reusing one would
+    make a reap indistinguishable from the event that really closed it.
+    """
     return json.dumps({
         "item_id": rec.get("item_id"),
         "session_id": rec.get("session_id"),
-        "type": "close",
         "ts": now,
-        "cleared_by": REAPER,
+        "closed_by": REAPER,
     })
 
 

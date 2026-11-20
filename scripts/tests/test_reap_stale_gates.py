@@ -100,14 +100,26 @@ class LivenessTest(unittest.TestCase):
 
 
 class CloseLineTest(unittest.TestCase):
-    def test_shape_closes_the_item(self):
+    def test_shape_satisfies_both_other_readers(self):
+        # attention-answer.py: `closed_by` present AND no `type`.
+        # open-queue.py:      `event` absent AND `closed_by` present.
+        # who-needs-me.py:    anything that is not `type == "open"`.
         mod = load_module()
         line = json.loads(mod.close_line({"item_id": "i", "session_id": "s"}, 42.0))
         self.assertEqual(line["item_id"], "i")
         self.assertEqual(line["session_id"], "s")
-        self.assertEqual(line["type"], "close")
-        self.assertEqual(line["cleared_by"], mod.REAPER)
-        self.assertNotEqual(line["type"], "open")
+        self.assertEqual(line["closed_by"], mod.REAPER)
+        self.assertNotIn("type", line)
+        self.assertNotIn("event", line)
+
+    def test_closed_by_is_not_a_hook_event_name(self):
+        # Reusing a hook name would make a reap indistinguishable from the event
+        # that really closed the item.
+        mod = load_module()
+        hook_names = {"UserPromptSubmit", "PreToolUse", "PostToolUse",
+                      "PostToolUseFailure", "SessionEnd", "SupersededByNewItem",
+                      "Expired"}
+        self.assertNotIn(mod.REAPER, hook_names)
 
 
 class PaneReadRefusalTest(unittest.TestCase):
@@ -148,8 +160,12 @@ class PaneReadRefusalTest(unittest.TestCase):
                 rc = self.mod.main(["--state", self.dir, "--apply", "--max-age-hours", "0"])
         self.assertEqual(rc, 0)
         with open(os.path.join(self.dir, "a.events.jsonl"), encoding="utf-8") as f:
-            types = [json.loads(l)["type"] for l in f if l.strip()]
-        self.assertEqual(types, ["open", "close"])
+            lines = [json.loads(l) for l in f if l.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["type"], "open")
+        # The close line carries no `type` — see close_line's docstring.
+        self.assertNotIn("type", lines[1])
+        self.assertEqual(lines[1]["closed_by"], self.mod.REAPER)
 
 
 class SelectionTest(unittest.TestCase):
