@@ -187,6 +187,22 @@ BASE = os.environ.get("SUPERVISOR_WRAPPER_URL", "http://127.0.0.1:18090").rstrip
 _parts = urllib.parse.urlsplit(BASE)
 if _parts.hostname not in ("127.0.0.1", "localhost", "::1"):
     sys.exit("open refused: SUPERVISOR_WRAPPER_URL %r is not a loopback origin" % BASE)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect instead of following it.
+
+    `urlopen` follows redirects by default and honours `http_proxy` / `https_proxy`, so
+    validating `BASE` alone would not keep the request on this machine: a 30x (or a proxy)
+    could carry the session header and the row data elsewhere. Refusing the redirect makes
+    the loopback claim above true rather than aspirational.
+    """
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 req = urllib.request.Request(
     BASE + "/api/1.0/open",
     data=json.dumps({"rows": rows}).encode(),
@@ -201,7 +217,7 @@ req = urllib.request.Request(
 # outlast that is chunked by the caller (see the note below), never run in one request.
 timeout = 600
 try:
-    print(urllib.request.urlopen(req, timeout=timeout).read().decode())
+    print(_opener.open(req, timeout=timeout).read().decode())
 except urllib.error.HTTPError as exc:
     body = exc.read().decode(errors="replace")
     sys.exit("open refused: HTTP %s — %s" % (exc.code, body))
