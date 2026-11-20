@@ -2,10 +2,9 @@
 """The round's delegate rule carves out its acting legs, and each leg says so at its own home.
 
 `commands/fleet-drive.md`'s delegate rule tells every round to hand anything that is not the
-sweep to a sub-agent. Rows 5b (keep alive), 5c (flagged open), 5d (own parks), 16 (open leg)
-and 16b (manager-subject reap) *are* "anything not the sweep", and they are also the only rows
-whose purpose is to **act** — restart or resume a session, open a page the operator flagged,
-answer a parked permission prompt, open the rows the rank selected, post the reap card and
+sweep to a sub-agent. Rows 5b (keep alive), 5d (own parks) and 16b (manager-subject reap)
+*are* "anything not the sweep", and they are also the only rows whose purpose is to **act** —
+restart or resume a session, answer a parked permission prompt, post the reap card and
 hand over the reap lines. With no carve-out the natural reading of the rule swallows
 exactly those legs, and a delegated sub-agent runs read-only, so the round prints a count it was
 told to print instead of doing the thing the row exists for.

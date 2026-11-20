@@ -771,9 +771,9 @@ def render(opened, skipped, live, target):
         return "open-queue: target unlimited — selected 0 (workers unlimited)"
 
     if live is not None and max(0, target - live) == 0:
-        return "open leg: no free slots — selected 0 (workers %d/%d)" % (live, target)
+        return "open-queue: no free slots — selected 0 (workers %d/%d)" % (live, target)
 
-    head = "open leg: selected %d (workers %d/%d)" % (len(opened), live, target)
+    head = "open-queue: selected %d (workers %d/%d)" % (len(opened), live, target)
     lines = [head]
     for index, row in enumerate(opened, start=1):
         # Every opened row is flagged (the gate admitted it), so the per-row reason is
@@ -818,7 +818,7 @@ def main(argv=None):
     if not os.path.isdir(args.tasks_dir):
         # Both streams: the exit code is the signal, but a round that captured only
         # stdout would otherwise render nothing at all, which reads as a clean round.
-        print("open leg: unknown")
+        print("open-queue: unknown")
         print("❌ tasks dir not found: %s" % args.tasks_dir, file=sys.stderr)
         return 2
 
@@ -831,20 +831,20 @@ def main(argv=None):
         today = defer_date.as_now(args.now)
     except ValueError:
         # A bad --now is a refusal, not a traceback: the round reads exit 2 and renders
-        # "open leg: unknown" rather than losing the whole line to a stack dump.
-        print("open leg: unknown")
+        # "open-queue: unknown" rather than losing the whole line to a stack dump.
+        print("open-queue: unknown")
         print("❌ bad --now: %s" % args.now, file=sys.stderr)
         return 2
     rows, skipped, err = collect(args.tasks_dir, today, topics_dir=args.topics_dir,
                                  goals_dir=args.goals_dir)
     if err:
-        print("open leg: unknown")
+        print("open-queue: unknown")
         print("⚠️ approved queue unreadable — %s" % err, file=sys.stderr)
         return 2
 
     live, target = capacity()
     if live is None:
-        print("open leg: unknown")
+        print("open-queue: unknown")
         print("⚠️ capacity unreadable — cannot tell free slots from a full fleet", file=sys.stderr)
         return 2
 

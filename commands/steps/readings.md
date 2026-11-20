@@ -66,7 +66,7 @@ Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>
 
 ⚠️ **`unknown` is a third answer, not `0`.** An unreadable session registry prints `unarmed goals: unknown` and exits non-zero. Print it as it comes back; never round it down to a number.
 
-⚠️ **The line reports; it never arms.** Arming a manager is either the operator's answer to a `start manager` card (`commands/steps/propose-manager.md`) or a manager opening one through `/supervisor:open` (`docs/session-tiers.md` § The four tiers); this reading does neither. ⚠️ **This is about MANAGERS, and the open leg does not touch it.** Opening an approved *worker* row (router row 16) arms no manager: a goal with ready rows and no live manager gets its workers opened and its manager state unchanged — the operator's ruling of 2026-10-30 is explicit that auto-opening topic and goal managers is out, so "the round opens" and "the round arms" are different acts with different boundaries.
+⚠️ **The line reports; it never arms.** Arming a manager is either the operator's answer to a `start manager` card (`commands/steps/propose-manager.md`) or a manager opening one through `/supervisor:open` (`docs/session-tiers.md` § The four tiers); this reading does neither. ⚠️ **This is about MANAGERS, and the opener does not touch it.** Opening an approved *worker* row — by the wrapper's flagged tick, since the round has no open leg — arms no manager: a goal with ready rows and no live manager gets its workers opened and its manager state unchanged — the operator's ruling of 2026-10-30 is explicit that auto-opening topic and goal managers is out, so "the round opens" and "the round arms" are different acts with different boundaries.
 
 ## The next-focus reading
 
@@ -89,7 +89,7 @@ Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "25 Tasks"`
 
 ⚠️ **Any non-zero exit is a REFUSAL, never "nothing to do".** An unreadable vault or a bad `--now` exits 2 with the reason on stderr, and an unexpected failure is mapped to the same 2 rather than escaping as a traceback — render it as `Next focus: refused — <that reason>`, per Output shape item 2; an empty plan set exits 0 with `note:` lines. The two must not render the same.
 
-⚠️ **The reading reports; it never opens.** What this block proposes is still the operator's to approve — the card is the ask, and `attention-ask.py` is how it is answered. Once a row carries that approval, opening it is the **open leg's** act (router row 16), never this reading's and never the card's: the card answers *what to approve*, the leg answers *which approved row opens now*, and collapsing the two would turn a proposal into a spawn.
+⚠️ **The reading reports; it never opens.** What this block proposes is still the operator's to approve — the card is the ask, and `attention-ask.py` is how it is answered. Once a row carries that approval, opening it is the **wrapper's flagged tick's** act, never this reading's and never the card's: the card answers *what to approve*, the leg answers *which approved row opens now*, and collapsing the two would turn a proposal into a spawn.
 
 ## The service-guard reading
 

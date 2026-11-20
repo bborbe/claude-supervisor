@@ -53,7 +53,7 @@ from typing import Callable, Optional
 DEFAULT_CONFIG = os.path.expanduser("~/.claude/state/service-guard.json")
 # Only `completed` is reopened. ⚠️ `aborted` is the operator's REJECTION — the
 # inbox documents it as irreversible — and an aborted row that was never
-# approved carries no `approved_at`, which the open leg requires, so a reopened
+# approved carries no `approved_at`, which the opener requires, so a reopened
 # aborted row would sit `in_progress` with no session forever. A breach on an
 # aborted row is reported and left alone.
 REOPENABLE_STATUSES = ("completed",)

@@ -144,7 +144,7 @@ class TaskStanddownTest(unittest.TestCase):
 
         ⚠️ Without this path a task stopped by name writes only the
         `task--<base>.stopped` state file, which **no reader consumes** — so the row was
-        still reopened by the open leg and resumed by the keepalive. That was the
+        still reopened by the flagged tick and resumed by the keepalive. That was the
         half-merge the by-name PR's own SC3 deferred to this change, and the local review
         caught it.
         """
