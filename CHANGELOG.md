@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **operator work found inside an agent row now has one rule.** New `docs/attention-and-delegation.md` defines attention, human task and agent task, the size test (one answer, ~2 min, no artifact → attention card; else its own `role: human` row), the five channels with use-when / never-use-for, evidence ownership per shape, and what a manager decides alone. `docs/role-mode-matrix.md` gains Rule 5 carrying the test and split bookkeeping (operator ruling 2026-11-20). Rules 1–4 unchanged.
+
 ## v0.360.1
 
 - fix: **the round's hand-back gate can now actually fail.** `commands/steps/round-dispatch.md` has told the manager to run `check-handback-size.py --transcript` and branch on its exit code since v0.352.2, and the instruction is prose: measured 2026-11-20 across a full manager session transcript, the gate ran **once in 8 611 lines** and never again, and that one run read `python3 "$P/check-handback-size.py" … 2>&1 | tail -5; echo "size_exit=$?"` — where `$?` is the **pipe's last stage**, so a real `handback-size FAILED` was logged as `size_exit=0` and the manager treated the check as passing. The step now captures `gate_rc=$?` on the line immediately after an unpiped invocation, and `scripts/check-round-gate-exit-code.py` (wired into `precommit`) refuses a piped invocation, one whose exit code is not captured, and one that has been deleted outright — a rule the call site can copy in a shape that cannot carry an exit code is the same "a rule that lives only in prose" defect the size check itself exists to close. Change set: `commands/steps/round-dispatch.md`, `scripts/check-round-gate-exit-code.py`, `scripts/tests/test_check_round_gate_exit_code.py`, `Makefile`, `CHANGELOG.md`.
