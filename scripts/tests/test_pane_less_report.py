@@ -87,5 +87,24 @@ class PaneLessReport(unittest.TestCase):
             self.assertNotIn("pane-less manager", out)
 
 
+class Wiring(unittest.TestCase):
+    """SC3's wiring half: the sweep render step must actually invoke the producer.
+
+    A producer nothing calls passes every behavioural test and changes nothing — the
+    condition it reports would still depend on a model noticing the manager's own
+    `↪️ no branch — no pane` prose. The caller is asserted directly against the step files.
+    """
+
+    STEPS = ("goal-sweep.md", "topic-sweep.md")
+
+    def test_the_sweep_render_steps_invoke_the_producer(self):
+        root = os.path.dirname(os.path.dirname(HERE))
+        for name in self.STEPS:
+            path = os.path.join(root, "commands", "steps", name)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertIn("pane-less-report.py", text, name)
+
+
 if __name__ == "__main__":
     unittest.main()
