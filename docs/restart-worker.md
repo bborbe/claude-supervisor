@@ -295,14 +295,13 @@ script takes the manager rule instead — the subject page's `manager_launcher:`
 configured `manager_launcher` (`manager-default`), then the `-claude` sibling (`claude-sibling`)
 for a vault-cli too old to emit the key.
 
-⚠️ **A `role: human` task takes the Claude launcher**, mirroring `applyHumanLauncherRule` in
-`server/spawn-cwd.mjs` (operator ruling 2026-11-06, matrix Rule 4): the `-claude` sibling
-(`claude-sibling`), then the configured `manager_launcher` (`manager-default`), then the
-vault's `claude_script` (`vault`) — never the worker default. The sibling comes **first on
-purpose** — `private-personal` and `seibert-brogrammers` both point `manager_launcher` at a
-`-deepseek` script, so taking the configured value first would leave a human row on the
-worker model while the rule reported success. A task's own `launcher:` still wins, over both
-rules.
+⚠️ **A `role: human` task resolves exactly like a worker** (operator ruling 2026-11-20,
+matrix Rule 4): the task's own `launcher:` (`task`), then the vault's `worker_launcher`
+(`worker-default`), then `claude_script` (`vault`). The `-claude` sibling and
+`manager_launcher` are never consulted for a human row — the earlier 2026-11-06 rule that
+sent every human row to the Claude launcher is removed, because it put routine operator rows
+on Opus 5.5 for no reason (measured 2026-11-20: BRO-22863 Check Alerts). The manager rule
+above still applies to managers only.
 
 ## The one deliberate copy
 

@@ -787,7 +787,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 // `workerEnvFor` already makes the server's values win on the headless path, but the TAB
 // path has no handover to win with — `shellEnvExports` would export whatever the caller
 // passed — so the identical override was inert on one path and live on the other. That is
-// not cosmetic: `scripts/permission-answer-poll.py:287` returns early on
+// not cosmetic: the permission-answer hook returns early on
 // `SUPERVISOR_WORKER_MODE == "headless"`, so a caller telling a TAB worker it is headless
 // silences that worker's attention-store relay. REFUSED on both paths rather than silently
 // outranked on one, so the rule reads the same wherever it is found. Found by the PR review
@@ -847,7 +847,7 @@ export function resolveEnvOverrides({ env } = {}) {
             `and the export outlives the pane for anything launched from it.`
           : `the server owns a worker's spawn mode and hands it to the worker itself. ` +
             `A caller setting it would tell a TAB worker it is headless — and ` +
-            `scripts/permission-answer-poll.py returns early on that value, so the worker's ` +
+            `the permission-answer hook returns early on that value, so the worker's ` +
             `attention-store relay would go silent.`
       return { error: `env cannot set ${name}: ${why} Omit it; it is not the caller's to declare.` }
     }
