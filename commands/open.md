@@ -168,21 +168,31 @@ open_rows(rows=[{kind: <task|goal|topic>, vault: "<vault>", name: "<name>", firs
 
 ```bash
 python3 - "$VAULT" "$KIND" "$NAME" "$FIRST_STEP" <<'PY'
-import json, os, sys, urllib.error, urllib.request
+import json, os, sys, urllib.error, urllib.parse, urllib.request
 vault, kind, name, first = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# ⚠️ An absent session id is a refusal, not an empty header: the endpoint's answer-path probe
+# keys on it, and an empty value refuses every headless row with a misleading `answer-path`.
+SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+if not SESSION_ID:
+    sys.exit("open refused: CLAUDE_CODE_SESSION_ID is unset — the answer-path probe cannot run")
 row = {"kind": kind, "vault": vault, "name": name}
 if first:
     row["first_step"] = first
 rows = [row]
 # Honour the repo's wrapper-URL override, the same variable every other caller reads
 # (deliver-message.py, manager-liveness.py): a hardcoded origin breaks any non-default port.
+# It stays loopback-only — the open endpoint spawns processes, so a non-loopback origin would
+# let an env var redirect an open to another host. A redirect is refused for the same reason.
 BASE = os.environ.get("SUPERVISOR_WRAPPER_URL", "http://127.0.0.1:18090").rstrip("/")
+_parts = urllib.parse.urlsplit(BASE)
+if _parts.hostname not in ("127.0.0.1", "localhost", "::1"):
+    sys.exit("open refused: SUPERVISOR_WRAPPER_URL %r is not a loopback origin" % BASE)
 req = urllib.request.Request(
     BASE + "/api/1.0/open",
     data=json.dumps({"rows": rows}).encode(),
     headers={
         "Content-Type": "application/json",
-        "X-Claude-Code-Session-Id": os.environ.get("CLAUDE_CODE_SESSION_ID", ""),
+        "X-Claude-Code-Session-Id": SESSION_ID,
     },
 )
 # A create/resume verdict returns only once the tab exists and its ready-gated start
@@ -196,7 +206,7 @@ except urllib.error.HTTPError as exc:
     body = exc.read().decode(errors="replace")
     sys.exit("open refused: HTTP %s — %s" % (exc.code, body))
 except urllib.error.URLError as exc:
-    sys.exit("open unreachable at http://127.0.0.1:18090 — %s" % exc.reason)
+    sys.exit("open unreachable at %s — %s" % (BASE, exc.reason))
 PY
 ```
 
