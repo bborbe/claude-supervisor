@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.6
 
 - fix: **the relayed-gate closer rule reaches the last three surfaces that still documented `--closer` as the fix for a relay.** v0.247.5 established that a relayed gate is never restated on the manager's own closer — the closer is a verb-free `🟡 WAITING` handover and `--closer` never applies — but only `commands/steps/needs-input.md`, `commands/steps/goal-gates.md` and `scripts/attention-ask.py` carried it. `docs/voice-asks.md`, `agents/goal-drive.md` and `commands/fleet-drive.md` still told a manager that `--closer` is *required whenever the closer repeats the card's ask*, which for a relay is the opposite advice and mints the duplicate the rule removes. All three now name the relay case and point at the rule's one home. Change set: `docs/voice-asks.md`, `agents/goal-drive.md`, `commands/fleet-drive.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
