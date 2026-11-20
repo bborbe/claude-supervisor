@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.8
 
 - test: **one fail-closed control per remaining `unverifiable` cause in `scripts/permission-tier.py`.** The brace-expansion cause was loosened narrowly in v0.349.1 and already has fixtures; the other eight share the same branch but not the same reason, so a future "fix" that widens the tier instead of the syntax would satisfy the brace cases while opening a real gate. Pinned: a here-string feeding stdin, an expansion as the command word, a `gh` subcommand decided by an expansion, a payload truncated at the store cap, `curl`'s method/body expansion, `git tag`'s operand expansion, ANSI-C/locale quoting, and an unterminated double quote — each asserted STILL `unverifiable`. Change set: `scripts/tests/test_permission_tier.py`, `CHANGELOG.md`.
 
