@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the Python snapshot write is retired; the wrapper is the sole owner.** `bborbe/claude-wrapper`'s sweep tick persists `~/.claude/state/fleet-snapshot.json` over the whole registry roster — verified 2026-11-20 at 2496 ids against 49 live with **0 missing**, a superset of what the round wrote. Two writers to a diff baseline is a race, so `fleet-snapshot.py` now writes only this round's `.digest` marker, which the wrapper does not write and whose absence reads as a lapse to the watcher. ⚠️ **A run with no `--digest-path` now REFUSES**: with the snapshot gone, that call had nothing left to write yet printed `snapshot written:` and exited 0 — a recovery path reporting success while doing nothing. The recovery path in `commands/fleet-drive.md` row 18 and `commands/steps/persist.md` now passes the flag. Change set: `scripts/fleet-snapshot.py`, `scripts/tests/test_fleet_snapshot.py`, `agents/fleet-sweep-reader.md`, `commands/fleet-drive.md`, `commands/steps/persist.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
+
 ## v0.360.2
 
 - docs: **operator work found inside an agent row now has one rule.** New `docs/attention-and-delegation.md` defines attention, human task and agent task, the size test (one answer, ~2 min, no artifact → attention card; else its own `role: human` row), the five channels with use-when / never-use-for, evidence ownership per shape, and what a manager decides alone. `docs/role-mode-matrix.md` gains Rule 5 carrying the test and split bookkeeping (operator ruling 2026-11-20). Rules 1–4 unchanged.

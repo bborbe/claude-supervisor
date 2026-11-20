@@ -54,13 +54,17 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "state", "fleet-snapshot.json")
+        # A digest path is required now: with the snapshot gone, that marker is the
+        # only thing a run writes, and a run without one refuses.
+        self.digest = os.path.join(self.tmp, "round.digest")
 
-    def run_main(self, payload):
+    def run_main(self, payload, digest_path="default"):
         """Invoke main() with a JSON payload on stdin; return (rc, stdout, stderr)."""
         stdin = io.StringIO(json.dumps(payload))
         out, err = io.StringIO(), io.StringIO()
+        target = self.digest if digest_path == "default" else digest_path
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = fs.main(stdin=stdin, path=self.path)
+            rc = fs.main(stdin=stdin, path=self.path, digest_path=target)
         return rc, out.getvalue(), err.getvalue()
 
     def write_existing(self, sessions=None):
@@ -265,9 +269,13 @@ class DigestMarker(Base):
         # watcher depends on, is that the marker parses to a real instant.
         self.assertTrue(raw.endswith("Z"), "the marker must carry a UTC instant, got %r" % raw)
 
-    def test_no_marker_without_a_digest_path(self):
-        self.run_with_digest({"a": {"name": "s1"}})
-        self.assertFalse(os.path.exists(self.digest))
+    def test_a_run_without_a_digest_path_REFUSES(self):
+        # With the snapshot gone, a call with no `--digest-path` has nothing left to
+        # write. It used to print `snapshot written:` and exit 0 anyway — a recovery
+        # path reporting success while doing nothing.
+        rc, out = self.run_with_digest({"a": {"name": "s1"}})
+        self.assertEqual(rc, 1, "must refuse rather than no-op")
+        self.assertNotIn("snapshot written:", out)
 
     def test_the_env_var_is_honoured(self):
         os.environ["FLEET_SNAPSHOT_DIGEST_PATH"] = self.digest

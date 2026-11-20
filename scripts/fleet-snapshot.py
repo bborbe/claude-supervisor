@@ -189,6 +189,18 @@ def main(stdin=None, path=None, digest_path=None):
     # `swept_at` instant the snapshot was taken at — otherwise the watcher reads a
     # timely round as a lapse (measured 2026-10-22: `STALE … age=1083s` on a 1051 s
     # gap). So this call stamps the marker and nothing else.
+    # ⚠️ With no `--digest-path` this script now has NOTHING to write: the snapshot
+    # is the wrapper's and the marker is the only thing left. Printing
+    # `snapshot written:` and exiting 0 in that state is the silent no-op the
+    # review caught — a recovery path that reports success while doing nothing.
+    if not digest_path:
+        print(
+            "refusing to run without --digest-path: the snapshot is written by the "
+            "wrapper's sweep tick, so the only thing left to do here is stamp this "
+            "round's .digest marker. Pass --digest-path <this round's payload path>.",
+            file=sys.stderr,
+        )
+        return 1
     swept_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     write_digest_marker(swept_at, digest_path, len(sessions))
     print("snapshot written:", swept_at, "-", len(sessions), "sessions")

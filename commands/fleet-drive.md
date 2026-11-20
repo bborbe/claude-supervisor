@@ -77,7 +77,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 15 | Readings | every tick — take all seven readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 | 16b | Manager reap | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
-| 18 | Persist | this round's `.digest` marker is missing — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
+| 18 | Persist | this round's `.digest` marker is missing — run: `python3 $P/fleet-snapshot.py --digest-path <this round's payload path>` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 

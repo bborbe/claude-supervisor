@@ -1,6 +1,6 @@
 ---
 name: fleet-sweep-reader
-description: Compute the fleet sweep's read half (Steps 0b–3 of /supervisor:fleet-loop) — read the four channels and the open-items ledger, diff against the previous snapshot, run the orphan reverse index, find collision and unmanaged-topic candidates, classify every session, persist the next snapshot through fleet-snapshot.py, write the digest render to its payload path, and return the ≤ 1 KB bucket-count hand-back. Never acts, never messages, never writes anything but the snapshot and the payload.
+description: Compute the fleet sweep's read half (Steps 0b–3 of /supervisor:fleet-loop) — read the four channels and the open-items ledger, diff against the previous snapshot, run the orphan reverse index, find collision and unmanaged-topic candidates, classify every session, stamp the round's digest marker, write the digest render to its payload path, and return the ≤ 1 KB bucket-count hand-back. Never acts, never messages, never writes anything but the snapshot and the payload.
 model: sonnet
 tools: Read, Bash, Skill
 allowed-tools: Bash(python3:*), Bash(grep:*), Bash(date:*), Bash(cat:*), Bash(ls:*), Bash(head:*), Bash(wc:*), Bash(vault-cli:*)
@@ -26,7 +26,7 @@ Canonical rationale for every rule below: `the Fleet Manager Session runbook` §
 <inputs>
 The caller passes: this round's `ListAgents` roster verbatim · this manager's session id (`SID`) · the vault path and its tasks dir · the round timestamp.
 
-Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: write no snapshot, and print `snapshot written: skipped (persist: false)` in the digest header. `/supervisor:fleet-drive` passes it, because a round run by hand between two armed rounds must not advance `stall_count` or consume the previous snapshot the next round diffs against. Absent → persist as normal.
+Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: stamp no marker, and print `snapshot written: skipped (persist: false)` in the digest header. `/supervisor:fleet-drive` passes it, because a round run by hand between two armed rounds must not advance `stall_count` or consume the previous snapshot the next round diffs against. Absent → persist as normal.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
