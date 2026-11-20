@@ -61,7 +61,13 @@ MODE_ANCHOR = "Spawn a worker item 6"
 #: moved *out* of the agent and into its caller, so the command that executes the hand-off
 #: rows is now a spawn site and must carry the binding.
 SPAWN_SITES = (
-    "commands/open.md",
+    # ⚠️ `commands/open.md` left this set on 2026-11-20: it is a THIN CALLER now. Every
+    # routing decision — role→mode, the answer-path probe, the headless resume, the tab
+    # window — moved into the wrapper's open endpoint (`POST /api/1.0/open`, the
+    # `open_rows` MCP tool), so the file no longer passes `interactive=` at all and the
+    # binding this check looks for has no site here to hold. The mode rule is enforced
+    # in bborbe/claude-wrapper; the backstop for a hand-rolled spawn is
+    # `scripts/spawn-route-guard.py`.
     # ⚠️ `commands/open-a2a.md` joined on 2026-10-17: it is `open.md`'s parallel, so it is a
     # spawn site for the same reason `open.md` is — it decides which way a worker opens. Its
     # `local` branch reaches the controller's own backend rather than `spawn_agent`, but the

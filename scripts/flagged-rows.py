@@ -104,7 +104,10 @@ YAML_TRUE = ("true", "True", "TRUE", "yes", "Yes", "YES",
 
 #: `commands/open.md` § 3.0's role → window table. The role map's fourth key `Hold`
 #: is not a role target and its `chip` is null, so the map is never the enum source.
-ROLE_WINDOW = {"agent": "Agents", "manager": "Managers", "human": "Direct"}
+#: role → role-map key. An `agent` row has NO entry: it never opens a tab (matrix
+#: Rule 2), so there is no window to resolve and no `Agents` key exists in the map
+#: (removed from ~/.config/wezterm 2026-11-12).
+ROLE_MAP_KEY = {"manager": "Managers", "human": "Direct"}
 ROLE_CHIP = {"agent": "pink", "manager": "orange", "human": "cyan"}
 MISSING_MAP_CHIP = "pink"
 
@@ -130,9 +133,9 @@ SPAWN_MODES = ("interactive", "headless")
 DEFAULT_MODE = "interactive"
 FLEET_CONFIG = os.path.expanduser("~/.config/claude-supervisor/config.json")
 
-#: The three roles `commands/open.md` § 3.0 maps to a window. An on-disk value
-#: outside this set has no window, so it is normalised to `agent` and reported.
-ROLES = tuple(ROLE_WINDOW)
+#: The three roles. Only manager and human have a window; an on-disk value outside
+#: this set is normalised to `agent` and reported.
+ROLES = ("agent", "manager", "human")
 
 #: `launcher_source` — the union of the worker arm (`docs/fleet-surface.md` § Spawn a
 #: worker item 8) and the manager arm (§ Which launcher a manager opens on), which is
@@ -647,7 +650,7 @@ def resolve_mode(block, default):
 
 
 def normalise_role(role):
-    """(role, raw-or-None) — `ROLE_WINDOW` is the only role → window table there is."""
+    """(role, raw-or-None) — `ROLE_MAP_KEY` is the only role → role-map-key table there is."""
     return (role, None) if role in ROLES else ("agent", role)
 
 
@@ -1176,7 +1179,7 @@ def _finish_row(vault, kind, path, ctx, block, name, page_kind, role, role_sourc
     # treats exactly as `jump`.
     pane = (pane_of(ctx, sid)
             if live == "LIVE" and not ctx.get("no_pane") else None)
-    window = ROLE_WINDOW.get(role, "Agents")
+    window = ROLE_MAP_KEY.get(role, "")
     entry = (ctx["role_map"] or {}).get(window) or {}
     owner = resolve_owner(page_kind, name, block, ctx, vault)
     owner_live, chain_live = owner_liveness(owner, page_kind, name, ctx, vault)

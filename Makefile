@@ -48,14 +48,10 @@ check-spawn-keys:
 check-spawn-target:
 	@python3 scripts/check-spawn-target.py
 
-check-open-manager-resolution:
-	@python3 scripts/check-open-manager-resolution.py
 
 # The GOAL and TOPIC branches type their manager's start commands into the pane they just
 # spawned. Three regressions are silent: the operator-paste instruction returns, the wait
 # falls through instead of exiting, or a literal pane id replaces the just-spawned variable.
-check-open-manager-start:
-	@python3 scripts/check-open-manager-start.py
 
 # `/supervisor:open` is the operator's own open: it never refuses a goal or topic on its flag.
 # Automatic opens are flag-gated upstream (topic-keepalive, topic-spawn --goal); this pins both
@@ -65,8 +61,6 @@ check-open-hand-run:
 
 # A task whose owning subject has a live manager is held, and a held row is never silent:
 # pins the `⛔ HOLD — owner …` render, the same-run spawn-ledger leg, and the footer split.
-check-open-owner-live:
-	@python3 scripts/check-open-owner-live.py
 
 check-worker-target:
 	@python3 scripts/check-worker-target.py
@@ -102,11 +96,7 @@ check-gate-class-order:
 	@python3 scripts/check-gate-class-order.py
 
 
-check-open-role-defaults:
-	@python3 scripts/check-open-role-defaults.py
 
-check-open-resume-mode:
-	@python3 scripts/check-open-resume-mode.py
 
 check-step-when:
 	@python3 scripts/check-step-when.py
@@ -134,8 +124,6 @@ check-handback-size:
 check-round-overlap:
 	@python3 scripts/check-round-overlap.py
 
-check-resume-flag-clause:
-	@python3 scripts/check-resume-flag-clause.py
 
 check-drive-ledger-writes:
 	@python3 scripts/check-drive-ledger-writes.py
@@ -190,7 +178,7 @@ check-own-parks-routing:
 check-wrote-nothing:
 	@python3 scripts/check-wrote-nothing.py
 
-check: check-manager-allowlist check-open-manager-resolution
+check: check-manager-allowlist
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json','server/manager-allowlist.json']]" && echo "  manifests parse"
 	@test ! -e .mcp.json && test -f README.md && echo "  plugin files present"
@@ -244,6 +232,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-open-hand-run check-open-owner-live check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-role-defaults check-open-resume-mode check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-open-leg-raw-name check-own-parks-routing test check-wrote-nothing
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-overlap check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-open-leg-raw-name check-own-parks-routing test check-wrote-nothing
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-open-hand-run check-open-owner-live check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-role-defaults check-open-resume-mode check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-open-leg-raw-name check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-overlap check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-open-leg-raw-name check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
