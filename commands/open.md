@@ -247,7 +247,7 @@ Open a `human` row as **the operator's own session**, not a delegate:
 - window → `Direct` (`~/.cache/wezterm-role-map.json` → `Direct.window_id`), never `Agents`
 - chip → `cyan`, never `pink` — the colour is the fleet's only cue for which role a session plays
 - prompt → the same `/vault-cli:work-on-task "<task>"`, because anchoring the task is useful to a human too
-- launcher → the worker chain, same as an agent row (matrix Rule 4: task `launcher:` → `worker_launcher` → `claude_script`); pass `role` to `spawn_agent` — the server applies the role's window and chip only when passed
+- launcher → matrix Rule 4 (worker chain); pass `role` to `spawn_agent` — the server applies it only when passed
 
 Print it as `→ DIRECT`. The distinction that matters is **who drives the session**, not whether a session exists: a cyan tab in `Direct` with the task loaded is a workspace, and spawning a pink agent worker onto the same row would be the failure. One of those is a window assignment; the other is a delegation.
 
@@ -820,7 +820,7 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 
   `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below). **A `name` that is not the row's subject → the spawn carried no usable `label`.** `server/supervisor.mjs` records `label: label || id`, and `''` is falsy in JavaScript, so **an empty label falls through exactly as an absent one does** — to the minted agent id (`agent_N`) or, on the tab path, to the launcher's own default (`claude-00`, measured live 2026-11-08). Compare the name against the subject after `strip_status_glyph` and with the `(2)` uniqueness suffix removed; **anything that is not that subject is a refused spawn** — a `agent_\d+` pattern match is too narrow and passes `claude-00`. Stop, re-issue with `label <task>`, report the row `⚠️ unlabelled`.
 - state the branch taken in one line: `↪️ jumped` / `♻️ resumed <sid-prefix>` / `🆕 created <sid-prefix>` — plus the resolved type **and the resolved vault**, so a mis-resolution is visible immediately
-- **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else the vault `worker_launcher`, else the vault `claude_script` — never its goal's, and `role: human` gets the same chain (matrix Rule 4); `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
+- **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else the vault `worker_launcher`, else the vault `claude_script` — never its goal's, and `role: human` takes the same chain; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
 
 ### 4.1 Bind the task explicitly — `-n` does not self-link
 
