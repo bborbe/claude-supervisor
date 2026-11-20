@@ -166,7 +166,7 @@ every peer's percentage and never its own.
 
 ## 4. Write the payload, then hand back the verdict
 
-The full material — the digest, the leg blocks, the drive audit, the open block — is written
+The full material — the digest, the leg blocks, the drive audit — is written
 to the payload paths the step files name. You hand back **only** the verdict summary in
 `<output_format>`; never inline a table, a row list or a rule.
 
@@ -238,7 +238,6 @@ round=<id> · digest=<path> · parks=<path>
 progressing=<n> · stalled=<n> · parked=<n> · finished=<n> · held=<n> · orphan=<n> · collision=<n> · unmanaged=<n>
 revived=<n> · blocked=<n> · reaped=<n>
 legs=<n> · restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
-open-status=<ok|unknown|not-run> · selected=<n> · opened=<n> · open-resumed=<n> · jumped=<n> · refused=<n>
 managers-reaped=<n> · parks-answered=<n> · parks-routed=<n> · parks-escalated=<n> · context70=<n> · self-context=<pct>%|UNKNOWN
 ```
 

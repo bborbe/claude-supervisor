@@ -5,9 +5,8 @@ Two families are covered, and both are silent when broken:
   (1) the fleet tick's router `When` cells against `agents/fleet-sweep-reader.md`'s
       hand-back, and
   (2) the delegated legs — `commands/steps/round-readings.md` → `agents/round-readings-reader.md`,
-      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's two
-      acting legs, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md` and
-      `commands/steps/open.md` → `agents/fleet-open-actor.md`.
+      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's
+      acting leg, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md`.
 
 The load-bearing cases are the PRE-CHANGE ones. Both reader agents shipped on 2026-11-06
 with a hand-back that omitted values its own contract requires — the readings leg collapsed

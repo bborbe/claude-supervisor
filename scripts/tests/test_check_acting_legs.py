@@ -1,7 +1,7 @@
 """check-acting-legs.py: the delegate rule's carve-out, and each acting leg's own statement.
 
 The round's delegate rule sends everything that is not the sweep to a sub-agent, and rows 5b
-(keep alive), 5d (own parks), 16 (open leg) and 16b (manager-subject reap)
+(keep alive), 5d (own parks) and 16b (manager-subject reap)
 are exactly that — while being the only rows whose purpose is to act. With no carve-out a round delegates them read-only and
 prints a count it was told to print: measured 2026-11-01 13:27 CET, a round instructed its
 sub-agent to print `opened=0` and resumed none of the 8 `resume` rows it read.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A row the open leg holds must be blocked by the CLI's own computation too.
+"""A row `open-queue.py` holds must be blocked by the CLI's own computation too.
 
 Why this exists
 ---------------
@@ -203,7 +203,7 @@ def fixture():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="A row the open leg holds must be blocked by vault-cli's computation too"
+        description="A row `open-queue.py` holds must be blocked by vault-cli's computation too"
     )
     parser.add_argument("--tasks-dir", help="the vault's task directory (live mode)")
     parser.add_argument("--vault", help="the vault-cli vault name (live mode)")

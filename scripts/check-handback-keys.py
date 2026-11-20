@@ -13,8 +13,7 @@ permanently false, and the branch behind it silently never runs.
       `commands/steps/goal-spawn.md` each dispatch a reader agent
       (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`), since 2026-11-07
       the fleet round's acting leg does the same (`commands/steps/keepalive.md` →
-      `agents/fleet-keepalive-actor.md`), and since 2026-11-08 the fleet round's open leg
-      does the same (`commands/steps/open.md` → `agents/fleet-open-actor.md`) — each returns
+      `agents/fleet-keepalive-actor.md`) — each returns
       the verdicts the step no longer computes itself. A step reverted to its pre-split text
       stops dispatching, and a reader that drops one value of a family leaves the caller a
       cell it cannot evaluate — both silently. `docs/handback-contract.md` § The shape — the
@@ -104,7 +103,7 @@ LEGS = {
     # whose `legs=` vanished would render counts no digest carries, and the render reads the
     # digest. `dead-scan` is emitted because the digest write branches on it: it is the
     # `--floor` / `--exact` label, and inferring it from the count is the "a number with no
-    # label reads as a measurement" defect `output-shape.md` item 14 exists to remove.
+    # label reads as a measurement" defect `output-shape.md` item 13 exists to remove.
     "supervisor:fleet-keepalive-actor": {
         "agent": "agents/fleet-keepalive-actor.md",
         "sites": ("commands/steps/keepalive.md",),
@@ -153,7 +152,6 @@ LEGS = {
             "orphan", "collision", "unmanaged",
             "revived", "blocked", "reaped",
             "legs", "restarted", "resumed", "parked-due", "nudged", "undelivered",
-            "open-status", "selected", "opened", "open-resumed", "jumped", "refused",
             "managers-reaped", "parks-answered", "parks-routed", "parks-escalated",
             "context70", "self-context",
         ),

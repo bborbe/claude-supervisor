@@ -768,7 +768,7 @@ def render(opened, skipped, live, target):
     must not render the same.
     """
     if target is None:
-        return "open leg: target unlimited — selected 0 (workers unlimited)"
+        return "open-queue: target unlimited — selected 0 (workers unlimited)"
 
     if live is not None and max(0, target - live) == 0:
         return "open leg: no free slots — selected 0 (workers %d/%d)" % (live, target)
