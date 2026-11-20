@@ -1292,6 +1292,19 @@ def refusal_exit(refusal):
     the false claim is not a fix — `gates: 0` still reads as a measurement, and a
     manager parsing it cannot tell it from a quiet fleet. The line that lies is
     the line that must not be printed.
+
+    ⚠️ **The refusal marker also goes to STDOUT, and that is the fix for a silent
+    death.** The feed arm is a `Monitor` that fires on **stdout**; stderr carries
+    only the per-poll `LIVENESS` heartbeat and is deliberately NOT merged (merging
+    it would wake the manager on every quiet poll). A refusal written to stderr
+    alone therefore produced **no event** — the `Monitor` died with an empty
+    stdout, and the manager could only infer the refusal from a *missing*
+    heartbeat, which is exactly the "gates are lost silently" shape this arm must
+    not have. Writing the marker line to stdout turns the refusal into an event
+    the manager receives, so it can render the feed `unread` and surface the
+    refusal instead of reading a dead arm as a quiet fleet. The line is the
+    `REFUSAL_MARKER` (or the `feed_refusal` line, which carries it) — never a
+    `gates:` count, so the rule above still holds.
     """
     sys.stderr.write(f"gate-owner-filter: upstream refused — {refusal}\n")
     sys.stderr.write(
@@ -1299,6 +1312,7 @@ def refusal_exit(refusal):
         "was never read. This exit is non-zero on purpose — do not arm a "
         "watcher on this pipeline's output.\n"
     )
+    sys.stdout.write(f"{refusal}\n")
     return 1
 
 
