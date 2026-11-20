@@ -204,6 +204,12 @@ exists and its ready-gated start commands have been sent (a goal manager's secon
 to 300 s). Use a generous timeout; a short one abandons an open that is still in progress and
 reports nothing.
 
+⚠️ **Pass the timeout on the Bash tool call itself, not only inside the script.** The Bash
+tool's default is 120 s and its maximum is 600 s, so a `create` on the goal path fails at the
+default exactly where the wait matters. Set the call's timeout to at least 300 s for one row
+and to `600` for a batch — the in-script `timeout=` above cannot rescue a call the harness has
+already killed.
+
 ⚠️ **`X-Claude-Code-Session-Id` is what the answer-path probe checks** — it must be *this*
 session's id, so a headless worker's prompts park with the manager that opened it. Omitting the
 header refuses every headless row (`answer-path`).

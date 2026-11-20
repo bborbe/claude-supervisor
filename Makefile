@@ -48,7 +48,6 @@ check-spawn-keys:
 check-spawn-target:
 	@python3 scripts/check-spawn-target.py
 
-
 # The GOAL and TOPIC branches type their manager's start commands into the pane they just
 # spawned. Three regressions are silent: the operator-paste instruction returns, the wait
 # falls through instead of exiting, or a literal pane id replaces the just-spawned variable.
@@ -95,9 +94,6 @@ check-budget:
 check-gate-class-order:
 	@python3 scripts/check-gate-class-order.py
 
-
-
-
 check-step-when:
 	@python3 scripts/check-step-when.py
 
@@ -123,7 +119,6 @@ check-handback-size:
 
 check-round-overlap:
 	@python3 scripts/check-round-overlap.py
-
 
 check-drive-ledger-writes:
 	@python3 scripts/check-drive-ledger-writes.py
