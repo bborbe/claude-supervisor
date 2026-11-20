@@ -576,9 +576,43 @@ class CloserVerbTest(unittest.TestCase):
         # fires there is nothing for the operator to answer.
         self.assertFalse(watch.is_ask("later (on CI green): merge #130"))
 
+    def test_no_content_placeholders_are_not_an_ask(self):
+        # The measured defect (2026-11-20): a worker that ended its turn with
+        # nothing to ask prints a placeholder, not a verb. A bare em-dash is
+        # non-empty and matched neither `nothing` nor `PARKED_VERBS`, so it read
+        # as an ask and the session was carded as parked.
+        for body in ("—", "–", "-", "…", "...", "— …", "—  ", "", "   "):
+            self.assertFalse(watch.is_ask(body), repr(body))
+
+    def test_no_content_placeholder_is_not_gated_at_idle(self):
+        # The end-to-end consequence, not just the predicate: `idle` plus a bare
+        # em-dash must read NOT gated. `idle:no-ask` is the one verdict that
+        # justifies a `CLEARED`, and it is what keeps the worker uncarded.
+        for body in ("—", "–", "-", "…", "..."):
+            verdict, reason = watch.is_gated("idle", body)
+            self.assertIs(verdict, False, repr(body))
+            self.assertEqual(reason, "idle:no-ask", repr(body))
+
     def test_a_real_ask_is_still_an_ask(self):
-        self.assertTrue(watch.is_ask(CLOSER))
-        self.assertTrue(watch.is_ask("approve: /vault-cli:session-close"))
+        for body in (CLOSER,
+                     "approve: /vault-cli:session-close",
+                     "review: PR #12",
+                     "you run: /reload-plugins"):
+            self.assertTrue(watch.is_ask(body), repr(body))
+            self.assertEqual(watch.is_gated("idle", body), (True, "idle+closer"),
+                             "a real verb must stay parked: " + repr(body))
+
+    def test_an_always_false_predicate_fails_the_positive_control(self):
+        """Mutation check: the cheapest wrong fix — `is_ask` returning False for
+        everything — must not pass. It is the failure mode a no-content-only test
+        invites, so the positive control is exercised against it directly."""
+        original = watch.is_ask
+        watch.is_ask = lambda body: False
+        try:
+            with self.assertRaises(AssertionError):
+                self.test_a_real_ask_is_still_an_ask()
+        finally:
+            watch.is_ask = original
 
     def test_entity_padded_nothing_does_not_hold_a_session(self):
         # The end-to-end consequence, not just the predicate: `idle` plus a padded
@@ -907,6 +941,63 @@ class OnceModeTest(unittest.TestCase):
             self.assertIn("idle+closer", out.getvalue())
         finally:
             fx.cleanup()
+
+
+class NoContentCloserOnceTest(unittest.TestCase):
+    """A no-content closer must not reach `--once` as a gate.
+
+    Two tracked workers, both registered `idle`: one ended on a bare em-dash, one
+    holds a real `pick`. Only the `pick` worker may print a `GATED` line, and the
+    summary must count exactly one gate — so an always-false `is_ask` (which drops
+    the `pick` line too) fails here as well as in `CloserVerbTest`.
+    """
+
+    DASH = "d91bf7c1-0000-0000-0000-0000000000a1"
+    PICK = "e02c8d20-0000-0000-0000-0000000000b2"
+
+    def test_only_the_real_ask_is_gated(self):
+        d = tempfile.mkdtemp(prefix="maw-once-")
+        try:
+            projects = os.path.join(d, "projects")
+            projdir = os.path.join(projects, "-Users-someone-my-vault")
+            tasks = os.path.join(d, "tasks")
+            sessions = os.path.join(d, "sessions")
+            for p in (projdir, tasks, sessions):
+                os.makedirs(p)
+            specs = (("Dash Worker", self.DASH, "👤 You:    —"),
+                     ("Pick Worker", self.PICK, CLOSER_LINE))
+            names = []
+            for i, (name, sid, line) in enumerate(specs):
+                names.append(name)
+                with open(os.path.join(tasks, name + ".md"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write("---\nclaude_session_id: %s\n---\nx\n" % sid)
+                with open(os.path.join(projdir, sid + ".jsonl"), "w") as fh:
+                    fh.write(json.dumps(assistant(text=line)) + "\n")
+                with open(os.path.join(sessions, "%d.json" % (700 + i)),
+                          "w") as fh:
+                    json.dump({"sessionId": sid, "status": "idle",
+                               "pid": 700 + i}, fh)
+            tracked = os.path.join(d, "tracked.txt")
+            with open(tracked, "w") as fh:
+                fh.write("\n".join(names) + "\n")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = watch.main(["--tracked", tracked, "--tasks-dir", tasks,
+                                 "--projects-root", projects,
+                                 "--sessions-dir", sessions,
+                                 "--state", os.path.join(d, "state"), "--once"])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            gated = [l for l in text.splitlines() if l.startswith("GATED ")]
+            self.assertEqual(len(gated), 1, text)
+            self.assertIn(self.PICK[:8], gated[0])
+            self.assertIn("idle+closer", gated[0])
+            self.assertNotIn(self.DASH[:8], text,
+                             "a no-content closer must print no GATED line")
+            self.assertIn("gated: 1  held: 0", text)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class ParkedModalProbeTest(unittest.TestCase):

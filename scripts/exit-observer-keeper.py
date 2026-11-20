@@ -59,6 +59,15 @@ OBSERVER_STALE = 45     # log silence that means the writer is gone (1.5 x its 3
 # reports the keeper itself as stale. 120 s is the honest ceiling.
 SWEEP_TIMEOUT = 120
 
+LEDGER = "keeper-rearms.jsonl"
+# A re-arm counts as restored only when `beat_at` moves within this window. It equals
+# `OBSERVER_STALE` on purpose: a re-armed observer writes its first heartbeat immediately, so a
+# pane still stale a full stale-window after the re-arm was not restored.
+VERIFY_SECONDS = OBSERVER_STALE
+
+# Verification state for callers that carry none of their own (`check()` called directly).
+_ARMED = {}
+
 
 class Loop:
     """The watch, as a state machine one pass at a time — so a test can drive the clock.
@@ -75,6 +84,10 @@ class Loop:
         self.unknown = 0
         self.refreshed = None  # None = never swept; any float is "swept at"
         self.rc = 0
+        # {(pane, beat_at): re-armed-at-epoch | "carded"} — the re-arm verification state
+        # `check()` carries between passes. In-memory on purpose: the durable half is the
+        # ledger, which dedups the record across a restart; this only stops a re-post.
+        self.armed = {}
 
     def due(self, now):
         """Is a sweep due? Time since the last sweep, and nothing else."""
@@ -103,7 +116,7 @@ class Loop:
                     self.rc = 1
                 elif not self.panes:
                     print("exit-observer-keeper: every manager pane has a live writer")
-        return check(now, self.panes, dry_run=self.dry_run) or self.rc
+        return check(now, self.panes, dry_run=self.dry_run, armed=self.armed) or self.rc
 
 
 def beat(now):
@@ -197,16 +210,50 @@ def _alive(pid):
         return False
 
 
+def ledger_pairs():
+    """Every `(pane, beat_at)` already in the re-arm ledger, read back from disk.
+
+    ⚠️ This — not an in-memory set — is the dedup state, because the keeper is restarted by
+    `launchctl kickstart` while a dead pane is still stale: memory-only dedup would re-record
+    every such death once per restart. A torn or unreadable line is skipped rather than raised;
+    one bad line must not blind the dedup for every other death.
+    """
+    pairs = set()
+    try:
+        with open(os.path.join(STATE_DIR, LEDGER), encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    pairs.add((str(row["pane"]), int(row["beat_at"])))
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return pairs
+
+
 def record(pane, session_id, beat_at):
-    """Append one line to the re-arm ledger. Returns True when it landed on disk.
+    """Append one line to the re-arm ledger, at most once per `(pane, beat_at)`.
+
+    The dedup key is `(pane, beat_at)` — the pane id and the mtime of its last heartbeat — and
+    it is read back from the ledger, so one death is one line however many passes see it, and
+    a keeper restart cannot re-record a death already on disk.
 
     This is the durable trace a routine death leaves instead of a board card. It is written
     BEFORE the re-arm: a re-armed pane reads `covered` again, so a record that landed after the
     re-arm would be the only sign the writer ever died — and losing it would lose the death.
+
+    Returns True when the death is in the ledger — written now, or already there from an
+    earlier pass — and False only when the line could not be written.
     """
+    if (str(pane), int(beat_at)) in ledger_pairs():
+        return True
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        with open(os.path.join(STATE_DIR, "keeper-rearms.jsonl"), "a", encoding="utf-8") as handle:
+        with open(os.path.join(STATE_DIR, LEDGER), "a", encoding="utf-8") as handle:
             handle.write(json.dumps({"pane": str(pane), "session": session_id or "",
                                      "beat_at": int(beat_at)}) + "\n")
         return True
@@ -248,24 +295,60 @@ def rearm(pane, pid, session):
     return out.returncode == 0
 
 
-def check(now, panes, dry_run=False):
+def check(now, panes, dry_run=False, armed=None):
     """One `stat` pass over the watched panes. Returns the exit code for this pass.
 
-    The trace is written BEFORE the re-arm. A routine death leaves a ledger line and no card;
-    a card is the fallback only when the record cannot be written or the re-arm fails.
+    **One death, one ledger line, one card.** A death is keyed `(pane, beat_at)` — the pane id
+    and the mtime of its last heartbeat — and `record()` dedups on that key read back from the
+    ledger, so a keeper restart cannot re-record a death it already wrote.
+
+    **A re-arm is verified, never assumed.** `rearm()` returning rc 0 does not mean an observer
+    is running: `session-exit-record.py observe` returns 0 when its daemonise fails, having
+    started nothing. So the pass that sees a new death records it and re-arms, and a LATER pass
+    cards it only if `beat_at` still has not moved `VERIFY_SECONDS` after that re-arm — a re-arm
+    that returned rc 0 while the pane stayed stale is an un-re-armable death, the one case a
+    ledger line alone would hide. The card is deduped by
+    `exit-observer-silent-<pane>-<beat_at>`; `armed` stops this process re-posting it every
+    pass, and a restart may re-post once (the store dedups by key).
+
+    `armed` is `{(pane, beat_at): re-armed-at-epoch | "carded"}`, carried between passes. When
+    omitted the module-level map is used, so a direct caller still behaves sanely.
     """
     rc = 0
+    if armed is None:
+        armed = _ARMED
     for pane, ident in panes.items():
         path = os.path.join(STATE_DIR, f"pane-{pane}.log")
         try:
             beat_at = int(os.stat(path).st_mtime)
         except OSError:
             continue
+        key = (str(pane), beat_at)
         if now - beat_at <= OBSERVER_STALE:
+            # A fresh log means the observer is writing again: every death of this pane is
+            # over, including one recorded at an earlier beat_at.
+            for stale in [k_ for k_ in armed if k_[0] == str(pane)]:
+                armed.pop(stale, None)
             continue
         if dry_run:
             print(f"exit-observer-keeper: would record and re-arm pane {pane} "
                   f"(pid {ident.get('pid')}, silent {int(now - beat_at)} s)")
+            continue
+        state = armed.get(key)
+        if state == "carded":
+            continue
+        if state is not None and now - state < VERIFY_SECONDS:
+            continue  # re-armed moments ago; give the observer its window
+        if state is not None:
+            # Re-armed a full window ago and the log has not moved: the re-arm did not restore
+            # the writer. Card it once and stop retrying this death.
+            item = card(pane, ident.get("name", ""), ident.get("session_id", ""), beat_at)
+            if item is not None:
+                armed[key] = "carded"
+                print(f"exit-observer-keeper: pane {pane} RE-ARM DID NOT RESTORE "
+                      f"(beat_at {beat_at} unchanged {int(now - state)} s after re-arm, "
+                      f"carded {item})", file=sys.stderr)
+                rc = 1
             continue
         recorded = record(pane, ident.get("session_id", ""), beat_at)
         item = None
@@ -273,18 +356,21 @@ def check(now, panes, dry_run=False):
             # The ledger is the trace; if it cannot be written, the card is the fallback.
             item = card(pane, ident.get("name", ""), ident.get("session_id", ""), beat_at)
         rearm_ok = rearm(pane, ident.get("pid"), ident.get("session") or "")
-        if not rearm_ok and not item:
-            item = card(pane, ident.get("name", ""), ident.get("session_id", ""), beat_at)
         if not rearm_ok:
+            if not item:
+                item = card(pane, ident.get("name", ""), ident.get("session_id", ""), beat_at)
+            if item is not None:
+                armed[key] = "carded"
             print(f"exit-observer-keeper: pane {pane} RE-ARM FAILED "
                   f"({'carded ' + item if item else 'no card landed'})", file=sys.stderr)
             rc = 1
             continue
-        if not recorded and not item:
+        if not recorded and item is None:
             print(f"exit-observer-keeper: pane {pane} re-armed with no record and no card",
                   file=sys.stderr)
             rc = 1
             continue
+        armed[key] = now
         if item:
             print(f"exit-observer-keeper: pane {pane} carded ({item}) and re-armed "
                   f"(pid {ident.get('pid')})")

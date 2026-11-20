@@ -54,13 +54,17 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "state", "fleet-snapshot.json")
+        # A digest path is required now: with the snapshot gone, that marker is the
+        # only thing a run writes, and a run without one refuses.
+        self.digest = os.path.join(self.tmp, "round.digest")
 
-    def run_main(self, payload):
+    def run_main(self, payload, digest_path="default"):
         """Invoke main() with a JSON payload on stdin; return (rc, stdout, stderr)."""
         stdin = io.StringIO(json.dumps(payload))
         out, err = io.StringIO(), io.StringIO()
+        target = self.digest if digest_path == "default" else digest_path
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = fs.main(stdin=stdin, path=self.path)
+            rc = fs.main(stdin=stdin, path=self.path, digest_path=target)
         return rc, out.getvalue(), err.getvalue()
 
     def write_existing(self, sessions=None):
@@ -111,32 +115,34 @@ class Refusal(Base):
 
 
 class PositiveControl(Base):
-    """A guard that refuses everything satisfies Refusal while breaking the sweep."""
+    """A guard that refuses everything satisfies Refusal while breaking the sweep.
 
-    def test_non_empty_wrapper_is_written(self):
+    ⚠️ Since 2026-11-20 `main()` no longer WRITES the snapshot — the wrapper's
+    sweep tick owns that file. What the run still does is stamp this round's
+    digest marker, so these specs pin that it succeeds AND that it leaves the
+    wrapper's store alone.
+    """
+
+    def test_non_empty_wrapper_succeeds_without_writing_the_snapshot(self):
         rc, out, err = self.run_main({"sessions": {"aaaa1111": {"name": "x"}}})
         self.assertEqual(rc, 0, err)
-        self.assertTrue(os.path.exists(self.path))
+        self.assertFalse(
+            os.path.exists(self.path),
+            "the wrapper owns the snapshot; this script must not write it")
         self.assertIn("1 sessions", out)
 
-    def test_non_empty_bare_dict_is_written(self):
+    def test_non_empty_bare_dict_succeeds(self):
         rc, out, _ = self.run_main({"aaaa1111": {"name": "x"}, "bbbb2222": {"name": "y"}})
         self.assertEqual(rc, 0)
         self.assertIn("2 sessions", out)
 
-    def test_written_snapshot_round_trips(self):
-        self.run_main({"sessions": {"aaaa1111": {"name": "x", "status": "busy"}}})
-        with open(self.path) as handle:
-            data = json.load(handle)
-        self.assertEqual(list(data["sessions"]), ["aaaa1111"])
-        self.assertEqual(data["sessions"]["aaaa1111"]["status"], "busy")
-        self.assertTrue(data["swept_at"].endswith("Z"))
-
-    def test_non_empty_run_advances_an_existing_snapshot(self):
+    def test_a_run_leaves_an_existing_snapshot_byte_identical(self):
         before = self.write_existing({"aaaa1111": {"name": "x"}})
         rc, _, _ = self.run_main({"sessions": {"aaaa1111": {"name": "x"}, "cccc3333": {}}})
         self.assertEqual(rc, 0)
-        self.assertNotEqual(_digest(self.path), before, "a real write must land")
+        self.assertEqual(
+            _digest(self.path), before,
+            "the wrapper's store must be untouched by this round")
 
 
 class AtomicWrite(Base):
@@ -256,12 +262,20 @@ class DigestMarker(Base):
         epoch, quality, raw = digest.read_round(self.digest)
         self.assertEqual(quality, "parsed")
         self.assertIsNotNone(epoch)
-        with open(self.path, encoding="utf-8") as handle:
-            self.assertEqual(raw, json.load(handle)["swept_at"])
+        # ⚠️ This used to compare the marker against the snapshot's own `swept_at`.
+        # The snapshot is the wrapper's file now, written on ITS tick, so the two
+        # instants are no longer the same one and asserting equality would pin a
+        # relationship that no longer exists. What still holds, and is what the
+        # watcher depends on, is that the marker parses to a real instant.
+        self.assertTrue(raw.endswith("Z"), "the marker must carry a UTC instant, got %r" % raw)
 
-    def test_no_marker_without_a_digest_path(self):
-        self.run_with_digest({"a": {"name": "s1"}})
-        self.assertFalse(os.path.exists(self.digest))
+    def test_a_run_without_a_digest_path_REFUSES(self):
+        # With the snapshot gone, a call with no `--digest-path` has nothing left to
+        # write. It used to print `snapshot written:` and exit 0 anyway — a recovery
+        # path reporting success while doing nothing.
+        rc, out = self.run_with_digest({"a": {"name": "s1"}})
+        self.assertEqual(rc, 1, "must refuse rather than no-op")
+        self.assertNotIn("snapshot written:", out)
 
     def test_the_env_var_is_honoured(self):
         os.environ["FLEET_SNAPSHOT_DIGEST_PATH"] = self.digest
