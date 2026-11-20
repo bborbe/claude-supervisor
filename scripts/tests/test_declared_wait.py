@@ -234,6 +234,19 @@ class TestDeclarationVerdict(unittest.TestCase):
         self.assertEqual(self.verdict("⏰ Ends: PR #753 approved (gh pr view)",
                                       dw.MAX_AGE_S + 1), "expired")
 
+    def test_a_card_wait_naming_a_past_check_time_still_holds(self):
+        """A card wait's clock is a re-check time, not a deadline.
+
+        The observable is "the card is answered (pollable)" and the ISO time is when to
+        poll again. Once that time passes the current rule reads `expired`, dropping a
+        live park to `resume` — the hazard this test pins. `ts` is older than
+        `MAX_AGE_S`, the population that actually reads `expired`; a fresh `ts` already
+        returns `declared` and would prove nothing.
+        """
+        ends = ("⏰ Ends: card `967fbbf44849af5e779c9bb94ce72ba9` answered (pollable), "
+                "or the re-check at 2026-11-17T09:00+01:00")
+        self.assertEqual(self.verdict(ends, dw.MAX_AGE_S + 1), "declared")
+
     def test_a_record_without_ts_keeps_the_old_behaviour(self):
         self.write(SID, stop("⏰ Ends: PR #753 approved"))
         self.assertEqual(dw.wait_record(SID, state_dir=self.dir, now=NOW)["verdict"],
