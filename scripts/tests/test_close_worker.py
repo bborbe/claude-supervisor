@@ -432,7 +432,7 @@ class TestCliRefusals(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.splitlines()[0], "unregistered-live")
-        self.assertIn("/supervisor:restart", done.stdout)
+        self.assertIn("No sanctioned verb reaches it yet", done.stdout)
 
     def test_ambiguous_pid(self):
         """Two registry entries claiming one session id are refused, never guessed at."""

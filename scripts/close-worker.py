@@ -788,8 +788,10 @@ def main():
             print("unregistered-live")
             print(
                 "❌ unregistered-live: no registry entry carries session id %s, but its "
-                "transcript was written %ds ago — a live session this verb cannot close; "
-                "use /supervisor:restart %s" % (sid, int(age), sid)
+                "transcript was written %ds ago — a live session this verb cannot close. "
+                "⚠️ **No sanctioned verb reaches it yet:** `restart-worker` refuses "
+                "`unknown-session-id` for the same session, so this needs an operator "
+                "decision, not a restart." % (sid, int(age))
             )
             return 1
         return refuse("unknown-session-id", f"no registry entry carries session id {sid}")

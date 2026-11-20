@@ -1059,8 +1059,13 @@ def _verdict_for(row, sid, registry_dir=None, projects_dir=None):
         # registry-keyed verb (`restart-precheck`, `close-worker`, `send_agent_message`)
         # refuses it while this reader answers LIVE. Mark it, so a caller sees the split
         # instead of having to join the two sources itself.
-        if _registry_has_entry(full, registry_dir) is False:
-            return LIVE, "%s (UNREGISTERED — live heartbeat, no identity-registry entry)" % full, row
+        # ⚠️ **Cluster and a2a sessions are excluded.** They have no LOCAL entry by
+        # construction — they are registered elsewhere — so the marker would fire on the
+        # whole remote fleet and mean nothing.
+        source = (row.get("source") or "").lower()
+        if not source.startswith("a2a") and source != "cluster":
+            if _registry_has_entry(full, registry_dir) is False:
+                return LIVE, "%s (UNREGISTERED — live heartbeat, no identity-registry entry)" % full, row
         return LIVE, full, row
     if live is False:
         if row.get("source") == "cluster":
