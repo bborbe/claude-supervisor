@@ -185,13 +185,61 @@ did not move. `wezterm cli send-text` into the pane is the mechanism that works,
 cannot tell a stale session from a current one: command frontmatter descriptions are routinely
 unchanged between releases, and all 21 of this plugin's commands were byte-identical across
 three consecutive versions (`diff -rq` over `commands/` and `docs/` → no differences). And the
-**MCP server** is a different artifact class from `commands/*.md` — this plugin's runs from a
-workspace checkout (`bun run --cwd …/claude-supervisor/server`), never from the version-pinned
-cache, so probing it says nothing about the command body. A check that is green on both copies
-is not a check.
+**MCP server** is a different artifact class from `commands/*.md`, so probing it says nothing
+about the command body. ⚠️ **It is also no longer this plugin's `server/` checkout** — the live
+MCP tool is the Go `claude-wrapper` binary on `127.0.0.1:18090`, so a probe of the JS server
+answers about a program no session binds (see § The MCP server binary).
 
 **This section is the single statement of the rule.** `docs/session-tiers.md` and the vault's
 *a Claude Code plugin guide* point here; neither restates it.
+
+## The MCP server binary
+
+The plugin-version question above is about `commands/*.md`. This is a second, independent one:
+**does the binary serving the MCP port match a released tag of its own repo?**
+
+The server is `/Users/bborbe/.local/bin/claude-wrapper`, listening on `127.0.0.1:18090`. Every
+policy decision a session makes comes from it, and nothing checked whether it matched a
+release: measured 2026-11-20 it ran `v0.45.2-0.20261120032107-c84c80e5ee16` — a Go
+**pseudo-version**, i.e. built from a commit carrying no release tag — while
+`bborbe/claude-wrapper` had released **`v0.48.0`** that morning. Three releases behind, and a
+pseudo-version is by definition not any release at all.
+
+**The binary is resolved from the port it listens on, never from a config path.** The MCP entry
+in `~/.claude/mcp-*.json` is `{"type": "http", "url": "http://127.0.0.1:18090/supervisor/mcp"}`
+— a URL, not a command, so the config names no program. The chain is `lsof -nP
+-iTCP:18090 -sTCP:LISTEN` → pid → `ps -o comm= -p <pid>` → `go version -m <path>`, and the
+reading compares that build's module version against `gh -R bborbe/claude-wrapper release list`.
+A probe reading `git describe` in a checkout answers what the *tree* says and never touches what
+the *process* loaded.
+
+**`scripts/mcp-version-gap.py` is the probe.** Three states, never two — `agreement` (gap `0`,
+the tag named), `divergent` (both versions quoted, the gap counted from the release list), and
+`unread` (a failed `lsof` / `go` / `gh`, with its reason). Exit `0` / `1` / `2` follow the state.
+
+```
+MCP SERVER VERSION: divergent
+  binary:   /Users/bborbe/.local/bin/claude-wrapper (pid 13094, port 18090)
+  running:  v0.45.2-0.20261120032107-c84c80e5ee16 (pseudo-version, commit c84c80e5ee16)
+  released: v0.48.0
+  gap:      3 release(s) behind
+```
+
+⚠️ **A probe that always reports divergence fails exactly as one that always reports
+agreement.** `--running-version` and `--released-tag` feed either side, so the agreement branch
+is provable without pinning a tag in the tree live sessions execute; every override is recorded
+under `overrides` so a fed value is never read as a measured one.
+
+⚠️ **`unread` is never folded into either verdict.** Agreement from a probe that could not read
+its own reference, and divergence claimed from a read that did not happen, are the two silent
+directions this instrument exists to close.
+
+**Wiring:** `scripts/round-readings.py` carries the reading into the round's readings document
+under `mcp_server` (so the receipt names it), and `commands/steps/round-readings.md` step 3
+prints the `--line` form on every tick and posts one `ack` card on a divergence. The card is
+deduped **fleet-wide** on the version pair — the probe passes a fixed `--producer-id`, so every
+manager tier that takes the round (goal-drive, topic-drive, fleet-drive) resolves to the same
+store key and one divergence is one card rather than one per ticker.
 
 ## Spawn a worker
 
