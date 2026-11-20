@@ -331,11 +331,11 @@ a link, never a tab id.
 - **`/supervisor:jump` is the executor, not an emitter.** It *follows* a pane id; the
   managers' status commands emit links and never run it themselves.
 - **A session started before a plugin update keeps the command text it already loaded** — so
-  it can still hand over the old form after the plugin changed. ⚠️ **A restart is not the
-  lever; `/reload-plugins` is, and a session can read which version it is serving.** The
-  probe, the lever and the two checks that do *not* discriminate have one home:
-  `docs/fleet-surface.md` § A plugin install does not reach a running session. Read it there;
-  it is not restated here.
+  it can still hand over the old form after the plugin changed. ⚠️ **A manager needs *another*
+  session to pick up the version, and the route it offers is `/supervisor:restart <sid>` —
+  `/reload-plugins` only where no addressable session exists.** The probe, the route rule and
+  the two checks that do *not* discriminate have one home: `docs/fleet-surface.md` § A plugin
+  install does not reach a running session. Read it there; it is not restated here.
 
 The row format each status table uses for these links is `docs/fleet-surface.md` § Sweep
 output — the fleet table.

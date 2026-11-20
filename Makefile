@@ -48,25 +48,10 @@ check-spawn-keys:
 check-spawn-target:
 	@python3 scripts/check-spawn-target.py
 
-check-open-manager-resolution:
-	@python3 scripts/check-open-manager-resolution.py
-
-# The GOAL and TOPIC branches type their manager's start commands into the pane they just
-# spawned. Three regressions are silent: the operator-paste instruction returns, the wait
-# falls through instead of exiting, or a literal pane id replaces the just-spawned variable.
-check-open-manager-start:
-	@python3 scripts/check-open-manager-start.py
-
-# `/supervisor:open` is the operator's own open: it never refuses a goal or topic on its flag.
-# Automatic opens are flag-gated upstream (topic-keepalive, topic-spawn --goal); this pins both
-# halves, plus the manager ceiling a hand-run still obeys.
+# `/supervisor:open` is a thin caller of the wrapper's open endpoint. Fails if it regains a
+# spawn path of its own (the 2026-11-18 defect class) and fails if it loses the endpoint call.
 check-open-hand-run:
 	@python3 scripts/check-open-hand-run.py
-
-# A task whose owning subject has a live manager is held, and a held row is never silent:
-# pins the `⛔ HOLD — owner …` render, the same-run spawn-ledger leg, and the footer split.
-check-open-owner-live:
-	@python3 scripts/check-open-owner-live.py
 
 check-worker-target:
 	@python3 scripts/check-worker-target.py
@@ -101,13 +86,6 @@ check-budget:
 check-gate-class-order:
 	@python3 scripts/check-gate-class-order.py
 
-
-check-open-role-defaults:
-	@python3 scripts/check-open-role-defaults.py
-
-check-open-resume-mode:
-	@python3 scripts/check-open-resume-mode.py
-
 check-step-when:
 	@python3 scripts/check-step-when.py
 
@@ -131,18 +109,13 @@ check-handback-keys:
 check-handback-size:
 	@python3 scripts/check-handback-size.py
 
-# The gate is only a gate when its exit code is read. Measured 2026-11-20: the one live
-# invocation piped the script into `tail`, so `$?` reported the pipe's last stage and a real
-# `handback-size FAILED` read as exit 0 — and the gate never ran again. This refuses a piped
-# invocation, one whose exit code is not captured, and one that has been deleted outright.
+# The round's hand-back must read the gate's exit code. Pins that the `check-handback-size.py`
+# invocation is not piped, captures `gate_rc=$?`, and is not deleted — an unread `$?` is silent.
 check-round-gate-exit-code:
 	@python3 scripts/check-round-gate-exit-code.py
 
 check-round-overlap:
 	@python3 scripts/check-round-overlap.py
-
-check-resume-flag-clause:
-	@python3 scripts/check-resume-flag-clause.py
 
 check-drive-ledger-writes:
 	@python3 scripts/check-drive-ledger-writes.py
@@ -184,13 +157,18 @@ check-headless-reap-close:
 check-acting-legs:
 	@python3 scripts/check-acting-legs.py
 
+# The open leg hands `/supervisor:open` the row's raw `name`, never the `shlex.quote`d `action`:
+# `Skill` runs no shell, so the escape survives literally and an apostrophe title reads as
+# `SESSION UNREADABLE` — measured 2026-11-18, round 1795018507 selected 5 and refused exactly the
+# one row whose title contains an apostrophe.
+
 check-own-parks-routing:
 	@python3 scripts/check-own-parks-routing.py
 
 check-wrote-nothing:
 	@python3 scripts/check-wrote-nothing.py
 
-check: check-manager-allowlist check-open-manager-resolution
+check: check-manager-allowlist
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json','server/manager-allowlist.json']]" && echo "  manifests parse"
 	@test ! -e .mcp.json && test -f README.md && echo "  plugin files present"
@@ -244,6 +222,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-open-hand-run check-open-owner-live check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-role-defaults check-open-resume-mode check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-gate-exit-code check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-gate-exit-code check-round-overlap check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-open-hand-run check-open-owner-live check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-role-defaults check-open-resume-mode check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-gate-exit-code check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-gate-exit-code check-round-overlap check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing

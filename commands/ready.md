@@ -35,14 +35,14 @@ prints a verdict line and nothing else; every gap and every fix diff stays in th
 `vault-cli --vault "<vault>" task get "<name>" phase`.
 
 `phase: todo` means the operator has not approved the row. Print the `⛔ NOT APPROVED` block
-verbatim from `commands/open.md` § Step 1.5 Gate 1 and **STOP** — spawn nothing, do not run
+verbatim from `commands/open.md` § P2 and **STOP** — spawn nothing, do not run
 Gate 2, do not write to the task, and never add the approval yourself. That block owns the refusal
 text and its reason; do not restate them here.
 
 ### 3. Gate 2 — readiness, then repair
 
 Dispatch the `vault-cli:task-auditor` **agent** via `Task`, using the readiness prompt whose single
-home is `commands/open.md` § Step 1.5 Gate 2. `Task` is the only tool that addresses a
+home is `commands/open.md` § P3. `Task` is the only tool that addresses a
 `subagent_type` — `Skill("vault-cli:task-auditor")` answers `Unknown skill` and scores nothing.
 
 Read the `READINESS:` line. **Parse the score** — the line carries no verdict word (the `ready`/`not-ready` word was removed 2026-10-02; it was never read, and it flipped polarity on unchanged input). A missing or unparseable line is not-ready.
@@ -54,7 +54,7 @@ own stop rule unenforced for every other entry into it.
 
 ### 4. Act on the verdict
 
-Reuse `commands/open.md` § Step 1.5 Gate 2 for the decision. Never re-implement score parsing and
+Reuse `commands/open.md` § P3 for the decision. Never re-implement score parsing and
 never soften the bar.
 
 - **Clears the readiness ladder** → hand to `/supervisor:open "<name>"` for this single named task.

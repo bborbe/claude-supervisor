@@ -115,9 +115,9 @@
       ]
     },
     "window": {
-      "description": "Producer: `commands/open.md` § 3.0's role → window table. The role map's fourth key (`Hold`) is not a role target, so it is never a window value.",
+      "description": "Producer: `scripts/flagged-rows.py`'s ROLE_MAP_KEY. Only manager and human have a window; an agent row never opens a tab (role × mode matrix Rule 2), so it emits the empty string rather than a window name. The `Agents` purpose was removed from `~/.config/wezterm` on 2026-11-12.",
       "enum": [
-        "Agents",
+        "",
         "Managers",
         "Direct"
       ]

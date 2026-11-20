@@ -93,10 +93,12 @@ class CheckSpawnTargetTest(unittest.TestCase):
     def test_site_without_the_reference_fails(self):
         """SC1 — the pointer is missing, so a reader following the site has no route to the
         rule at all, and the warning it does carry is a second copy of the rule."""
-        self.write("commands/open.md", SITE_NO_ANCHOR)
+        # `commands/open.md` left CITING_SITES on 2026-11-20 (it is a thin caller now and
+        # picks no spawn target), so the fixture uses a site that still cites the rule.
+        self.write("commands/open-a2a.md", SITE_NO_ANCHOR)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("commands/open.md", result.stderr)
+        self.assertIn("commands/open-a2a.md", result.stderr)
         self.assertIn("no reference to the rule's home", result.stderr)
 
     def test_registered_site_that_stops_citing_fails(self):

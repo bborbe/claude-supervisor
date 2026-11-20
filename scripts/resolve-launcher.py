@@ -46,7 +46,10 @@ ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
 
 # role → (window, default chip). Matrix Rule 1: an absent `role:` means agent, so this
 # table is keyed on the RESOLVED role, never on the raw field.
-ROLE_WINDOW = {"agent": "Agents", "manager": "Managers", "human": "Direct"}
+# role → role-map key. An `agent` row has NO entry: it never opens a tab (matrix
+# Rule 2), so there is no window to resolve and no `Agents` key exists in the map
+# (removed from ~/.config/wezterm 2026-11-12).
+ROLE_MAP_KEY = {"manager": "Managers", "human": "Direct"}
 ROLE_CHIP = {"agent": "pink", "manager": "orange", "human": "cyan"}
 
 # The colours `/color` accepts, from `commands/open.md` § Arguments. A published chip
@@ -104,7 +107,7 @@ def chip_for(role, mapping=None):
     default rather than reaching the spawn — the same fail-closed direction the repo takes
     for every other value it executes.
     """
-    published = (mapping or {}).get(ROLE_WINDOW.get(role, "Agents")) or {}
+    published = (mapping or {}).get(ROLE_MAP_KEY.get(role, "")) or {}
     chip = str(published.get("chip") or "").strip().lower()
     if chip in VALID_CHIPS:
         return chip, "role-map"
