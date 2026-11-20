@@ -87,12 +87,14 @@ class ResolveLauncherCli(unittest.TestCase):
             [os.path.join(self.scripts, "cc-private-deepseek"), "worker-default", "agent", "purple"],
         )
 
-    def test_a_human_row_resolves_to_claude_with_the_map_chip(self):
+    def test_a_human_row_resolves_to_the_worker_default_with_the_map_chip(self):
+        """Operator ruling 2026-11-20: a human row takes the worker chain, not the
+        `-claude` sibling. The chip still follows the role, so it stays `green`."""
         self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
         self.page("T", "claude_session_id: s1\nrole: human")
         self.assertEqual(
             self.fields(self.run_cli("s1")),
-            [os.path.join(self.scripts, "cc-private-claude"), "claude-sibling", "human", "green"],
+            [os.path.join(self.scripts, "cc-private-deepseek"), "worker-default", "human", "green"],
         )
 
     def test_a_tasks_own_launcher_wins_over_both(self):
