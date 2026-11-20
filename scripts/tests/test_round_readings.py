@@ -1314,5 +1314,50 @@ class UnrecordedSessions(Tmp):
         self.assertNotIn("unrecorded:" + dead[:8], doc["rows"])
 
 
+class McpServerReading(Tmp):
+    """The document carries the MCP server's binary-vs-release reading.
+
+    The defect this closes: the server every policy decision comes from ran a
+    **pseudo-version** built from an untagged commit (`v0.45.2-0.20261120032107-c84c80e5ee16`)
+    while its repo had released `v0.48.0` — and nothing in a round said so. The reading is
+    carried in the document so the round's receipt names it on a tick where nobody printed
+    the line.
+    """
+
+    def _doc(self, **kwargs):
+        path = os.path.join(self.dir, "tracked.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("A task\n")
+        return rr.compute("A subject", path, None, 900, now=1_700_000_000,
+                          attention_dir=self.attention, feed=CLEAN_FEED, **kwargs)
+
+    def test_an_injected_divergence_lands_in_the_document_with_both_versions(self):
+        reading = {"state": "divergent",
+                   "running": "v0.45.2-0.20261120032107-c84c80e5ee16",
+                   "running_kind": "pseudo", "released": "v0.48.0", "gap": 3}
+        doc = self._doc(mcp_probe=reading)
+        self.assertEqual(doc["mcp_server"], reading)
+        self.assertEqual(doc["mcp_server"]["released"], "v0.48.0")
+        self.assertEqual(doc["mcp_server"]["gap"], 3)
+
+    def test_an_injected_agreement_lands_as_agreement_with_gap_zero(self):
+        reading = {"state": "agreement", "running": "v0.48.0",
+                   "running_kind": "release", "released": "v0.48.0", "gap": 0}
+        doc = self._doc(mcp_probe=reading)
+        self.assertEqual(doc["mcp_server"]["state"], "agreement")
+        self.assertEqual(doc["mcp_server"]["gap"], 0)
+
+    def test_an_unprobed_call_is_unread_with_a_reason_not_absent(self):
+        doc = self._doc()
+        self.assertIn("mcp_server", doc)
+        self.assertEqual(doc["mcp_server"]["state"], "unread")
+        self.assertIn("not probed", doc["mcp_server"]["error"])
+
+    def test_the_reading_does_not_disturb_the_feed_family(self):
+        doc = self._doc(mcp_probe={"state": "divergent", "released": "v0.48.0"})
+        self.assertEqual(doc["probes"], [])
+        self.assertEqual(sum(doc["feed_counts"].values()), len(doc["rows"]))
+
+
 if __name__ == "__main__":
     unittest.main()

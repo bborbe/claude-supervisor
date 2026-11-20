@@ -5,6 +5,10 @@ The load-bearing properties:
 
 - a silent pane leaves ONE ledger line and is re-armed, with NO card (a routine death);
 - the ledger line is written BEFORE the re-arm, so a re-armed pane cannot hide the death;
+- one death is ONE ledger line across every pass and across a keeper restart — the dedup key
+  is `(pane, beat_at)` read back from the ledger, not an in-memory set;
+- a re-arm that returned rc 0 without restoring the writer is carded ONCE — it is the silent
+  loss a ledger line alone would hide;
 - a card is the fallback: exactly one when the record cannot be written or the re-arm fails;
 - a failed re-arm is reported, never swallowed;
 - a sweep that resolves nothing reports its `unknown` count instead of calling the fleet clean.
@@ -48,6 +52,8 @@ class _Base(unittest.TestCase):
         k.STATE_DIR = str(self.store)
         k.HEARTBEAT = str(self.store / "keeper-heartbeat")
         k._alive = lambda pid: True
+        k._ARMED.clear()  # the module-level verification map must not leak between tests
+        self.addCleanup(k._ARMED.clear)
         self.calls = []
 
     def write_log(self, age=600, pid=4242):
@@ -147,6 +153,49 @@ class RecordThenRearm(_Base):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.ledger(), [])
 
+    def test_record_dedups_on_pane_and_beat_at(self):
+        """One death is one line: `record()` called twice with the same key writes once."""
+        beat = int(NOW - 600)
+        self.assertTrue(k.record("7", "sess", beat))
+        self.assertTrue(k.record("7", "sess", beat))
+        self.assertEqual(len(self.ledger()), 1)
+        self.assertTrue(k.record("7", "sess", beat + 1),
+                        "a different beat_at is a different death")
+        self.assertEqual(len(self.ledger()), 2)
+
+    def test_a_keeper_restart_does_not_re_record(self):
+        """The dedup state is the ledger: a restart loses the memory, not the line."""
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes, armed={}), 0)
+        self.assertEqual(len(self.ledger()), 1)
+        self.assertEqual(k.check(NOW + 1, self.panes, armed={}), 0)
+        self.assertEqual(len(self.ledger()), 1, "one death is one line, across a restart")
+
+    def test_unrestored_rearm_cards_once(self):
+        """A re-arm that returned rc 0 without restoring the writer is the silent loss."""
+        self.write_log()
+        self.assertEqual(k.check(NOW, self.panes), 0,
+                         "the first pass records and re-arms")
+        self.assertEqual(self.cards, 0,
+                         "a re-arm still inside its window is not yet a failure")
+        self.assertEqual(len(self.ledger()), 1)
+        self.assertEqual(k.check(NOW + k.VERIFY_SECONDS, self.panes), 1,
+                         "a re-arm that did not restore the writer is a failure")
+        self.assertEqual(self.cards, 1)
+        self.assertEqual(len(self.ledger()), 1, "still one death, one line")
+        self.assertEqual(k.check(NOW + 2 * k.VERIFY_SECONDS, self.panes), 0,
+                         "a carded death is not retried")
+        self.assertEqual(self.cards, 1, "exactly one card call for one un-restorable death")
+
+    def test_a_restored_rearm_clears_the_verification_and_cards_nothing(self):
+        self.write_log()
+        armed = {}
+        self.assertEqual(k.check(NOW, self.panes, armed=armed), 0)
+        self.write_log(age=0)  # the re-armed observer wrote its first heartbeat
+        self.assertEqual(k.check(NOW + k.VERIFY_SECONDS, self.panes, armed=armed), 0)
+        self.assertEqual(self.cards, 0)
+        self.assertEqual(armed, {}, "a fresh log clears the death from the verification state")
+
 
 class Sweep(_Base):
     def test_unknown_count_is_carried_out(self):
@@ -220,7 +269,7 @@ class HealthyFleetRefresh(unittest.TestCase):
         saved = {n: getattr(k, n) for n in ("sweep", "check", "beat")}
         self.addCleanup(lambda: [setattr(k, n, v) for n, v in saved.items()])
         k.sweep = lambda now: (self.sweeps.append(now) or ({}, 0))
-        k.check = lambda now, panes, dry_run=False: 0
+        k.check = lambda now, panes, dry_run=False, **kw: 0
         k.beat = lambda now: None
 
     def test_empty_panes_do_not_force_a_resweep(self):
