@@ -20,14 +20,14 @@ Manager-tier, like `/supervisor:open` (`docs/session-tiers.md` § Command → ti
 
 ```
 /supervisor:open-a2a "<name>"
-  ├─ resolve + gate → /supervisor:open § Step 0 · § Step 0.5 / 0.6 · § Step 1 · § Step 1.5, run by reference
+  ├─ resolve + gate → /supervisor:open § Step 0 · § Step 1 · § P2–P3 · § Step B, run by reference
   └─ dispatch (this file's own), by the row's `target:` frontmatter:
        absent         → the controller's `local` backend, `a2a-local-control.py create`
        docker | k8s | k8s:<cluster> → `spawn_agent`, the value passed verbatim
        anything else  → `spawn_agent`, verbatim, so the server refuses it there
 ```
 
-⚠️ **There is no JUMP branch and no RESUME branch here, and that is the design rather than a gap.** A controller-created worker holds no local pane to jump to, and `resume` is refused on every A2A target — so `/supervisor:open` § Step 2A's branch logic does not apply to this command and is deliberately not referenced. The dispatch below is create-only.
+⚠️ **There is no JUMP branch and no RESUME branch here, and that is the design rather than a gap.** A controller-created worker holds no local pane to jump to, and `resume` is refused on every A2A target — so `/supervisor:open` § P4's branch logic does not apply to this command and is deliberately not referenced. The dispatch below is create-only.
 
 ## Arguments
 
@@ -35,16 +35,20 @@ Manager-tier, like `/supervisor:open` (`docs/session-tiers.md` § Command → ti
 
 - **name (required):** the task / goal / topic title or identifier — everything that is not a recognised flag. Quote it when passing to `vault-cli`.
 - **`--task` / `--goal` / `--topic`, `--vault <name>`, `--first-step <text>`, `--flagged`:** exactly as `/supervisor:open` defines them — read them in `${CLAUDE_PLUGIN_ROOT}/commands/open.md` § Arguments, and do not restate them here.
-- ⚠️ **`--color` has no consumer on this command.** A controller worker opens no local tab, so `/supervisor:open` § 3.0's role-map colour resolution never runs; the flag is dropped rather than half-honoured.
+- ⚠️ **`--color` has no consumer on this command.** A controller worker opens no local tab, so neither `/supervisor:open`'s caller nor the wrapper's role→window resolution ever reads a role-map colour; the flag is dropped rather than half-honoured.
 - ⚠️ **`--first-step` rides the `prompt` on the `spawn_agent` branch** exactly as `/supervisor:open` § Step 3 defines it. On the local-backend branch it is sent as `--first-step "<text>"`; the controller tells the worker `<first_step>\n\n/vault-cli:work-on-task "<task>"`, the same prompt `/supervisor:open` builds.
 
 If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a task, goal or topic name.` and STOP.
 
 ## Step 0–1.5 — resolve and gate, by reference
 
-**Read `${CLAUDE_PLUGIN_ROOT}/commands/open.md` and execute its § Step 0, § Step 0.5 / 0.6, § Step 1 and § Step 1.5 exactly as written.** They own, in order: the vault resolution, the `--flagged` batch with the `role` / `mode` classification, the type resolution, and the three spawn gates (approval, readiness, the fleet cap). None of them is restated here — a second copy is a second counter, and this file's whole point is that it is thin where that one is thick.
+**Read `${CLAUDE_PLUGIN_ROOT}/commands/open.md` and execute its § Step 0, § Step 1, § P2–P3 and § Step B exactly as written.** They own, in order: the vault resolution, the `--flagged` batch with the type resolution and two of the caller's own preconditions (P2 approval, P3 readiness) — the `role`/`mode` classification and the fleet cap are the endpoint's and are not used on this path. None of them is restated here — a second copy is a second counter, and this file's whole point is that it is thin where that one is thick.
 
-⚠️ **One substitution inside the referenced batch, and it is the only one:** § Step 0.6's per-row delegation invokes `/supervisor:open "<task>"`. Here it invokes **this** command, `/supervisor:open-a2a "<task>"` — otherwise the batch would spawn local tabs and this command would be bypassed on its own batch path.
+⚠️ **The batch split, and it is the only difference:** this command does NOT call the wrapper's
+open endpoint. It selects rows with the same gates (`§ Step 0` / `§ Step 1` / `§ P2–P3` by
+reference) and then dispatches each `docker` / `k8s` row through `spawn_agent` /
+`a2a-local-control` itself — the endpoint opens local tabs only, so routing a remote row
+through it would spawn a tab on this machine instead.
 
 ⚠️ **Gate 3 (the fleet cap) is a `spawn_agent`-side check.** Its numbers have one home — `docs/fleet-surface.md` § Spawn a worker item 5 — and are never restated. It runs on § 2.3's branch; the local-backend create at § 2.2 never reaches that call, so nothing here re-implements it and no `operator_named` marker is passed on that branch.
 
@@ -105,7 +109,7 @@ Pass the frontmatter value **verbatim** — never lower-cased, never mapped, nev
 
 ⚠️ **On this branch the argument contract is different, and `role` is dropped with it.** `role`, `interactive`, `resume`, `env`, `policy`, `window_id` and `shipping` are each refused, and `task` is required — the list and its reasons have their single home in `docs/fleet-surface.md` § Spawn a worker item 7; read it there and never hand-build this branch from the line above.
 
-**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** The row's `mode:` was already written by `/supervisor:open` § Step 0.6, and the `role`-forced mapping that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries no mode field — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
+**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** This command does not call the wrapper's open endpoint, so nothing writes `mode:` for an open-a2a row — the field stays as the task page records it, and this command reads it rather than producing it, and the `role`-forced mapping that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries no mode field — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
 
 ⚠️ **Requires `mcp__supervisor__*` in this session.** There is no wezterm fallback on this command: a tab is not a controller worker, and opening one would answer a call that asked for somewhere else.
 
@@ -121,11 +125,11 @@ A value that is neither absent nor `docker` / `k8s` / `k8s:<cluster>` is not thi
 
 A controller-created worker is addressed by its **`worker_id`** — always, on every backend. ⚠️ **A `pane_id` is not an alternative to it, and it exists on only one backend.** The controller populates `pane_id` for a worker that runs in a WezTerm tab — the `local` backend — and leaves it **empty** for `docker` / `k8s`, whose workers answer at their own `a2a_url`. So the field is the local worker's jump handle and nothing at all elsewhere; address by `worker_id` regardless, and read `pane_id` only to hand the operator a way into a local worker's tab.
 
-**Read `bind` from the create reply** — the script prints it as one line, with the same semantics as `spawn_agent`'s `bind` in `/supervisor:open` § 4.1:
+**Read `bind` from the create reply** — the script prints it as one line, with the same semantics as `spawn_agent`'s `bind` in `/supervisor:open` the wrapper's verdict rendering:
 
 - `bind: stamped` — the task's `claude_session_id` was empty and now names this session (`session_id: <uuid>` is printed above it).
 - `bind: appended` — the task was already owned; this session was appended to `metrics_sessions`, the owner left intact.
-- `bind: error <msg>` — a session was found but the vault write failed. Reconcile by hand per `/supervisor:open` § 4.1 (read the owner first; prefer `append-metrics-session`).
+- `bind: error <msg>` — a session was found but the vault write failed. Reconcile by hand per `/supervisor:open` the wrapper's verdict rendering (read the owner first; prefer `append-metrics-session`).
 - `bind: none` — no session registered within the controller's ~8 s bind window. Not a failure: the worker is running, and the binding may still land. Fall back to `list`:
 
 ```bash

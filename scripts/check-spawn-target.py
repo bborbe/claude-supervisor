@@ -62,7 +62,10 @@ ADVISORY_MARKER = "Advisory, never a refusal"
 #: from `open.md`. It is the site no gate covered before this one existed.
 CITING_SITES = (
     "commands/steps/goal-spawn.md",
-    "commands/open.md",
+    # ⚠️ `commands/open.md` left this set on 2026-11-20: it is a thin caller now and
+    # no longer picks a spawn target at all — role→mode and the local/cluster choice
+    # moved into the wrapper's open endpoint (bborbe/claude-wrapper).
+
     "commands/open-a2a.md",
     # ⚠️ `agents/goal-spawn-reader.md` joined on 2026-11-06 with the spawn leg's
     # delegation: the per-row target decision moved out of `commands/steps/goal-spawn.md`

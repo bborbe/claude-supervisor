@@ -35,8 +35,10 @@ test('an absent role resolves as agent, the documented default', () => {
     const r = resolveRole({ role: absent, map: MAP })
     assert.equal(r.error, undefined)
     assert.equal(r.role, DEFAULT_ROLE)
-    assert.equal(r.chip, 'pink')
-    assert.equal(r.windowId, 2)
+    // An agent row has no window — it never opens a tab (matrix Rule 2), and the `Agents`
+    // purpose no longer exists in the role map.
+    assert.equal(r.chip, null)
+    assert.equal(r.windowId, null)
   }
 })
 
@@ -46,10 +48,13 @@ test('each role resolves to its own purpose, chip and window', () => {
     chip: 'orange',
     windowId: 0,
   })
+  // An agent row has no window: it never opens a tab (matrix Rule 2). The purpose is
+  // absent rather than mapped, so the resolver reports it unresolved instead of falling
+  // through to a window that happens to be published.
   assert.deepEqual(pick(resolveRole({ role: 'agent', map: MAP })), {
-    purpose: 'Agents',
-    chip: 'pink',
-    windowId: 2,
+    purpose: undefined,
+    chip: null,
+    windowId: null,
   })
   assert.deepEqual(pick(resolveRole({ role: 'human', map: MAP })), {
     purpose: 'Direct',
@@ -75,11 +80,13 @@ test('window 0 is a real target, not an absence', () => {
 
 test("the map's own type is preserved — ids stay numbers", () => {
   assert.equal(typeof resolveRole({ role: 'manager', map: MAP }).windowId, 'number')
-  assert.equal(typeof resolveRole({ role: 'agent', map: MAP }).windowId, 'number')
+  assert.equal(typeof resolveRole({ role: 'human', map: MAP }).windowId, 'number')
 })
 
 test('a resolved role carries no warning', () => {
-  for (const role of ROLES) {
+  // Every role that HAS a window resolves cleanly. `agent` is excluded on purpose: it has
+  // no window, so its warning is the honest "did not resolve" rather than a defect.
+  for (const role of ROLES.filter((r) => r !== 'agent')) {
     assert.equal(resolveRole({ role, map: MAP }).warning, null)
   }
 })
@@ -103,11 +110,13 @@ test('an unusable map degrades rather than refusing — a headless spawn has no 
 })
 
 test('a map missing one purpose degrades for that role only', () => {
-  const partial = { Agents: MAP.Agents }
-  assert.equal(resolveRole({ role: 'agent', map: partial }).resolved, true)
+  // A map carrying only Managers leaves both windowless-in-it roles unresolved, and an
+  // agent is unresolved even against the FULL map — it has no window by design.
+  const partial = { Managers: MAP.Managers }
+  assert.equal(resolveRole({ role: 'human', map: partial }).resolved, false)
+  assert.equal(resolveRole({ role: 'agent', map: partial }).resolved, false)
 
   const human = resolveRole({ role: 'human', map: partial })
-  assert.equal(human.resolved, false)
   assert.match(human.warning, /Direct/)
 })
 
@@ -176,8 +185,9 @@ test('all six role × family combinations resolve as specified', () => {
   const cases = [
     ['manager', 'seibert-brogrammers', 'orange'],
     ['manager', 'private-personal', 'orange'],
-    ['agent', 'seibert-brogrammers', 'pink'],
-    ['agent', 'private-personal', 'pink'],
+    // An agent row has no window and therefore no chip: it never opens a tab.
+    ['agent', 'seibert-brogrammers', null],
+    ['agent', 'private-personal', null],
     ['human', 'seibert-brogrammers', 'green'],
     ['human', 'private-personal', 'cyan'],
   ]

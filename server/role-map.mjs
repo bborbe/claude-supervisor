@@ -33,7 +33,13 @@ export const DEFAULT_ROLE = 'agent'
 // `window_specs`. They are deliberately different vocabularies — a window named "Direct"
 // serves the role "human" — so this is the one place that translates between them, rather
 // than each consumer re-deriving the pairing.
-export const ROLE_PURPOSES = { manager: 'Managers', agent: 'Agents', human: 'Direct' }
+// ⚠️ `agent` has NO entry, deliberately: an agent never opens a tab (role × mode matrix
+// Rule 2), so there is no window to resolve for it. The `Agents` purpose it used to map to
+// was removed from `~/.config/wezterm` on 2026-11-12, so the entry resolved to nothing and
+// the caller fell through to whatever window id happened to be published — the shape that
+// put 13 agent rows in the operator's Hold window on 2026-11-18. An absent purpose here
+// makes `resolve()` return `resolved: false`, which is the honest answer for an agent row.
+export const ROLE_PURPOSES = { manager: 'Managers', human: 'Direct' }
 
 // A HUMAN session's chip follows the VAULT FAMILY, not the role alone. The operator's
 // convention is green = Seibert, cyan = private, and colour is the only at-a-glance cue for

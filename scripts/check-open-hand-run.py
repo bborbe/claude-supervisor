@@ -1,123 +1,65 @@
 #!/usr/bin/env python3
-"""`/supervisor:open` is the operator's own open: it never refuses a goal or topic on its flag.
+"""`/supervisor:open` is a THIN CALLER: it must never hand-run a spawn itself.
 
-Operator ruling 2026-11-15: an unflagged task, goal or topic never opens AUTOMATICALLY, but
-the operator's own `/supervisor:open` opens what they name. The automatic fresh opens are
-gated upstream of the command — `topic-keepalive.py` prints `open-unflagged` instead of
-`open`, and `topic-spawn.py --goal` refuses `goal-unflagged` — so a flag check inside the
-command only ever fires on the hand-run, refusing the one open the rule allows. Until this
-change the topic branch did exactly that: `topic-spawn.py --topic-open` refused
-`topic-unflagged`, so the operator could not open a manager on an unflagged topic by hand.
+Rewritten 2026-11-20. The file used to guard the flag/ceiling/`--hand-run` semantics of
+the spawn branches open.md ran itself. Those branches are gone: every routing decision —
+role→mode, the answer-path probe, the headless resume, the tab window, the caps — moved
+into the wrapper's open endpoint (`POST /api/1.0/open` and the `open_rows` MCP tool).
+What remains here is the guard for the defect class that move exists to end.
 
-Three regressions are silent:
+The 2026-11-18 incident: a session hand-rolled `wezterm cli spawn --window-id 2 --resume`
+for 13 `role: agent` rows, opening them as tabs in the operator's Hold window. A command
+file that carries its own spawn instructions is how that gets re-derived — differently
+each time. So this check fails when open.md regains a spawn path of its own, and fails
+when it loses the endpoint call that replaced them.
 
-  (a) **A flag refusal returns to the command.** A rewrite copying the topic branch from an
-      older revision restores `topic-unflagged` as a STOP, or a new `goal-unflagged` STOP
-      appears in the goal branch. The command still works; it just refuses the operator.
-  (b) **The ceiling is dropped with the flag.** `--hand-run` skips the flag and nothing
-      else; a call without `--topic-open` would skip the manager cap too.
-  (d) **`--hand-run` spreads to the resume arm.** Step 2C item 4 is reached two ways: from
-      `None` (no recorded id — only the operator's own open, since `topic-keepalive.py`
-      prints `open-unflagged` for an unflagged topic with no id) and from `UNKNOWN` /
-      `AMBIGUOUS` (a recorded id whose liveness could not be read — a keep-alive RESUME,
-      e.g. `agents/fleet-keepalive-actor.md`). A `--hand-run` on the second arm opens an
-      unflagged topic fresh, automatically, which is exactly what the rule forbids.
-  (c) **An upstream gate disappears.** If `topic-keepalive.py` stopped printing
-      `open-unflagged`, or `topic-spawn.py --goal` stopped refusing `goal-unflagged`, a
-      round would hand `/supervisor:open` an unflagged subject and the command — which no
-      longer checks — would open it automatically.
-
-⚠️ **What this check does not prove.** It is a prose-and-source shape check, because a
-command file is prose. The behaviour of `--hand-run` is tested in
-`scripts/tests/test_topic_spawn.py`; the upstream verdicts in
-`scripts/tests/test_topic_keepalive.py` and `test_topic_spawn.py`.
+⚠️ **What this check does not prove.** It is a text check on one file. It cannot see a
+spawn assembled from a variable, and it says nothing about a session that types the
+spawn itself — that is `scripts/spawn-route-guard.py`'s job (the PreToolUse hook).
 """
 import pathlib
-import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 COMMAND = ROOT / "commands" / "open.md"
 
-#: Section boundaries. A renamed heading fails loudly instead of scanning an empty string
-#: and reporting a clean branch — the failure mode that makes a prose check worthless.
-SECTIONS = (
-    ("Step 2B", "## Step 2B — Goal branch", "## Step 2C — Topic branch"),
-    ("Step 2C", "## Step 2C — Topic branch", "## Step 3 — Spawn the tab"),
+#: Every way this file used to spawn. Any reappearance is the regression.
+FORBIDDEN = (
+    ("wezterm cli spawn", "a hand-run tab spawn — the endpoint picks the window"),
+    ("spawn_agent", "a hand-run headless spawn — the endpoint owns the probe and the caps"),
+    ("--hand-run", "the manager/topic spawn recipe — the endpoint owns the ceiling"),
+    ("topic-spawn.py", "a hand-run topic manager open"),
+    ("manager-launcher.py", "a hand-run goal manager open"),
+    ('"Agents"', "a window that does not exist — removed from ~/.config/wezterm 2026-11-12"),
 )
 
-#: The flag refusals that must never be a STOP inside the command.
-FLAG_REFUSALS = ("goal-unflagged",)
-
-#: A `topic-spawn.py … --topic-open … --hand-run` call, matched on the call itself — never on
-#: a backtick placement, which the prose does not hold still.
-HAND_RUN_CALL = re.compile(r"topic-spawn\.py[^`\n]*--topic-open[^`\n]*--hand-run")
-
-#: (c) The upstream gates, as `(file, literal that must be present)`.
-UPSTREAM = (
-    ("scripts/topic-keepalive.py", 'print("open-unflagged")'),
-    ("scripts/topic-spawn.py", 'REFUSE_UNFLAGGED = "goal-unflagged"'),
+#: The call that replaced them. At least one must be present.
+REQUIRED = (
+    "api/1.0/open",
+    "open_rows",
 )
-
-
-def section(text, start, end):
-    begin = text.find(start)
-    if begin == -1:
-        raise SystemExit("check-open-hand-run: missing heading %r" % start)
-    finish = text.find(end, begin)
-    if finish == -1:
-        raise SystemExit("check-open-hand-run: missing heading %r" % end)
-    return text[begin:finish]
 
 
 def main():
-    text = COMMAND.read_text(encoding="utf-8")
-    failures = []
-
-    for name, start, end in SECTIONS[:1]:
-        body = section(text, start, end)
-        for token in FLAG_REFUSALS:
-            if re.search(r"`%s`[^\n]{0,80}STOP" % re.escape(token), body):
-                failures.append(
-                    "%s STOPs on %s — the command refuses the operator's own open" % (name, token))
-
-    topic = section(text, SECTIONS[1][1], SECTIONS[1][2])
-    calls = re.findall(r"topic-spawn\.py[^`\n]*--topic-open[^`\n]*", topic)
-    if not calls:
-        failures.append("Step 2C no longer runs topic-spawn.py --topic-open — the manager "
-                        "ceiling is unchecked on a topic open")
-    if not any("--hand-run" in call for call in calls):
-        failures.append("Step 2C never passes --hand-run — it refuses an unflagged topic "
-                        "the operator named")
-    # (d) A `--hand-run` call belongs to the `None` arm only. Each call is judged by the
-    # sentence that carries it: that sentence must name `None` and must not name `UNKNOWN`.
-    for sentence in re.split(r"(?<=\.)\s+", topic):
-        if not HAND_RUN_CALL.search(sentence):
-            continue
-        if "`None`" not in sentence or "`UNKNOWN`" in sentence:
-            failures.append("Step 2C passes --hand-run outside the `None` arm — a keep-alive "
-                            "resume could open an unflagged topic fresh")
-    if not re.search(r"`UNKNOWN`/`AMBIGUOUS`[^\n]{0,200}drop `--hand-run`[^\n]{0,120}"
-                     r"`topic-unflagged`[^\n]{0,60}STOP", topic):
-        failures.append("Step 2C's UNKNOWN/AMBIGUOUS arm does not keep the flag check "
-                        "(drop --hand-run, STOP on topic-unflagged) — an undecidable "
-                        "resume would open an unflagged topic fresh")
-
-    for rel, literal in UPSTREAM:
-        source = (ROOT / rel).read_text(encoding="utf-8")
-        if literal not in source:
-            failures.append(
-                "%s no longer carries %s — an automatic round could hand /supervisor:open an "
-                "unflagged subject, and the command no longer checks" % (rel, literal))
-
-    if failures:
-        print("check-open-hand-run: FAILED")
-        for failure in failures:
-            print("  - %s" % failure)
+    if not COMMAND.is_file():
+        print("open-hand-run FAILED: %s is missing" % COMMAND)
         return 1
-
-    print("  /supervisor:open opens what the operator names; automatic opens stay gated "
-          "upstream; the manager ceiling still binds")
+    text = COMMAND.read_text(encoding="utf-8")
+    problems = []
+    for needle, why in FORBIDDEN:
+        if needle in text:
+            problems.append("carries `%s` — %s" % (needle, why))
+    if not any(needle in text for needle in REQUIRED):
+        problems.append(
+            "names neither `api/1.0/open` nor `open_rows` — the command has no route "
+            "to the endpoint, so whatever it does instead is a hand-run"
+        )
+    if problems:
+        print("open-hand-run FAILED: %d problem(s)" % len(problems))
+        for problem in problems:
+            print("  - commands/open.md: %s" % problem)
+        return 1
+    print("open-hand-run OK: commands/open.md is a thin caller of the open endpoint")
     return 0
 
 
