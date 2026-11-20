@@ -1577,9 +1577,14 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
         # `sweep-gate`/`cron`), so it is no longer a posting site and has no
         # invocation to carry the flag. Listing it here would pin the retired
         # second asker in place.
+        # `commands/open.md` is deliberately ABSENT as of the thin-caller rewrite
+        # (2026-11-20): it posts no attention card of its own any more — it resolves a name,
+        # sends rows to the wrapper's open endpoint and renders verdicts, and the readiness
+        # card a held row raises is P3's, raised by the caller's own `attention-ask.py post`
+        # only on the paths that still hold a row. Listing it here would pin an invocation
+        # that no longer exists.
         sites = [
             "agents/goal-drive.md",
-            "commands/open.md",
             "commands/steps/drive.md",
             "commands/steps/goal-gates.md",
             "commands/steps/goal-under-target.md",
@@ -1604,7 +1609,10 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
                         f"{site}: the invocation at offset {match.start()} does "
                         "not pass --producer-kind manager",
                     )
-        self.assertGreaterEqual(seen, 9, "the site list stopped covering the tree")
+        # 9 until 2026-11-20, when `commands/open.md` left the list with the thin-caller
+        # rewrite (it posts no card of its own). The floor drops by exactly that one, so a
+        # silently emptied list still trips here.
+        self.assertGreaterEqual(seen, 8, "the site list stopped covering the tree")
 
 
 class StoreTokenTest(unittest.TestCase):
