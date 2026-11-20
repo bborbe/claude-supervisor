@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.5
 
 - fix: **three changelog bullets are unfolded into the sections their tags actually own — and a fourth was left alone.** The post-merge guard had been red on `master` for several consecutive commits, and its own last line named the damage: *the releaser is stalled at v0.362.0 — unreleased work with no topmost `## Unreleased` section*. Three bullets sat under released headings whose tags do not contain their merges, and each is moved by the TAG, never by where the merge put it — the destinations changed while this repair was in flight, because the releaser cut `v0.362.1` mid-way: the answered-card watcher (`748bc6b1`) moves from `## v0.362.0` to **`## v0.362.1`**, and the two liveness fixes (`a36d751e`, `f508cd2e`) move from `## v0.344.2` to **`## v0.344.3`**. ⚠️ **The `rebase-agent` bullet stays exactly where it is, in `## v0.251.1`** — an earlier cut of this repair moved it to `## Unreleased` on the guard's advice, which would have re-announced shipped work as pending, the error `b7149fe1` already fixed on 2026-11-15. ⚠️ **The guard named the wrong commit for it:** it walks `git log --all`, and a leftover `refs/rebase-agent/pr/671` ref makes an unreachable commit (`bfbf7000`) the last match; walking `origin/master` instead gives `0c4f0591`, which is in `v0.251.1`. The lesson is that the guard's placement advice is a hypothesis and the tag is the authority — here the two disagreed because of a stray ref, not a real fold.
 
