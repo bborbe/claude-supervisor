@@ -370,16 +370,24 @@ marker for a `blocked` row. The endpoint does not know about it — its refusal 
 only place it can be enforced, and dropping it makes a session the operator explicitly parked
 resumable. Rule: `skills/hold/SKILL.md`.
 
+⚠️ **Task rows only.** The hold check reads `claude_session_id`, which lives on a **task** page;
+a goal or topic records its session id on its own page and the old Step 2A hold check was
+task-scoped for the same reason. A `kind: goal` or `kind: topic` row skips P4 entirely — do not
+run a task read against it, or every goal and topic open is refused by the failed-read branch
+below.
+
 Read the row's recorded session id and refuse **before** sending it:
 
 ```bash
-SID=$(vault-cli --vault "<vault>" task get "<name>" claude_session_id 2>/dev/null) || {
-  echo '❓ UNVERIFIED — the session id could not be read; a hold cannot be ruled out'
-  exit 1   # refuse: never send a row whose hold state is unknown
-}
-if [ -n "$SID" ]; then
-  python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-holds.py" is-held "$SID"
-  # exit 0 → held, reason on stdout · exit 1 → not held · exit 2 → bad target
+if [ "<kind>" = "task" ]; then
+  SID=$(vault-cli --vault "<vault>" task get "<name>" claude_session_id 2>/dev/null) || {
+    echo '❓ UNVERIFIED — the session id could not be read; a hold cannot be ruled out'
+    exit 1   # refuse: never send a row whose hold state is unknown
+  }
+  if [ -n "$SID" ]; then
+    python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-holds.py" is-held "$SID"
+    # exit 0 → held, reason on stdout · exit 1 → not held · exit 2 → bad target
+  fi
 fi
 ```
 
