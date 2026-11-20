@@ -1255,7 +1255,7 @@ a talk-through, never a card asking for the decision. The decision has one home,
 `scripts/undriven-plan.py`, and `scripts/tests/test_undriven_plan.py` § ApprovalBoundary pins
 that an operator-filed or one-way row is never approved by a manager.
 
-⚠️ **Guarded by `commands/open.md` § P2 (the `check-resume-flag-clause.py` linter that pinned it was retired on 2026-11-20 with the thin-caller rewrite)**, which parses the gate's `not parked`
+⚠️ **The `check-resume-flag-clause.py` linter that pinned this was retired on 2026-11-20 with the thin-caller rewrite; the predicate it parsed now has **no linter successor**, so this bullet is prose-only until one is written.**, which parses the gate's `not parked`
 bullet into a predicate and evaluates fixture rows through it and through Step 0.5's own
 selector lines. A token grep would not hold this: deleting the token and adding a new
 flag-excluding bullet passes any text check.

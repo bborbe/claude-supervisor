@@ -174,8 +174,11 @@ row = {"kind": kind, "vault": vault, "name": name}
 if first:
     row["first_step"] = first
 rows = [row]
+# Honour the repo's wrapper-URL override, the same variable every other caller reads
+# (deliver-message.py, manager-liveness.py): a hardcoded origin breaks any non-default port.
+BASE = os.environ.get("SUPERVISOR_WRAPPER_URL", "http://127.0.0.1:18090").rstrip("/")
 req = urllib.request.Request(
-    "http://127.0.0.1:18090/api/1.0/open",
+    BASE + "/api/1.0/open",
     data=json.dumps({"rows": rows}).encode(),
     headers={
         "Content-Type": "application/json",
@@ -331,9 +334,11 @@ Goals and topics: an absent `phase` is exempt; `phase: todo` alone is gated — 
 exempt**; show `— (pipeline contract)`.
 
 ⚠️ **Decide the scope from the PAGE, never from a liveness probe.** Line 44 forbids probing
-liveness, and it still does: read the task's own `status:` / `phase:`. On the **single-name**
-path a row at `phase: todo` or `status: next` / `backlog` is one the endpoint would *create*, so
-it is gated; a row already `in_progress` / `execution` is one it would *resume*, so it is not.
+liveness, and it still does: read the task's own `claude_session_id`. A row with **no recorded
+session id** is one the endpoint would *create*, so it is gated; a row that records one is one it
+would *resume*, so it is not. `status:` / `phase:` is the wrong key — an `in_progress` row that
+never recorded a session would skip the gate and open a raw worker, which is exactly the row the
+ladder exists to improve.
 
 ⚠️ **In the `--flagged` batch the ladder runs on EVERY task row, whatever its status.** The
 batch's whole population is `in_progress` rows, so the create-vs-resume split would gate none of
