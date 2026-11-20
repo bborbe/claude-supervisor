@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the Python snapshot write is retired; the wrapper is the sole owner.** `bborbe/claude-wrapper`'s sweep tick persists `~/.claude/state/fleet-snapshot.json` over the whole registry roster — verified 2026-11-20 at 2496 ids against 49 live with **0 missing**, a superset of what the round wrote. Two writers to a diff baseline is a race, so `fleet-snapshot.py` now writes only this round's `.digest` marker, which the wrapper does not write and whose absence reads as a lapse to the watcher. ⚠️ **A run with no `--digest-path` now REFUSES**: with the snapshot gone, that call had nothing left to write yet printed `snapshot written:` and exited 0 — a recovery path reporting success while doing nothing. The recovery path in `commands/fleet-drive.md` row 18 and `commands/steps/persist.md` now passes the flag. Change set: `scripts/fleet-snapshot.py`, `scripts/tests/test_fleet_snapshot.py`, `agents/fleet-sweep-reader.md`, `commands/fleet-drive.md`, `commands/steps/persist.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
+
 ## v0.361.1
 
 - docs: **the fleet-drive rule says what `list_agents` actually returns.** Two shipped lines — `commands/fleet-drive.md` (INLINE) and `commands/steps/rules.md` — claimed the roster is scoped to the workers this session spawned, which stopped being true when the rehydrated roster shipped: the roster lists **every** worker, including rows adopted from the ledger regardless of which process spawned them. Only this session's **parks** are this session's to answer. A manager reading the old line could answer another manager's worker, or fail to look for its own rehydrated worker, and neither error surfaces. Both lines now state that split, and `fleet-drive.md` still fits its 10 240-byte tick budget (10 142 bytes, 98 free). Change set: `commands/fleet-drive.md`, `commands/steps/rules.md`, `CHANGELOG.md`.
