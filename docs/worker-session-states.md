@@ -26,7 +26,7 @@ Every `decision` run produces exactly one board card for its ask:
 - the closing `AskUserQuestion` — the `Stop` hook mints its card;
 - or, when there is no modal, the closer's own waiting verb (`pick —`, `you run:`, `review:`), which mints without a `📣 Board:` line. The mint rule's home is the `Stop` hook's `board_opt_in or approve_closer or waiting_closer` condition in `attention-log.py`; do not restate it here.
 
-Never add a second card for the same ask: no `📣 Board: yes` line and no manual `attention-ask.py post` on top of a waiting-verb closer. Arm the retired answered-card watcher only after the card is confirmed present (`attention-ask.py poll <item-id>` returns the open item) — a stale local gate slot can suppress the mint until `bborbe/claude#126` lands.
+Never add a second card for the same ask: no `📣 Board: yes` line and no manual `attention-ask.py post` on top of a waiting-verb closer. **Arm nothing to catch the answer** — `attention-controller`'s delivery arm pushes it into the pane on the store's write, so the answered-card watcher this page used to tell you to arm is retired, not optional.
 
 ## Closed — session-close only on a terminal anchor
 
