@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **no session arms an answered-card watcher any more, and its script is deleted.** `attention-controller`'s delivery arm pushes an operator's answer into the pane on the store's write, so the third `Monitor` was a second reader of the same answer — and the poll it ran was one of the four this port removes. The arm is gone from `commands/fleet-drive.md` row 13, `commands/steps/attention-watcher.md` and `commands/steps/round-tail.md` (which had it twice, once as a "third arm" and once as a "second, distinct `Monitor`"), and `scripts/answered-watch.py` plus its test are deleted. Reading an answer still has one home, `scripts/answered-attribution.py`, and `attention-ask.py poll <item-id>` remains for quoting one by hand. ⚠️ **`gate-owner-filter.py` is deliberately NOT deleted with it**, although it is the next one due: it is imported as a library by `scripts/round-readings.py` (`feed_rows`, `is_headless_key`) and `scripts/gate-answer-check.py` (`is_human`, `load_claims`), so those four symbols must move into `session-ownership.py` first — the same extraction #1005 did for `adopt-orphans.py`. Deleting it today would break both scripts at import.
+
 ## v0.359.1
 
 - docs: **`llms.txt` names the Go hook instead of the retired Python poller.** The tab-worker paragraph still told a reader that the plugin's `PermissionRequest` hook is `scripts/permission-answer-poll.py`, a file the entry below deletes — so the one doc a fresh agent reads first pointed at a path that no longer exists. It now names `attention-controller-permission-answer-hook` and the `make install` that places it. Found by the PR review of the deletion rather than by the deletion's own grep, because SC5's pattern covers `commands/`, `agents/`, `scripts/` and the hook manifest but not `llms.txt`.
