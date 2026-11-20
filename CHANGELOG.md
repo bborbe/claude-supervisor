@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.7
 
 - fix: **a closer carrying no operator content no longer reads as an ask, so a worker that ended its turn is not carded as parked.** `is_ask()` tested only the `nothing` prefix and `PARKED_VERBS = ("later (on ",)`, so a bare placeholder — the measured shape is `👤 You:    —` — was non-empty, matched neither, and returned `True`; `is_gated("idle", "—")` then returned `(True, "idle+closer")` and the tracked-set watcher registered a park. Measured 2026-11-20: worker `36283b05` ended on `🟢 ACTIVE · nothing running · next step is mine` / `👤 You:    —`, and the watcher re-registered the park as cards `5bfd9e90…` and `6ce09d28…` while `agent_status` reported `pending_permissions: []`, `pending_question: null`, `current_tool_call: null`. A body that is only placeholder glyphs (`—`, `–`, `-`, `…`, `...`, empty, or any repetition of them) now returns `False` via the new `NO_CONTENT_GLYPHS` set, while every body carrying text still returns `True` — the positive control covers `approve:`, `review:`, `pick — …` and `you run:` at both `is_ask` and `is_gated("idle", …)`, and a mutation test patches `is_ask` to an always-`False` lambda and asserts the positive control fails, so the cheapest wrong fix cannot pass. A `--once` fixture test drives two tracked `idle` workers — one em-dash closer, one `pick —` — and asserts exactly one `GATED … [idle+closer]` line (the `pick`) plus `gated: 1  held: 0`. Change set: `scripts/manager-attention-watch.py`, `scripts/tests/test_manager_attention_watch.py`, `CHANGELOG.md`.
 
