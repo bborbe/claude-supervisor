@@ -117,6 +117,26 @@ def _load(name):
     return mod
 
 
+def mcp_server_reading():
+    """The MCP server's binary-vs-release reading — `unread`, never absent, never assumed.
+
+    `scripts/mcp-version-gap.py` owns the question: the pid that actually listens on the MCP
+    port, the binary it runs, that binary's `go version -m` build info, and the repo's latest
+    released tag. This leg only carries the answer into the document, so the round's receipt
+    names the reading on a tick where nobody printed the line — the defect being that a stale
+    MCP binary was indistinguishable from a current one until someone read `go version -m` on
+    the process's own path (measured 2026-11-20: `v0.45.2-0.20261120032107-c84c80e5ee16`
+    against released `v0.48.0`).
+
+    ⚠️ **A probe that raised is `unread`, never absent and never agreement.** The document
+    must carry the question it asked even when the answer could not be taken.
+    """
+    try:
+        return _load("mcp-version-gap").probe()
+    except Exception as error:  # noqa: BLE001 — a crashed probe is `unread`, not a clean read
+        return {"state": "unread", "error": f"mcp-version-gap.py could not be read: {error}"}
+
+
 # --------------------------------------------------------------------------- #
 # the four verdict families
 # --------------------------------------------------------------------------- #
@@ -889,11 +909,13 @@ def _under(path, root):
 
 def compute(subject, tracked_path, vault, interval, now=None,
             endpoint=None, registry_dir=None, attention_dir=None,
-            sessions_dir=None, projects_dir=None, feed=None):
+            sessions_dir=None, projects_dir=None, feed=None, mcp_probe=None):
     """Build the readings document. Pure over its injected paths.
 
     `feed` injects the feed read (tests do); when None it is taken from
-    `feed_panes`, which reads the service's `who-needs-me` endpoint.
+    `feed_panes`, which reads the service's `who-needs-me` endpoint. `mcp_probe` injects the
+    MCP server's version reading (tests do); when None the document carries `unread` with the
+    reason — it is never silently absent, and `main()` passes the live probe.
     """
     now = time.time() if now is None else now
     attention_dir = attention_dir or ATTENTION_DIR
@@ -1109,6 +1131,14 @@ def compute(subject, tracked_path, vault, interval, now=None,
         # read; a transient store fault and a genuinely gate-free fleet are then
         # distinguishable without re-running anything.
         "probes": probes,
+        # The MCP server's own version gap: the binary the listening pid runs, against the
+        # latest release of its repo. NOT one of the four families — it answers about the
+        # instrument every policy decision comes from, not about a tracked row, so it is a
+        # top-level reading and never a row. `unread` here is a real answer (the reading was
+        # not taken); it is never folded into agreement, which is what a stale binary used to
+        # read as before anyone ran `go version -m` on the process's own path.
+        "mcp_server": mcp_probe if mcp_probe is not None else {
+            "state": "unread", "error": "not probed by this call"},
         "rows": out_rows,
     }
 
@@ -1197,7 +1227,7 @@ def main(argv=None):
     if not a.tracked:
         ap.error("--tracked is required unless --verify is given")
     doc = compute(a.subject, a.tracked, a.vault, interval, endpoint=a.endpoint,
-                  registry_dir=a.registry_dir)
+                  registry_dir=a.registry_dir, mcp_probe=mcp_server_reading())
     path = write(a.out or readings_path(a.subject), doc)
     print(path)
     return 0
