@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.359.1
 
 - docs: **`llms.txt` names the Go hook instead of the retired Python poller.** The tab-worker paragraph still told a reader that the plugin's `PermissionRequest` hook is `scripts/permission-answer-poll.py`, a file the entry below deletes — so the one doc a fresh agent reads first pointed at a path that no longer exists. It now names `attention-controller-permission-answer-hook` and the `make install` that places it. Found by the PR review of the deletion rather than by the deletion's own grep, because SC5's pattern covers `commands/`, `agents/`, `scripts/` and the hook manifest but not `llms.txt`.
 
