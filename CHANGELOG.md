@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.361.1
 
 - docs: **the fleet-drive rule says what `list_agents` actually returns.** Two shipped lines — `commands/fleet-drive.md` (INLINE) and `commands/steps/rules.md` — claimed the roster is scoped to the workers this session spawned, which stopped being true when the rehydrated roster shipped: the roster lists **every** worker, including rows adopted from the ledger regardless of which process spawned them. Only this session's **parks** are this session's to answer. A manager reading the old line could answer another manager's worker, or fail to look for its own rehydrated worker, and neither error surfaces. Both lines now state that split, and `fleet-drive.md` still fits its 10 240-byte tick budget (10 142 bytes, 98 free). Change set: `commands/fleet-drive.md`, `commands/steps/rules.md`, `CHANGELOG.md`.
 
