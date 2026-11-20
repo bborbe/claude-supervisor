@@ -318,7 +318,7 @@ def _positive_float_env(name, default):
 # concurrent readers, 2.26 s peak under 20 — under 1.5x headroom at the old 3 s,
 # and a gate lost to a timeout is worse than a gate that arrives late. 10 s is
 # the value two siblings already use (`attention-card-lookup.py`,
-# `answered-watch.py`).
+# the retired answered-card watcher).
 #
 # ⚠️ The repo therefore reads this variable with TWO defaults, and that is stated
 # rather than hidden — it is the condition the note below sets. `attention-answer.py`,
@@ -329,7 +329,7 @@ def _positive_float_env(name, default):
 #
 # ⚠️ Deliberately left as the bare `float(...)` form rather than routed through
 # `_positive_float_env`, and that is a scope decision, not an oversight: the same
-# variable is read the same bare way by `pod-attention.py` and `answered-watch.py`,
+# variable is read the same bare way by `pod-attention.py` and the retired answered-card watcher,
 # so hardening one of the three would leave the repo reading one env var two
 # different ways with nothing saying which was intended. Hardening all three
 # belongs in its own change.

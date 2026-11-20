@@ -72,12 +72,12 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 10 | Escalate | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/escalate.md` |
 | 11 | Needs-input batch + relay | hand-back reports `blocked` > 0, `parks-routed` > 0, or a routed spawn | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
-| 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
+| 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Readings | every tick — take all seven readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 | 16b | Manager reap | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
-| 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
+| 18 | Persist | this round's `.digest` marker is missing — run: `python3 $P/fleet-snapshot.py --digest-path <this round's payload path>` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
