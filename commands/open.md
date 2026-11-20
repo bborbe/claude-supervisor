@@ -331,11 +331,16 @@ Goals and topics: an absent `phase` is exempt; `phase: todo` alone is gated — 
 exempt**; show `— (pipeline contract)`.
 
 ⚠️ **Decide the scope from the PAGE, never from a liveness probe.** Line 44 forbids probing
-liveness, and it still does: read the task's own `status:` / `phase:` — a row at `phase: todo`
-or `status: next` / `backlog` is one the endpoint would *create*, so it is gated; a row already
-`in_progress` / `execution` is one it would *resume*, so it is not. That is a page-state read,
-which this command already does, not a probe. If the page cannot answer it, gate the row — a
-needless audit costs one sub-agent dispatch, a skipped one opens a raw worker.
+liveness, and it still does: read the task's own `status:` / `phase:`. On the **single-name**
+path a row at `phase: todo` or `status: next` / `backlog` is one the endpoint would *create*, so
+it is gated; a row already `in_progress` / `execution` is one it would *resume*, so it is not.
+
+⚠️ **In the `--flagged` batch the ladder runs on EVERY task row, whatever its status.** The
+batch's whole population is `in_progress` rows, so the create-vs-resume split would gate none of
+them — yet Step B promises the improvement pass runs, and it must: the flag is the operator's
+"open these", not a waiver of the readiness bar. Gating on the batch path is therefore by
+population, not by page state. If a page cannot answer the split on the single-name path, gate
+the row — a needless audit costs one sub-agent dispatch, a skipped one opens a raw worker.
 
 ⚠️ **The decision is the readiness ladder, whose single home is `docs/fleet-surface.md` § Spawn a
 worker item 2** — read the branches there; the thresholds are never restated as a second counter.
@@ -389,7 +394,7 @@ Read the row's recorded session id and refuse **before** sending it:
 if [ "<kind>" = "task" ]; then
   SID=$(vault-cli --vault "<vault>" task get "<name>" claude_session_id 2>/dev/null) || {
     echo '❓ UNVERIFIED — the session id could not be read; a hold cannot be ruled out'
-    exit 1   # refuse: never send a row whose hold state is unknown
+    REFUSE=1   # refuse THIS ROW: never send one whose hold state is unknown
   }
   if [ -n "$SID" ]; then
     python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-holds.py" is-held "$SID"
@@ -397,6 +402,11 @@ if [ "<kind>" = "task" ]; then
   fi
 fi
 ```
+
+⚠️ **`REFUSE=1` excludes that row; it never aborts the invocation.** On the single-name path
+excluding the row ends the command. On the `--flagged` path it drops the row from the batch and
+counts it refused — an `exit 1` here would kill every remaining row in the batch over one
+unreadable page, which is the accounting defect the tick already fixed once.
 
 ⚠️ **A failed read is a refusal, not a pass.** The old file refused when the
 `claude_session_id` read itself failed; keep that. An unread id is the absence of an answer,

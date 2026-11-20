@@ -35,7 +35,7 @@ Manager-tier, like `/supervisor:open` (`docs/session-tiers.md` § Command → ti
 
 - **name (required):** the task / goal / topic title or identifier — everything that is not a recognised flag. Quote it when passing to `vault-cli`.
 - **`--task` / `--goal` / `--topic`, `--vault <name>`, `--first-step <text>`, `--flagged`:** exactly as `/supervisor:open` defines them — read them in `${CLAUDE_PLUGIN_ROOT}/commands/open.md` § Arguments, and do not restate them here.
-- ⚠️ **`--color` has no consumer on this command.** A controller worker opens no local tab, so `/supervisor:open` the wrapper's role→window resolution's role-map colour resolution never runs; the flag is dropped rather than half-honoured.
+- ⚠️ **`--color` has no consumer on this command.** A controller worker opens no local tab, so neither `/supervisor:open`'s caller nor the wrapper's role→window resolution ever reads a role-map colour; the flag is dropped rather than half-honoured.
 - ⚠️ **`--first-step` rides the `prompt` on the `spawn_agent` branch** exactly as `/supervisor:open` § Step 3 defines it. On the local-backend branch it is sent as `--first-step "<text>"`; the controller tells the worker `<first_step>\n\n/vault-cli:work-on-task "<task>"`, the same prompt `/supervisor:open` builds.
 
 If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a task, goal or topic name.` and STOP.

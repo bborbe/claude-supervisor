@@ -101,12 +101,18 @@ def role_for_session(session_id):
     A bounded scan of the vault task dirs: the hook has 5 s, so it walks the known
     dirs only and stops at the first match.
     """
-    needle = "claude_session_id: %s" % session_id
+    # ⚠️ Match the KEY, not a literal `key: value` string: a quoted YAML value
+    # (`claude_session_id: "…"`) or extra spacing would slip past an exact-substring needle
+    # and the agent-tab arm would silently allow the spawn.
+    id_re = re.compile(r"^claude_session_id:\s*[\"']?" + re.escape(session_id), re.MULTILINE)
     for vault in sorted(os.listdir(VAULT_ROOT)):
         for name in TASK_DIRS:
             folder = os.path.join(VAULT_ROOT, vault, name)
             if not os.path.isdir(folder):
                 continue
+            # A Goals page is a MANAGER row: an absent `role:` there is not an agent, so the
+            # Rule-1 default must not be applied to it.
+            is_task_dir = name.endswith("Tasks")
             for entry in sorted(os.listdir(folder)):
                 if not entry.endswith(".md"):
                     continue
@@ -115,14 +121,15 @@ def role_for_session(session_id):
                         head = handle.read(4000)
                 except OSError:
                     continue
-                if needle not in head:
+                if not id_re.search(head):
                     continue
                 for line in head.splitlines():
                     if line.startswith("role:"):
                         resolved = line.split(":", 1)[1].strip().strip('"').strip("'")
                         return resolved or "agent"
-                # The task records this session but declares no role: Rule 1 makes it agent.
-                return "agent"
+                # A TASK records this session but declares no role: Rule 1 makes it agent.
+                # A goal page is a manager row, so an absent role there is not an agent.
+                return "agent" if is_task_dir else None
     return None
 
 

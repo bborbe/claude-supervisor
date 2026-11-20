@@ -67,6 +67,23 @@ class SpawnRouteGuard(unittest.TestCase):
         self.assertEqual("deny", decision)
         self.assertTrue(reason.startswith("agent-tab"), reason)
 
+    def test_a_quoted_session_id_is_still_matched(self):
+        """A quoted YAML value must not slip past the agent arm."""
+        self._page("Q", '---\nclaude_session_id: "eeeeeeee-1111-2222-3333-444444444444"\nrole: agent\n---\n')
+        decision, _ = self._verdict(
+            "wezterm cli spawn --window-id 3 --resume eeeeeeee-1111-2222-3333-444444444444 -- x")
+        self.assertEqual("deny", decision)
+
+    def test_a_roleless_goal_page_is_not_an_agent(self):
+        """A goal page is a MANAGER row: an absent role there must not deny a manager resume."""
+        goals = self.root / "v1" / "24 Goals"
+        goals.mkdir(parents=True)
+        (goals / "G.md").write_text("---\nclaude_session_id: ffffffff-1111-2222-3333-444444444444\n---\n",
+                                    encoding="utf-8")
+        decision, _ = self._verdict(
+            "wezterm cli spawn --window-id 3 --resume ffffffff-1111-2222-3333-444444444444 -- x")
+        self.assertEqual("allow", decision)
+
     def test_a_human_resume_into_direct_is_allowed(self):
         self._page("C", "---\nclaude_session_id: cccccccc-1111-2222-3333-444444444444\nrole: human\n---\n")
         decision, _ = self._verdict("wezterm cli spawn --window-id 21 --resume cccccccc-1111-2222-3333-444444444444 -- x")
