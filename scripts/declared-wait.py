@@ -38,8 +38,8 @@ suppresses:
 
 | verdict | when | effect |
 |---|---|---|
-| `declared` | re-rendered within `MAX_AGE_S`, or naming a clock (ISO date/datetime) still in the future | suppresses the nudge, as before |
-| `expired` | not re-rendered for `MAX_AGE_S` (default 3600 s, `SUPERVISOR_WAIT_MAX_AGE_S`) and naming no future clock | **not** a wait: the session is re-driven, re-checks its observable, and works or re-parks |
+| `declared` | re-rendered within `MAX_AGE_S`, naming a clock (ISO date/datetime) still in the future, or naming a card (a card wait's clock is a re-check time, not a deadline — see `CARD_WAIT`) | suppresses the nudge, as before |
+| `expired` | not re-rendered for `MAX_AGE_S` (default 3600 s, `SUPERVISOR_WAIT_MAX_AGE_S`), naming no future clock and no card | **not** a wait: the session is re-driven, re-checks its observable, and works or re-parks |
 
 Measured 2026-11-10: of 27 idle 🟡 sessions, 16 would never wake — 6 whose event had
 already happened, 5 whose watcher had died, 5 declaring nothing. A bounded re-check
@@ -95,6 +95,31 @@ SESSION_BOUND = re.compile(
     r"|\bb(?=[a-z0-9]{8}\b)(?=[a-z0-9]*[g-z])[a-z0-9]{8}\b",
     re.IGNORECASE,
 )
+
+#: A card wait's clock is a **re-check time, not a deadline.** The observable is
+#: "the card is answered (pollable)" and the ISO time only says when to poll again,
+#: so a past clock must not expire a card wait — the defect this pattern guards.
+#: The shape mirrors `closer-gate-lint.py`'s `CARD_HANDLE_RE` rather than forking a
+#: second card-id definition: keyed on the word `card` / `item` / `poll`, optionally
+#: backticked, followed by a hex id. ⚠️ Never bare hex — a commit SHA is 7-40 hex, and
+#: `_HEX_LETTER` rejects an all-digit run (a count, not a store id).
+#:
+#: The exemption is bounded structurally, not by a card-store poll (this reader is a
+#: pure local log read and runs per session in tight loops): an answered card resumes
+#: its session and writes a NEW `Stop`, and the newest-wins walk above makes the
+#: exemption apply only while the card wait is still the latest observable. A dead
+#: session whose last closer declared a card wait DOES read `parked` — `flagged-rows.py`'s
+#: branch sits AFTER every LIVE branch and BEFORE `resume` — so an answered card whose
+#: session is never resumed stays parked. Neither `MAX_AGE_S` nor the 24 h card bounds
+#: it: `drive-escalate.py` returns `gone` for a non-live session and cards nothing. That
+#: is a pre-existing property of the `parked` branch, out of this fix's scope; the
+#: fleet's close/reap machinery is the only bound. `MAX_AGE_S` still expires every
+#: non-card wait exactly as before.
+CARD_WAIT = re.compile(
+    r"(?:\b(?:card|item)(?:[ _-]?id)?|\bpoll)\b[\s:#`'\"]*([0-9a-f]{8,})\b",
+    re.IGNORECASE,
+)
+_HEX_LETTER = re.compile(r"[a-f]", re.IGNORECASE)
 
 _CLOCK = re.compile(
     r"(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::\d{2})?(Z|[+-]\d{2}:?\d{2})?)?"
@@ -215,8 +240,13 @@ def wait_record(sid, state_dir=None, now=None):
         ts = last_ts
     now_s = time.time() if now is None else now
     clock = _latest_clock(ends)
+    # A card wait is pollable: its clock is when to re-check, not a deadline, so a
+    # past clock does not expire it (see `CARD_WAIT`). An all-digit run is a number,
+    # not a card id, so it is not exempt.
+    card_wait = any(_HEX_LETTER.search(h) for h in CARD_WAIT.findall(ends))
     expired = (last_ts is not None and now_s - last_ts > _max_age()
-               and not (clock is not None and clock > now_s))
+               and not (clock is not None and clock > now_s)
+               and not card_wait)
     return {
         "session_id": sid,
         "ts": ts,

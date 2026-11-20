@@ -1,6 +1,6 @@
 ---
 name: fleet-round
-description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg, the keep-alive leg, the own-parks leg, the open leg and the manager reap, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows, the round tail and the printing of the render.
+description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg, the keep-alive leg, the own-parks leg and the manager reap, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows, the round tail and the printing of the render.
 model: sonnet
 tools: Read, Bash, Write, Task, Skill, SendMessage, ListAgents, mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
 allowed-tools: Bash(python3:*), Bash(date:*), Bash(vault-cli:*), Bash(ls:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(grep:*), Bash(pgrep:*), Bash(gh:*), Bash(git log:*), Bash(wezterm cli list:*), mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
@@ -51,10 +51,6 @@ someone else's is a provenance act this leg must not take.
   the step files name. Nothing else on disk. ⚠️ **A command you invoke writes its own page** —
   `/supervisor:open` and `/supervisor:restart` stamp what they touch; that is their write.
 - **The manager's rows are not yours to run**, even when they look cheap. § 2 lists them.
-- **Never compose a command from a printed name.** Take each action string a leg emits
-  (`open-queue.py --json`'s `selected[].action`) verbatim, exactly as
-  `agents/fleet-open-actor.md` § 3 states — a task name is worker-writable and a `"` or `$(…)`
-  in it executes in your shell.
 - **Report, never repair.** A leg that failed is a `not-run` verdict with its reason. You do
   not retry a second time in the same round, and you do not substitute your own judgement for
   a leg's guard.
@@ -111,8 +107,7 @@ once, reading its step file yourself:
 | 10 | Escalate — render the material and route it; row 11 asks | `steps/escalate.md` |
 | 12 | Covered-subject invariant — when a covered subject's manager is live | `steps/covered-subject-invariant.md` |
 | 15 | Readings — every round, dispatch `supervisor:round-readings-reader` | `steps/readings.md` |
-| 16 | Open leg — every round, dispatch `supervisor:fleet-open-actor` | `steps/open.md` |
-| 16b | Manager reap — every round, after the open | `steps/manager-reap.md` |
+| 16b | Manager reap — every round | `steps/manager-reap.md` |
 | 18 | Persist — only when the snapshot path is missing or its write failed | `steps/persist.md` |
 | 20 | Render the output shape — write `<round>.render`, never print, never ask | `steps/output-shape.md` |
 
@@ -171,7 +166,7 @@ every peer's percentage and never its own.
 
 ## 4. Write the payload, then hand back the verdict
 
-The full material — the digest, the leg blocks, the drive audit, the open block — is written
+The full material — the digest, the leg blocks, the drive audit — is written
 to the payload paths the step files name. You hand back **only** the verdict summary in
 `<output_format>`; never inline a table, a row list or a rule.
 
@@ -243,7 +238,6 @@ round=<id> · digest=<path> · parks=<path>
 progressing=<n> · stalled=<n> · parked=<n> · finished=<n> · held=<n> · orphan=<n> · collision=<n> · unmanaged=<n>
 revived=<n> · blocked=<n> · reaped=<n>
 legs=<n> · restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
-open-status=<ok|unknown|not-run> · selected=<n> · opened=<n> · open-resumed=<n> · jumped=<n> · refused=<n>
 managers-reaped=<n> · parks-answered=<n> · parks-routed=<n> · parks-escalated=<n> · context70=<n> · self-context=<pct>%|UNKNOWN
 ```
 

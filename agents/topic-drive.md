@@ -68,7 +68,7 @@ tier down. The sweep is the product; everything else is delegated.
 
    ⚠️ **`open` and `open-unflagged` are the two arms of an absent `claude_session_id`.**
    `open` → run the open; `open-unflagged` → report and hold, and the goal's workers are
-   opened by the fleet round's open leg regardless. `resume` and `restart` are keep-alive
+   opened by the wrapper's flagged tick regardless. `resume` and `restart` are keep-alive
    arms, never gated on the flag — `docs/session-tiers.md` § Keep-alive. `stand-down` is the
    one arm that IS flag-gated, in the other direction: it fires when a flag that was SET has
    been cleared, and running its `--stop` is what makes the next tick read `leave`.

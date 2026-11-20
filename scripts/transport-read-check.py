@@ -228,6 +228,13 @@ SITE_LIST = {
     # enumerated for mechanism/list agreement, deliberately NOT driven into the three
     # states, because its broken answer is a conservative refusal, not an empty read.
     ("fleet-reset.py", "_pid_alive"),
+    # added 2026-11-20 — `restart-precheck.py`'s `pid_for_session`, the reach half's pid
+    # lookup: it asks whether a `claude` process carries `--resume <sid>`, and returns
+    # `None` when the read fails, so the report prints `pid: unknown` rather than inventing
+    # one. Same conservative-refusal shape as `_pid_alive` above — enumerated for
+    # mechanism/list agreement, deliberately NOT driven into the three states, because its
+    # broken answer is `unknown`, not an empty read.
+    ("restart-precheck.py", "pid_for_session"),
 }
 
 

@@ -375,7 +375,7 @@ class TestStatus(Base):
 
 
 class TestSingleHome(unittest.TestCase):
-    """The formats live in output-shape.md item 14, and nowhere else is a second copy."""
+    """The formats live in output-shape.md item 13, and nowhere else is a second copy."""
 
     def test_output_shape_defines_the_three_formats(self):
         with open(SHAPE, encoding="utf-8") as fh:
@@ -393,7 +393,7 @@ class TestSingleHome(unittest.TestCase):
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
             with self.subTest(path=os.path.basename(path)):
-                self.assertIn("output-shape.md` item 14", text)
+                self.assertIn("output-shape.md` item 13", text)
                 self.assertIn("fleet-legs.py", text)
                 # The pre-fix instruction, verbatim, is what the change removes.
                 self.assertNotIn("Print `unactioned: <n>", text)

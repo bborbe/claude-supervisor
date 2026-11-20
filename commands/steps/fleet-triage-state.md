@@ -456,7 +456,7 @@ verdict**: report the manager as unread and leave the loop alone.
 | `OK` | loop armed | no |
 | `WORKING` / `LAPSED` / `IDLE` | mid-turn, no round / armed, no round, no work | **no** — never drive a re-arm or restart |
 | `STOPPED` + subject page reads `status: completed` / `aborted` | the subject is **terminal** | **no** — a loop on a closed subject is the bug |
-| `STOPPED` + subject page reads `status: hold` | a **pause**, not a closure — see `commands/steps/goal-closure.md` | **no** — a `hold` subject never reports `CLOSE` and never authorises a stop, so an armed loop on one is correct, not a defect |
+| `STOPPED` + subject page reads `status: hold` | a **pause**, not a closure — see `commands/steps/goal-closure.md` | **no** — a `hold` subject never closes and never authorises a stop, so an armed loop on one is correct, not a defect |
 | `STOPPED` + `manager-quiet.py` reports `stood-down` for the subject | **auto-quiet** | **no** — re-arming without adding work just reproduces the stand-down. The lever is the quiet threshold, not the marker |
 | `STOPPED` with a marker and a **live, non-terminal** subject carrying runnable work | a deliberate `/supervisor:stop` | **operator row** — only they release it |
 | `UNARMED`, or `STALE` beyond one full observed period **and** the subject has runnable work | a genuine lapse | **drive it** — tell the manager to re-arm in its own pane |

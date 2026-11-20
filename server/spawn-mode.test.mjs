@@ -785,7 +785,7 @@ test('a caller cannot declare a worker\'s spawn mode', () => {
   // ⚠️ `workerEnvFor` makes the SERVER's mode win on the HEADLESS path, but the tab path has
   // no handover to win with — `shellEnvExports` would export whatever the caller passed — so
   // the identical override was inert on one path and live on the other. Live is not cosmetic:
-  // `scripts/permission-answer-poll.py:287` returns early on
+  // the permission-answer hook returns early on
   // `SUPERVISOR_WORKER_MODE == "headless"`, so a caller telling a TAB worker it is headless
   // silences that worker's attention-store relay. Refused on both paths so the rule reads the
   // same wherever it is found. Found by the PR review (round 2).

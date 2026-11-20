@@ -25,7 +25,7 @@ to `created_date`, then to the file's mtime.
 
 ⚠️ **A row with a future `defer_date` is still counted here**, exactly as an
 `approved_at` row always was: this script answers "approved and not started", and the
-open leg's own `deferred` guard is what keeps it shut — filtering here would erase that
+flagged tick's own `deferred` guard is what keeps it shut — filtering here would erase that
 skip reason from the leg's tally.
 
 ⚠️ **This is deliberately NOT the runbook's "approved and unowned" clause.**
@@ -292,7 +292,7 @@ def split(rows):
     """`(never_started, orphaned)` — each counted on its own predicate, never by remainder.
 
     The two classes need opposite levers. A row with no `claude_session_id` was never
-    opened, and the open leg opens it. A row whose id names a session that is no longer
+    opened, and the wrapper's flagged tick opens it. A row whose id names a session that is no longer
     live was started and its worker died, and the reopen rule
     (`commands/steps/keepalive.md` § Resume a worker whose session died) resumes it.
     Measured 2026-10-30: 81 of 122 rows were orphans, invisible as a class inside the
