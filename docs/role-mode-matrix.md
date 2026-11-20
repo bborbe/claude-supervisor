@@ -1,6 +1,6 @@
 # Role × mode decision matrix
 
-The single home for how a task's `role:` and `mode:` frontmatter are decided — at **creation** (`vault-cli` `create-task` and its `task-creator` agent) and at **open** (`/supervisor:open` § Step 0.6, for a row that predates creation-time writes). Both sides cite this file by path; neither restates it.
+The single home for how a task's `role:` and `mode:` frontmatter are decided — at **creation** (`vault-cli` `create-task` and its `task-creator` agent) and at **open** (`/supervisor:open` § P2, for a row that predates creation-time writes). Both sides cite this file by path; neither restates it.
 
 Operator ruling, 2026-11-06: *"we should have somewhere a decision matrix ... for create task ... we can use this for open task that miss these too"* — and, on the batch: *"if i say 'open all flagged' we should open all ... better open wrong ... than dont open at all"*.
 

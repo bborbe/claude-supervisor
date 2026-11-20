@@ -31,6 +31,34 @@ TASK_DIRS = ("25 Tasks", "24 Tasks", "23 Goals", "24 Goals")
 OPEN_ENDPOINT = "POST http://127.0.0.1:18090/api/1.0/open"
 
 
+#: Growth is bounded by a trim, not by hope. This hook fires on EVERY Bash tool call
+#: fleet-wide, so an unbounded append is a slow disk leak — the sibling
+#: `manager-menu-guard.py` bounds its own record the same way, and `hooks/hooks.json`
+#: documents the bound as required. A session's file is trimmed back to its most recent
+#: RECORD_KEEP lines once it passes RECORD_CAP_BYTES.
+RECORD_CAP_BYTES = 262144
+RECORD_KEEP = 200
+
+
+def _trim(path):
+    """Keep the most recent RECORD_KEEP lines once `path` passes RECORD_CAP_BYTES.
+
+    Written through a temporary file and `os.replace`d, so a kill mid-trim leaves either
+    the old file or the new one — never a half-written one. Never raises.
+    """
+    try:
+        if os.path.getsize(path) <= RECORD_CAP_BYTES:
+            return
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.writelines(lines[-RECORD_KEEP:])
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def record(session_id, decision, reason):
     """One JSON line per invocation, on allow and deny alike. Never raises."""
     try:
@@ -48,6 +76,7 @@ def record(session_id, decision, reason):
                 )
                 + "\n"
             )
+        _trim(path)
     except Exception:
         pass
 

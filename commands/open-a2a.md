@@ -20,7 +20,7 @@ Manager-tier, like `/supervisor:open` (`docs/session-tiers.md` § Command → ti
 
 ```
 /supervisor:open-a2a "<name>"
-  ├─ resolve + gate → /supervisor:open § Step 0 · § Step 0.5 / 0.6 · § Step 1 · § Step 1.5, run by reference
+  ├─ resolve + gate → /supervisor:open § Step 0 · § Step 1 · § P2–P3, run by reference
   └─ dispatch (this file's own), by the row's `target:` frontmatter:
        absent         → the controller's `local` backend, `a2a-local-control.py create`
        docker | k8s | k8s:<cluster> → `spawn_agent`, the value passed verbatim
@@ -42,9 +42,9 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 ## Step 0–1.5 — resolve and gate, by reference
 
-**Read `${CLAUDE_PLUGIN_ROOT}/commands/open.md` and execute its § Step 0, § Step 0.5 / 0.6, § Step 1 and § Step 1.5 exactly as written.** They own, in order: the vault resolution, the `--flagged` batch with the `role` / `mode` classification, the type resolution, and the three spawn gates (approval, readiness, the fleet cap). None of them is restated here — a second copy is a second counter, and this file's whole point is that it is thin where that one is thick.
+**Read `${CLAUDE_PLUGIN_ROOT}/commands/open.md` and execute its § Step 0, § Step 1 and § P2–P3 exactly as written.** They own, in order: the vault resolution, the `--flagged` batch with the `role` / `mode` classification, the type resolution, and the three spawn gates (approval, readiness, the fleet cap). None of them is restated here — a second copy is a second counter, and this file's whole point is that it is thin where that one is thick.
 
-⚠️ **One substitution inside the referenced batch, and it is the only one:** § Step 0.6's per-row delegation invokes `/supervisor:open "<task>"`. Here it invokes **this** command, `/supervisor:open-a2a "<task>"` — otherwise the batch would spawn local tabs and this command would be bypassed on its own batch path.
+⚠️ **One substitution inside the referenced batch, and it is the only one:** § P2's per-row delegation invokes `/supervisor:open "<task>"`. Here it invokes **this** command, `/supervisor:open-a2a "<task>"` — otherwise the batch would spawn local tabs and this command would be bypassed on its own batch path.
 
 ⚠️ **Gate 3 (the fleet cap) is a `spawn_agent`-side check.** Its numbers have one home — `docs/fleet-surface.md` § Spawn a worker item 5 — and are never restated. It runs on § 2.3's branch; the local-backend create at § 2.2 never reaches that call, so nothing here re-implements it and no `operator_named` marker is passed on that branch.
 
@@ -105,7 +105,7 @@ Pass the frontmatter value **verbatim** — never lower-cased, never mapped, nev
 
 ⚠️ **On this branch the argument contract is different, and `role` is dropped with it.** `role`, `interactive`, `resume`, `env`, `policy`, `window_id` and `shipping` are each refused, and `task` is required — the list and its reasons have their single home in `docs/fleet-surface.md` § Spawn a worker item 7; read it there and never hand-build this branch from the line above.
 
-**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** The row's `mode:` was already written by `/supervisor:open` § Step 0.6, and the `role`-forced mapping that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries no mode field — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
+**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** The row's `mode:` was already written by `/supervisor:open` § P2, and the `role`-forced mapping that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries no mode field — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
 
 ⚠️ **Requires `mcp__supervisor__*` in this session.** There is no wezterm fallback on this command: a tab is not a controller worker, and opening one would answer a call that asked for somewhere else.
 
