@@ -320,27 +320,13 @@ test('an unsafe manager_launcher is refused', () => {
   assert.ok(resolveManagerLauncher({ vaultLauncher: '/s/cc-private', managerLauncher: 'cc;rm -rf' }).error)
 })
 
-// `role: human` is the operator's own session (operator ruling 2026-11-06): it takes the
-// Claude launcher, never the `-deepseek` worker default — except where the task names its own.
+// `role: human` resolves like a worker (operator ruling 2026-11-20): the shim is a
+// pass-through, so only the task's own `launcher:` moves a human row off the worker default.
 const workerRule = { launcher: '/s/cc-private-deepseek', source: 'worker-default' }
 
-test('a human row with no own launcher moves off the worker default onto the configured Claude launcher', () => {
+test('a human row keeps the worker resolution (operator ruling 2026-11-20)', () => {
   const r = applyHumanLauncherRule({ role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek', managerDefault: 'cc-private-claude' })
-  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'manager-default' })
-})
-
-test('a human row takes the -claude sibling even when manager_launcher is configured to the -deepseek script', () => {
-  // The live config of 2026-11-06: manager_launcher == claude_script == cc-private-deepseek.
-  const r = applyHumanLauncherRule({
-    role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek',
-    managerDefault: '/s/cc-private-deepseek', exists: (p) => p === '/s/cc-private-claude',
-  })
-  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'claude-sibling' })
-})
-
-test('a human row falls back to the -claude sibling when no manager default is configured', () => {
-  const r = applyHumanLauncherRule({ role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek', exists: (p) => p === '/s/cc-private-claude' })
-  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'claude-sibling' })
+  assert.deepEqual(r, workerRule)
 })
 
 test("a human row keeps the task's own launcher", () => {
@@ -348,21 +334,11 @@ test("a human row keeps the task's own launcher", () => {
   assert.deepEqual(applyHumanLauncherRule({ role: 'human', resolved: own, vaultLauncher: '/s/cc-private-deepseek', managerDefault: 'cc-private-claude' }), own)
 })
 
-test('an agent row is untouched by the human rule', () => {
+test('an agent row is unchanged', () => {
   assert.deepEqual(applyHumanLauncherRule({ role: 'agent', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek', managerDefault: 'cc-private-claude' }), workerRule)
 })
 
-test('an error from the worker rule passes through the human rule unchanged', () => {
+test('an error from the worker rule passes through unchanged', () => {
   const err = { error: 'boom' }
   assert.equal(applyHumanLauncherRule({ role: 'human', resolved: err, managerDefault: 'cc-private-claude' }), err)
-})
-
-test('a human row on a vault whose claude_script is already -claude keeps it over a -deepseek manager_launcher', () => {
-  const r = applyHumanLauncherRule({ role: 'human', resolved: { launcher: '/s/cc-private-deepseek', source: 'worker-default' }, vaultLauncher: '/s/cc-private-claude', managerDefault: '/s/cc-private-deepseek', exists: () => true })
-  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'vault' })
-})
-
-test('a human row with no sibling and no manager default falls back to claude_script', () => {
-  const r = applyHumanLauncherRule({ role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-assistant-bro', exists: () => false })
-  assert.deepEqual(r, { launcher: '/s/cc-assistant-bro', source: 'vault' })
 })
