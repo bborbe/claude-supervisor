@@ -110,8 +110,10 @@ SESSION_BOUND = re.compile(
 #: exemption apply only while the card wait is still the latest observable. A dead
 #: session whose last closer declared a card wait DOES read `parked` — `flagged-rows.py`'s
 #: branch sits AFTER every LIVE branch and BEFORE `resume` — so an answered card whose
-#: session is never resumed stays parked, bounded by `drive-escalate.py`, which cards
-#: any wait unchanged for 24 h, not by `MAX_AGE_S`. `MAX_AGE_S` still expires every
+#: session is never resumed stays parked. Neither `MAX_AGE_S` nor the 24 h card bounds
+#: it: `drive-escalate.py` returns `gone` for a non-live session and cards nothing. That
+#: is a pre-existing property of the `parked` branch, out of this fix's scope; the
+#: fleet's close/reap machinery is the only bound. `MAX_AGE_S` still expires every
 #: non-card wait exactly as before.
 CARD_WAIT = re.compile(
     r"(?:\b(?:card|item)(?:[ _-]?id)?|\bpoll)\b[\s:#`'\"]*([0-9a-f]{8,})\b",
