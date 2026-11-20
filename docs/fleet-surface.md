@@ -121,12 +121,23 @@ that one session, and nothing in the session said so. **The same session's `/rel
 then moved that entry to `0.62.4`, so the probe reports recovery as well as staleness** — which
 is the property that lets this section's clause promise a lever at all.
 
-**The lever is `/reload-plugins`; a restart is not required.** It reloads plugins, skills
+**The lever is `/reload-plugins`.** It reloads plugins, skills
 (including every `commands/` entry), agents, hooks, plugin MCP servers and plugin LSP servers,
-and it re-reads plugins from disk, so it also switches to a new version's cache path. Restart
-only if, after `/reload-plugins`, the served body still cites the old version path. The vault's
+and it re-reads plugins from disk, so it also switches to a new version's cache path. The vault's
 *a Claude Code guide* owns the per-artifact-class lever table; this section
 names the lever and points at that table rather than copying it.
+
+⚠️ **That is how a session picks a new version up — not what a manager hands the operator.**
+When a manager needs *another* session to load a new plugin version, the default route is
+**`/supervisor:restart <sid>`**: a script the manager runs itself, and the restarted session
+loads the installed version. A restart is also the remedy when a reloaded body still cites the
+old version path. `/reload-plugins` is a harness slash command a manager may not pull by policy —
+`commands/steps/readings.md` reserves the `--reload` lever to the operator because it is
+production-touching on live sessions — so a manager offers it **only** when the target has no
+addressable session: no live record in `scripts/session-liveness.py --list --json` for the id
+`/supervisor:restart <sid>` would take. Such a card says so. A card offering `/reload-plugins`
+for an addressable session spends the operator's attention on a route the manager could have
+taken itself.
 
 **The fleet reading is `scripts/plugin-version-census.py` — the probe above answers "am I
 stale", this answers "who is".** It takes the live sessions from `session-liveness.py --list
