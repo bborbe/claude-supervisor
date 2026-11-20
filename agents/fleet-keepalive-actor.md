@@ -186,7 +186,7 @@ restart loop that still runs every tick.
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg lapsed-managers --count <n>`,
 with `<n>` the topic rows this leg found and did not act on — the `# Regression metric` on the
 installing task reads it. Format, not-run form and the dead-worker floor: **single home
-`commands/steps/output-shape.md` item 14** — read it there, never restate it. ⚠️ **The reading
+`commands/steps/output-shape.md` item 13** — read it there, never restate it. ⚠️ **The reading
 must land in the digest, which outlives the round** — a count spoken into chat and nowhere else
 dies with the round.
 
@@ -291,9 +291,9 @@ Nor is a busy-registry `idle` row or an unanchored one: never filter `NUDGE`.
 
 **Report the line.** Print the `park-nudge:` summary verbatim, plus its
 `status-skipped`, `unanchored-skipped` and `anchor-unknown` counts,
-beside the three counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not one
-of them** — item 14's block is the digest's `LEGS` section, which admits exactly three
-`unactioned:` lines, so a `park-nudge:` line inside it fails item 14's `--check`.
+beside the three counts that `commands/steps/output-shape.md` item 13 renders. ⚠️ **It is not one
+of them** — item 13's block is the digest's `LEGS` section, which admits exactly three
+`unactioned:` lines, so a `park-nudge:` line inside it fails item 13's `--check`.
 
 ## 4. Resume a worker whose session died
 
@@ -380,7 +380,7 @@ definition (`docs/session-tiers.md` § Keep-alive) — so only an **owner** (ses
 `--floor` renders `(lower bound, scan incomplete)`; `--exact` asserts completion.
 ⚠️ **A bare `dead-workers` count is refused** — one of the two is mandatory: an unlabelled
 number reads as a measurement. Both flags are refused on any other key; format and
-rationale: `commands/steps/output-shape.md` item 14.
+rationale: `commands/steps/output-shape.md` item 13.
 
 ## 4b. Stood-down close
 

@@ -135,8 +135,8 @@ Only then:
 ⚠️ **An UNFLAGGED goal with a free slot is not started — it is reported.** `--rank` keeps it in
 the output carrying the `unflagged` slot, which never takes one of the N, so the report and the
 gate cannot disagree. Say plainly that it is held for the operator's flag. That is not a stall
-and not a shortage: an unmanaged goal still gets its **workers** opened by the fleet round's
-open leg, so the work moves without a manager.
+and not a shortage: an unmanaged goal still gets its **workers** opened by the wrapper's flagged
+tick, so the work moves without a manager.
 
 ⚠️ **A `phase: todo` goal is never started** — `goal-not-startable` is the operator's
 approval boundary, not a bug.

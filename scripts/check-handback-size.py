@@ -40,7 +40,6 @@ MAX_BYTES = 1024
 #: its whole hand-back must fit.
 VARIABLE = {
     "supervisor:fleet-keepalive-actor": ("crash-loop:", "cannot-tell:", "park-nudge:"),
-    "supervisor:fleet-open-actor": ("refused:",),
 }
 
 
@@ -57,7 +56,7 @@ def handback_fence(text: str) -> str | None:
     """Every fenced block under `**Hand-back**`, joined, or None when there is not one.
 
     ⚠️ **All fences, not the first.** A leg may put its counts in one block and its
-    per-row lines in a second (the open leg's `refused:` rows are exactly that), so reading
+    per-row lines in a second (the keep-alive leg's `crash-loop:` rows are exactly that), so reading
     only the first would leave that leg's declared variable lines uncounted and its
     exclusion inert — the check would report a pass for a measurement it never took.
     """

@@ -47,7 +47,7 @@ Rationale: runbook § Fleet-Manager Command.
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
 goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
-⚠️ **Carve-out: 5b, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
+⚠️ **Carve-out: 5b, 5d and 16b are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
 them.
 
@@ -75,8 +75,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Readings | every tick — take all seven readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
-| 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
-| 16b | Manager reap | every tick — after the open | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
+| 16b | Manager reap | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
@@ -84,7 +83,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 
 ⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**; a second sweep duplicates sends.
 
-**Split:** rows 0, 2–10, 12, 15, 16, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
+**Split:** rows 0, 2–10, 12, 15, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
 
 ## INLINE — the hard rules
 
