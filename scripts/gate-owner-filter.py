@@ -278,6 +278,12 @@ CLAIMS = _ownership.CLAIMS
 load_claims = _ownership.load_claims
 load_ledger_checked = _ownership.load_ledger_checked
 is_manager = _ownership.is_manager
+HEADLESS_PREFIX = _ownership.HEADLESS_PREFIX
+is_headless_key = _ownership.is_headless_key
+is_human = _ownership.is_human
+feed_rows = _ownership.feed_rows
+headless_key = _ownership.headless_key
+REPLAY_MARK = _ownership.REPLAY_MARK
 
 EMIT = "emit"
 DROP = "drop"
@@ -302,7 +308,6 @@ REFUSAL_MARKER = "WHO-NEEDS-ME-REFUSED"
 # fallback, matched literally against the feed line. It is the feed's own
 # spelling -- keep the two in lockstep, or the filter carries a signal the feed
 # no longer emits and every row reads live.
-REPLAY_MARK = "⟳replay"
 
 # ⚠️ WHY THE POLL LOOP LIVES HERE RATHER THAN IN A SHELL WRAPPER. The rule's arm was
 # a `Monitor` over
@@ -576,26 +581,6 @@ def load_ledger(endpoint=None):
     return load_ledger_checked(endpoint) or {}
 
 
-def is_human(session_id, ledger):
-    """The gated session is the OPERATOR'S own workspace, not a delegate.
-
-    `role: human` is what `spawn_agent` writes for a row opened into the Direct window
-    (`commands/open.md` § Step 0.6), so its gate is answered in that tab and no manager ever
-    acts on it. Measured 2026-10-27 on Fleet Manager `ac24db61`: pane 2165
-    (`Check Prometheus Alerts - 2026-10-27`, `role: human`) fired the feed three times across
-    three consecutive 30-minute windows — see the module header § ROLE.
-
-    ⚠️ **ONLY an explicit `human` counts, and the default is the OPPOSITE of `is_manager`'s.**
-    A record with no `role`, `role: null`, or no record at all is NOT human. The two defaults
-    point opposite ways because the failure directions do: `is_manager` defaults to worker so
-    a pre-field record cannot drop the whole fleet's gates, and this defaults to not-human so
-    an unrecorded session cannot be silently excluded — that same fleet-wide silence, reached
-    from the other side. `role` is a positive assertion here, never an absence.
-    """
-    if not session_id:
-        return False
-    record = ledger.get(session_id) or {}
-    return record.get("role") == "human"
 
 
 def live_ids(registry_dir=REGISTRY):
@@ -1097,90 +1082,12 @@ def feed_refusal(lines):
     return None
 
 
-def feed_rows(stream):
-    """(pane, replayed) pairs in a `who-needs-me.py` render, first-appearance order.
-
-    Reads the `[<pane>]` row marker rather than any `--pane-id` flag: the flag
-    also appears on the activate command of a row whose pane may already be
-    gone, so the marker is the row's own identity.
-
-    ⚠️ **The marker is right-aligned inside its brackets**, so the digits are
-    padded: a live render carries `[ 417]`, `[  90]`, `[   0]`, never `[417]`.
-    Matching `\\[(\\d+)\\]` therefore matched **nothing** on a real feed and the
-    caller exited `pass --pane, --feed, or both` against a feed holding eight
-    panes — a scoping filter that renders as a filter which found nothing to
-    pass. Measured 2026-10-01 against the live feed (8 pane rows, exit 2); the
-    fixtures in `tests/test_gate_owner_filter.py` used unpadded ids and so never
-    caught it. Tolerate whitespace on both sides.
-
-    ⚠️ **`replayed` is read off the same line, and it is a guard rather than
-    noise.** `who-needs-me.py` stamps `⟳replay` on every row it returns from its
-    event-log fallback — the branch it takes when the attention store is
-    unreachable — precisely so a manager does not act on a gate answered hours
-    ago. This function used to return the pane id alone and discard the rest of
-    the line, so the filter emitted `864` for a row the feed had rendered
-    `5h49m  ⟳replay  ⚙ …` and the watcher woke on an already-answered gate.
-    Measured 2026-10-03 (Manager Layer, ticks 89-90): **10 firings in ~70
-    minutes, 2 real.** The mark is carried, never re-derived: it is a property
-    of the read that produced the row, and `--pane` callers have no line to
-    read it from.
-
-    ⚠️ **A pane-less headless row is a gate too, keyed on its store item id.**
-    `who-needs-me.py` renders a headless worker's answerable gate `[ hst]` — a
-    headless worker owns no pane by construction — and the digit-only match used
-    to skip it, so the filter read `gates: 0` over a feed carrying the gate and
-    the armed watcher never woke. Measured 2026-11-03 01:06: 11 of 13 live gates
-    were `[ hst]`. The row's own identity is the store item id its `answer:`
-    continuation line names (`hst` is rendered ONLY when that line exists), so
-    the key is `hst:<store item id>` — never a pane, which this row cannot have.
-    `headless_items` resolves the session behind that key from the store.
-    """
-    import re
-
-    lines = list(stream)
-    out, marks = [], {}
-    for index, line in enumerate(lines):
-        match = re.match(r"\s*\[\s*(\d+)\s*\]", line)
-        if match:
-            pane = match.group(1)
-        elif re.match(r"\s*\[\s*hst\s*\]", line):
-            pane = headless_key(lines, index)
-            if pane is None:
-                continue
-        else:
-            continue
-        if pane not in marks:
-            marks[pane] = REPLAY_MARK in line
-            out.append(pane)
-    return [(pane, marks[pane]) for pane in out]
 
 
-HEADLESS_PREFIX = "hst:"
 
 
-def headless_key(lines, index):
-    """`hst:<store item id>` for the `[ hst]` row at `lines[index]`, or None.
-
-    Reads the row's continuation lines only — up to the next `[...]` row marker —
-    so an `answer:` line can never be borrowed from a neighbouring row.
-    """
-    import re
-
-    for line in lines[index + 1:]:
-        if re.match(r"\s*\[", line):
-            return None
-        match = re.search(r"attention-answer\.py answer (\S+)", line)
-        if match:
-            return HEADLESS_PREFIX + match.group(1)
-    return None
 
 
-def is_headless_key(pane):
-    return str(pane).startswith(HEADLESS_PREFIX)
-
-
-# What one store read says about one `hst:<id>` key. Three values, because a two-valued
-# read ("a record, or none") collapsed two different facts into one.
 STORE_OPEN = "open"          # the item is on the store's open list
 STORE_NOT_OPEN = "not-open"  # a GOOD read, and the item is not on it: closed, answered or pruned
 STORE_UNREAD = "unread"      # the read itself failed — nothing is known about the item
