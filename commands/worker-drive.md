@@ -389,17 +389,11 @@ Short path (§0b): no `OPEN` table — `Next open box: <box>` instead.
 
 `PROBLEM:` is not decoration. A run can be accurate in every line and still leave the operator unable to say what the task is *for* — every other field in the shape reports state, and none restates purpose. Observed 2026-09-14: after hours of correct reports on one task, the operator asked *"what problem we try to solve"* and then *"u lost me"*. Write it in plain terms — no identifiers, no paths, no acceptance-criteria vocabulary: the sentence you would say out loud to someone who had never seen the task.
 
-**Arm the answered-card watcher before you end the turn.** A `👤 You:` line is a real question: the `Stop` hook mints a board card for it — waiting verbs (`pick —`, `you run:`, `review:`) mint without `📣 Board:`, rule home `~/.claude/hooks/attention-log.py` — `producer_id` *this* session. The operator may answer from the board; nothing wakes this session when they do, so arm:
+**Arm no answered-card watcher — the answer is pushed into this pane.** A `👤 You:` line is a real question: the `Stop` hook mints a board card for it — waiting verbs (`pick —`, `you run:`, `review:`) mint without `📣 Board:`, rule home `~/.claude/hooks/attention-log.py` — `producer_id` *this* session. When the operator answers, `attention-controller`'s delivery arm writes it into this pane on the store's write: one write, no poller, nothing to re-arm. That is why the answered-card `Monitor` is gone — a watcher would be a second reader of the same answer.
 
-```bash
-python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/answered-watch.py
-```
+Do **not** arm a watcher when `👤 You:` reads `nothing` or `later (on …)`: the hook records those as `idle`, so there is no card. A manager's feed watcher is **not a second doorbell** — a raise vs an answer. Reading an answer's verdict — `ANSWERED:` releases; `NOT_OPERATOR_ANSWERED:`, `DECLINED:` and `HIDDEN` do not — still has one home, `scripts/answered-attribution.py`, for every path that quotes one.
 
-It emits `ANSWERED <item-id>` when the operator answers a card **this session posted** (`producer_id`), so a peer's card never fires it. **On `ANSWERED`, run `attention-ask.py poll <item-id>` and act immediately.** Re-arm on expiry as §0b does.
-
-Do **not** arm it when `👤 You:` reads `nothing` or `later (on …)`: the hook records those as `idle`, so there is no card. A manager's feed watcher is **not a second doorbell** — a raise vs an answer. Reading the answer — `ANSWERED:` releases; `NOT_OPERATOR_ANSWERED:`, `DECLINED:` and `HIDDEN` do not — has one home, `scripts/answered-attribution.py`.
-
-Then write the updated drive state. If a watcher was armed, name it in `⏰ Next:`.
+Then write the updated drive state. When a board answer is what the turn waits on, `⏰ Next:` names the card id — the push is the mechanism, the card is the observable.
 
 ### Speak the outcome
 
@@ -493,7 +487,7 @@ Every rule above still applies to the fallback text.
 - **Production-touching, irreversible and criterion-rewording items never enter this modal.** They go as separate `approve:` lines, on a card this session posted itself (`attention-ask.py post`), with the consent token named on the line — a modal is a multi-select over cheap reversible work, and a blast radius is not a checkbox.
 - ⚠️ **Never a second modal, and never one earlier in the run.** A question that arises mid-turn waits for the close; two modals in one run is the shape this command exists to remove.
 - **Nothing to ask → no modal.** A run whose rows are all blocked, or all done, prints its report and stops. An empty modal is an interruption, not a closer.
-- **One card per ask.** The modal mints its own; a waiting-verb closer mints one too. Never add a `📣 Board:` line or `attention-ask.py post` on top — arm `answered-watch.py` only after `attention-ask.py poll` confirms the card.
+- **One card per ask.** The modal mints its own; a waiting-verb closer mints one too. Never add a `📣 Board:` line or `attention-ask.py post` on top — the delivery arm pushes the answer into the pane, so there is no watcher to arm.
 - ⚠️ **Why a modal here and a card on the manager tier is not an inconsistency.** Measured 2026-10-15: a one-shot cron due while a modal was open did **not** fire — it was deferred until the turn ended, and the control leg showed the same job firing the instant the session went idle. A *worker* ends its turn on the answer, so a modal costs it nothing. A *manager* round sits inside a loop whose next tick is a scheduled wakeup, so a modal there stalls its own schedule — which is why that tier posts to the attention board instead (`commands/steps/manager-gates.md`) and why this is the one place the modal shape is correct.
 
 ## Rules

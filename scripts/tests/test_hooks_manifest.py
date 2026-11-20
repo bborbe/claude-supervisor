@@ -50,6 +50,34 @@ class HooksManifestTest(unittest.TestCase):
                     return args[-1]
         return None
 
+    def test_permission_request_runs_the_go_hook_and_not_a_poller(self):
+        """The permission relay is the Go hook, and the poll it replaced must not come back.
+
+        Every other test in this file reads only the state script, so reverting this
+        command to a `python3` poller would leave the whole suite green while restoring
+        the per-session poll the port removed — the defect class this file exists for.
+        """
+        groups = self.hooks.get("PermissionRequest", [])
+        self.assertTrue(groups, "the PermissionRequest hook group is gone")
+        commands = [h.get("command", "") for g in groups for h in g.get("hooks", [])]
+        self.assertEqual(
+            len(commands), 1, f"expected exactly one PermissionRequest command, got {commands}"
+        )
+        cmd = commands[0]
+        self.assertIn(
+            "attention-controller-permission-answer-hook",
+            cmd,
+            f"the permission relay must run the Go hook, got: {cmd}",
+        )
+        # A python poller, or any other script path, is the thing that was removed.
+        self.assertNotIn("python3", cmd, f"the permission relay must not be a python poll: {cmd}")
+        self.assertNotIn(".py", cmd, f"the permission relay must not name a script: {cmd}")
+        # Fail-open: with no binary installed the prompt must still reach the operator,
+        # so the shell branch has to exit 0 rather than block or deny.
+        self.assertIn(
+            "exit 0", cmd, f"the permission relay must fail open when the binary is absent: {cmd}"
+        )
+
     def test_every_event_maps_to_its_intended_state(self):
         for event, expected in EXPECTED.items():
             self.assertEqual(
