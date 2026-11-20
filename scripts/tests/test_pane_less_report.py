@@ -8,6 +8,7 @@ could not pass them.
 import importlib.util
 import io
 import json
+import re
 import os
 import tempfile
 import unittest
@@ -88,14 +89,17 @@ class PaneLessReport(unittest.TestCase):
 
 
 class Wiring(unittest.TestCase):
-    """SC3's wiring half: the sweep render step must actually invoke the producer.
+    """SC3's wiring half: the sweep render step must actually INVOKE the producer.
 
-    A producer nothing calls passes every behavioural test and changes nothing — the
-    condition it reports would still depend on a model noticing the manager's own
-    `↪️ no branch — no pane` prose. The caller is asserted directly against the step files.
+    ⚠️ **A bare substring is not the assertion.** The filename appearing in prose or a
+    comment would satisfy a text match while the render never runs the script, so the
+    command is extracted from its backticked span and required to carry its two flags. A
+    producer nothing calls passes every behavioural test and changes nothing — the condition
+    would still depend on a model noticing the manager's own `↪️ no branch — no pane` prose.
     """
 
     STEPS = ("goal-sweep.md", "topic-sweep.md")
+    INVOCATION = re.compile(r"`(python3 [^`]*pane-less-report\.py[^`]*)`")
 
     def test_the_sweep_render_steps_invoke_the_producer(self):
         root = os.path.dirname(os.path.dirname(HERE))
@@ -103,7 +107,10 @@ class Wiring(unittest.TestCase):
             path = os.path.join(root, "commands", "steps", name)
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-            self.assertIn("pane-less-report.py", text, name)
+            found = self.INVOCATION.findall(text)
+            self.assertTrue(found, "%s never invokes the producer" % name)
+            self.assertIn("--transcript", found[0], name)
+            self.assertIn("--state-dir", found[0], name)
 
 
 if __name__ == "__main__":
