@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a `role: human` row resolves like a worker on the resume path too.** `scripts/restart-worker.py`'s `_human_launcher` is removed (operator ruling 2026-11-20), so `resolve_launcher` no longer sends a human row to the `-claude` sibling or `manager_launcher` — the worker chain (task `launcher:` → `worker_launcher` → `claude_script`) applies. `server/spawn-cwd.mjs`'s `applyHumanLauncherRule` becomes a pass-through shim because the live spawn path is the Go `claude-wrapper` daemon. Docs: matrix Rule 4, `docs/restart-worker.md`, `docs/fleet-surface.md`. Change set: `scripts/restart-worker.py`, `scripts/tests/test_restart_worker.py`, `server/spawn-cwd.mjs`, `server/spawn-cwd.test.mjs`, `docs/role-mode-matrix.md`, `docs/restart-worker.md`, `docs/fleet-surface.md`, `CHANGELOG.md`.
+
 ## v0.359.1
 
 - docs: **`llms.txt` names the Go hook instead of the retired Python poller.** The tab-worker paragraph still told a reader that the plugin's `PermissionRequest` hook is `scripts/permission-answer-poll.py`, a file the entry below deletes — so the one doc a fresh agent reads first pointed at a path that no longer exists. It now names `attention-controller-permission-answer-hook` and the `make install` that places it. Found by the PR review of the deletion rather than by the deletion's own grep, because SC5's pattern covers `commands/`, `agents/`, `scripts/` and the hook manifest but not `llms.txt`.

@@ -438,36 +438,24 @@ class ResolveLauncher(unittest.TestCase):
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
 
-    def test_a_human_row_takes_the_claude_sibling_over_the_worker_default(self):
-        """Operator ruling 2026-11-06 / matrix Rule 4: a human row is not a delegate."""
+    def test_a_human_row_takes_the_worker_default(self):
+        """Operator ruling 2026-11-20: a human row resolves like a worker, never the
+        `-claude` sibling (which put routine operator rows on Opus 5.5)."""
         self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
         self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
-        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
 
-    def test_the_human_sibling_sits_ahead_of_a_configured_manager_launcher(self):
-        """Both private-personal and seibert-brogrammers point `manager_launcher` at `-deepseek`;
-        taking it first would leave the human row on the worker model while reporting success."""
+    def test_a_human_row_ignores_the_manager_launcher(self):
+        """The manager chain is for managers only; a human row never reaches it."""
         self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
                        manager_launcher=os.path.join(self.scripts, "cc-private-glm"))
         self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
-        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
 
-    def test_the_human_rule_falls_through_to_the_manager_default_without_a_sibling(self):
-        os.remove(os.path.join(self.scripts, "cc-private-claude"))
-        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
-                       manager_launcher="cc-private-glm")
-        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
-        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
-        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "manager-default"))
-
-    def test_the_human_rule_ends_on_the_vault_claude_script_never_the_worker_default(self):
-        """Matrix Rule 4's last rung. A vault with a `worker_launcher` but no `-claude`
-        sibling and no `manager_launcher` must still open the row on `claude_script` —
-        returning the worker default here puts a human row on `-deepseek`."""
-        os.remove(os.path.join(self.scripts, "cc-private-claude"))
-        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+    def test_a_human_row_ends_on_the_vault_claude_script_without_a_worker_default(self):
+        """No `worker_launcher` configured: the worker chain's last rung is `claude_script`."""
         self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
