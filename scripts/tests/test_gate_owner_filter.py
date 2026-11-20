@@ -3085,5 +3085,42 @@ class TheFeedIsReadFromTheServiceNotSpawned(unittest.TestCase):
         self.assertNotIn("LIVENESS", result.stderr)
 
 
+class TheReadBoundIsPinnedToTheMeasurement(unittest.TestCase):
+    """The bound is a measured number, and these are the two ways it goes wrong.
+
+    ⚠️ A plain `== 5.0` assertion would be a change detector: it fails on every
+    legitimate re-measurement and passes on any value someone typed. What is
+    actually load-bearing is the FLOOR and the CEILING, both derived from
+    properties outside this file.
+    """
+
+    def test_the_bound_clears_the_boards_own_slowest_internal_step(self):
+        """A bound below the board's internal 3 s pane listing refuses a healthy read.
+
+        `wezterm cli list` is bounded at 3 s inside attention-controller
+        (`paneListingTimeout`). A client bound under it converts the server's
+        designed degraded answer — a feed that returns with `sources.panes:
+        "failed"` — into a client-side refusal, losing the gates that read did
+        carry. Measured 2026-11-20: p95 0.63-0.65 s, burst peak 1.17 s, so 3 s is
+        the floor and 5 s leaves 2 s for the store, provenance and serialisation.
+        """
+        self.assertGreater(gf.WHO_NEEDS_ME_TIMEOUT_SECONDS, 3.0)
+
+    def test_the_bound_never_creeps_back_to_the_unmeasured_ceiling(self):
+        """10.0 s was inherited, not derived — the change exists to stop that.
+
+        A later re-measurement may move the number; it may not restore the
+        arbitrary ceiling that let a ten-second stall sit in front of every poll.
+        """
+        self.assertLess(gf.WHO_NEEDS_ME_TIMEOUT_SECONDS, 10.0)
+
+    def test_the_bound_is_the_default_the_read_uses(self):
+        """Pinning the constant is worthless if the call site keeps its own literal."""
+        # `(endpoint=None, timeout=…)` — the timeout is the SECOND default.
+        default = gf.endpoint_snapshot.__defaults__
+        self.assertIsNotNone(default, "endpoint_snapshot lost its timeout default")
+        self.assertEqual(default[1], gf.WHO_NEEDS_ME_TIMEOUT_SECONDS)
+
+
 if __name__ == "__main__":
     unittest.main()

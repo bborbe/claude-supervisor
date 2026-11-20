@@ -349,6 +349,25 @@ REPLAY_MARK = "⟳replay"
 # flag.
 WHO_NEEDS_ME_PATH = "/api/1.0/who-needs-me"
 
+#: The bound on ONE `/api/1.0/who-needs-me` read, pinned to a MEASUREMENT rather
+#: than inherited. It was 10.0 s, a number derived from nothing.
+#:
+#: Measured 2026-11-20 on the live board at the fleet's own pinned load
+#: (concurrency 4, 20 calls) after attention-controller v0.107.3 fixed the
+#: transcript index: **p50 0.45 / 0.48 s, p95 0.63 / 0.65 s, max 0.73 s** over two
+#: samples, with a two-way burst peaking at 1.17 s. Before that fix the same load
+#: measured p95 10.7-11.6 s, which is why the ceiling mattered at all.
+#:
+#: ⚠️ **Not p95 + 20 % (~0.78 s).** The board's own slowest internal dependency is
+#: `wezterm cli list`, bounded at 3 s INSIDE the service (`paneListingTimeout`); a
+#: client bound below that turns the server's designed degraded answer — a feed
+#: that still returns, with `sources.panes: "failed"` — into a client-side refusal,
+#: losing the gates that read did carry. 5 s is that 3 s internal bound plus 2 s
+#: for the store read, the provenance join and serialisation, and still sits ~4x
+#: above the measured burst peak. It halves the old 10 s, so a genuinely wedged
+#: board is refused in half the time rather than after a ten-second stall.
+WHO_NEEDS_ME_TIMEOUT_SECONDS = 5.0
+
 #: The kinds `who-needs-me.py`'s `needs-you` section carries (`is_open_gate`:
 #: `kind in ("permission", "question")`). The endpoint returns open gates only, so
 #: this is belt-and-braces rather than the primary selection — but a section that
@@ -1718,7 +1737,7 @@ def log_emissions(rows, items, scope, self_id, now=None, root=None):
         return exc
 
 
-def endpoint_snapshot(endpoint=None, timeout=10.0):
+def endpoint_snapshot(endpoint=None, timeout=WHO_NEEDS_ME_TIMEOUT_SECONDS):
     """`(rows, records, error)` — the feed and its headless rows from ONE service read.
 
     `rows` is the `(pane, replayed)` shape `feed_rows` returns, so every hop
