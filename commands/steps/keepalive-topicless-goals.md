@@ -71,7 +71,7 @@ is the wrapper's flagged reopen tick's job (`claude-wrapper`'s `flagged-tick`), 
   design.
 - On exit 2, write `--leg topicless-goal-managers --not-run "<reason>"` instead — key
   granularity, so the other keep-alive readings stay intact.
-- The line's format has its single home in `commands/steps/output-shape.md` item 13.
+- The line's format has its single home in `commands/steps/output-shape.md` item 12.
 
 Report `topicless-goal-managers=<n>|not-run` on the actor's hand-back, and count this
 procedure's acts into its `restarted` / `resumed` / `crash-loop` / `cannot-tell` totals.

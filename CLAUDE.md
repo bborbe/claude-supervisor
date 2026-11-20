@@ -190,7 +190,7 @@ scripts/voice-ask-pairing.py                     flags question `say`s with no `
 scripts/manager-predispatch.py                   the pre-dispatch gate both manager commands run first (state: ~/.claude/state/manager-predispatch/)
 scripts/plugin-version-census.py                 the fleet reading of the plugin-install probe — who is stale, and `--reload` the lever that moves them
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
-scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
+scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store — successor-by-subject, else the tick session
 scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns, excludes gates the vault says belong to another goal, and excludes a `role: human` row (the operator's own workspace, never a manager's to route) (state: ~/.claude/state/gate-feed/<self-session-id>.json)
 scripts/session-scope.py                         that arm's durable ownership input — which goal a session belongs to, from the vault's page stamps (not a live store)
 commands/read-guides.md                          load every guide in docs/

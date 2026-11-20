@@ -97,7 +97,7 @@ class TestRoundSplit(unittest.TestCase):
         self.assertIn("only-dispatch", done.stderr)
 
     def test_a_shrunk_router_range_fails(self):
-        self.rewrite(self.router(), "rows 0, 2–10, 12", "rows 0, 2–6, 12")
+        self.rewrite(self.router(), "rows 0, 2–3, 5–10, 12", "rows 0, 2–3, 5–6, 12")
         done = run(self.root)
         self.assertEqual(done.returncode, 1)
         self.assertIn("7", done.stderr)
@@ -105,9 +105,9 @@ class TestRoundSplit(unittest.TestCase):
     def test_a_row_assigned_to_neither_session_fails(self):
         # Pairwise agreement is not coverage: drop a row from the router's list AND both
         # agent tables and every pairwise comparison still holds.
-        self.rewrite(self.router(), "rows 0, 2–10, 12, 15, 16b, 18, 20", "rows 0, 2–10, 12, 15, 16b, 18")
+        self.rewrite(self.router(), "rows 0, 2–3, 5–10, 12, 15, 16b, 18, 20", "rows 0, 2–3, 5–10, 12, 15, 16b, 18")
         self.rewrite(self.agent(), "| 20 | Render the output shape — write `<round>.render`, never print, never ask | `steps/output-shape.md` |\n", "")
-        self.rewrite(self.dispatch(), "runs rows 0, 2–10, 12, 15, 16b, 18 and 20", "runs rows 0, 2–10, 12, 15, 16b and 18")
+        self.rewrite(self.dispatch(), "runs rows 0, 2–3, 5–10, 12, 15, 16b, 18 and 20", "runs rows 0, 2–3, 5–10, 12, 15, 16b and 18")
         done = run(self.root)
         self.assertEqual(done.returncode, 1)
         self.assertIn("NEITHER", done.stderr)
