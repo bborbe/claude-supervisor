@@ -18,7 +18,7 @@ The first line of stdout is the verdict, one token:
 
   jump          a live session — hand the operator the pane
   resume        the recorded id is ABSENT; resume it with `/supervisor:open --task`
-  crash-loop    the resume cap is spent; stop resuming and escalate once
+  crash-loop    the resume cap is spent; stop resuming and hand the row to the fleet round
   cannot-tell   the probe could not decide, or the task records no id; report, never act
 
 ⚠️ **`/supervisor:open --task` resumes the recorded id in place** (`docs/session-tiers.md`
@@ -35,8 +35,13 @@ instrument does not read `LIVE`, so a resume that never landed does not arm the 
 its own retry. Store: `~/.claude/state/manager-resumes/<vault>/worker--<slug>.json`, beside
 the manager caps and deliberately not on the task page.
 
-⚠️ **A crash loop posts ONE attention card** (`dedup_key` `crash-loop:<slug>`), so a re-run of
-the fleet leg does not post a second.
+⚠️ **A crash loop posts an attention card only when no declared goal resolves**
+(`dedup_key` `crash-loop:<slug>`), so a re-run of the fleet leg does not post a second. A task
+with a resolvable goal page is manager-owned even when that goal's manager is dead right now —
+the fleet round restarts or resumes it — so the operator is never asked to decide a resume the
+manager tier is obliged to make. The `crash-loop:` row in this leg's hand-back is the channel
+for that case; the card exists only for a task no manager can own — no `goals:` key, or every
+declared goal page unopenable.
 """
 
 from __future__ import annotations
@@ -456,7 +461,12 @@ def main(argv: list[str]) -> int:
     if spent >= RESUME_CAP:
         print("crash-loop")
         print(f"⚠️ WORKER CRASH-LOOP: {a.task} — {spent} resumes with no progress; stop resuming")
-        post_card(a.task, spent)
+        # A resolvable goal means a manager tier owns the row even when that goal's manager is
+        # dead right now: the fleet round restarts or resumes it, and the `crash-loop:` row in
+        # this leg's hand-back is the channel. Only a task no manager can own — no `goals:`
+        # key, or every declared goal page unopenable — earns an operator card.
+        if not owners:
+            post_card(a.task, spent)
         return 1
     print("resume")
     print(f'session {sid} is ABSENT; resume with /supervisor:open --task "{a.task}" '
