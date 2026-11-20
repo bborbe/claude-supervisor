@@ -11,6 +11,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: **the fleet round's open leg is gone — the wrapper's flagged tick now opens goal and topic rows.** Row 16 and `commands/steps/open.md` are removed, `agents/fleet-open-actor.md` is retired, and its `check-open-leg-raw-name` guard is deleted; the acting-legs carve-out and `manager-reap.md`'s `When:` now read `every tick`. The wrapper (`bborbe/claude-wrapper#126`, deployed) opens a never-opened goal/topic whose manager-chain probe reads no live manager, so the model-dispatched leg this replaces is no longer the only opener. Adopt orphans (row 4) stays until the wrapper's adopt job is wired.
+## v0.356.3
+
+- fix: **the exit-observer keeper records a routine re-arm on disk and cards only on failure, so a clean death no longer reaches the attention board.** `scripts/exit-observer-keeper.py` posted an `ack` card for every manager-pane exit-observer death before re-arming; a death that re-arms cleanly needs no operator action, so it now appends a line to `keeper-rearms.jsonl` before the re-arm and files a card only when the record cannot be written or the re-arm fails — the card is the fallback trace, never the routine one. ⚠️ **The ordering is the point:** the record is written BEFORE the re-arm, because a re-armed pane reads `covered` again and a record written after it would be the only sign the writer ever died. Supersedes the "card is filed before the re-arm" rule (operator decision 2026-11-19: *"is useless … dont put this on the attention board"*); the 2026-11-06 `fleet-keeper` no-kill pin is unrelated and stays. Change set: `scripts/exit-observer-keeper.py`, `scripts/tests/test_exit_observer_keeper.py`, `CHANGELOG.md`.
 
 ## v0.356.2
 
