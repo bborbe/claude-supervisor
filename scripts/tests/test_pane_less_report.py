@@ -8,11 +8,11 @@ could not pass them.
 import importlib.util
 import io
 import json
-import re
 import os
+import re
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "pane-less-report.py")
@@ -32,23 +32,16 @@ class PaneLessReport(unittest.TestCase):
         self.m = load()
         self.tmp = tempfile.TemporaryDirectory()
         self.state = os.path.join(self.tmp.name, "state")
-        self.transcript = os.path.join(self.tmp.name, "%s.jsonl" % SID)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def round(self, pane=None):
-        """One round's transcript; `pane` non-empty means the manager has a pane."""
-        rec = {"kind": "round"}
-        if pane is not None:
-            rec["pane"] = pane
-        with open(self.transcript, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec) + "\n")
-
-    def run_round(self):
+    def run_round(self, pane=""):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = self.m.main(["--transcript", self.transcript, "--state-dir", self.state])
+            rc = self.m.main(
+                ["--session", SID, "--pane", pane, "--state-dir", self.state]
+            )
         return rc, out.getvalue()
 
     def count(self):
@@ -56,13 +49,10 @@ class PaneLessReport(unittest.TestCase):
             return json.load(fh)["count"]
 
     def test_the_state_file_is_written_on_the_first_round(self):
-        # SC3's probe: one invocation against the fixture leaves `count: 1`.
-        self.round()
         self.run_round()
         self.assertEqual(self.count(), 1)
 
     def test_the_condition_fires_on_round_three_and_not_before(self):
-        self.round()
         _, first = self.run_round()
         _, second = self.run_round()
         _, third = self.run_round()
@@ -74,18 +64,37 @@ class PaneLessReport(unittest.TestCase):
     def test_a_pane_resets_the_counter(self):
         # The control: a manager that acquires a pane is reachable again, so the run ends
         # rather than continuing to accumulate toward the threshold.
-        self.round()
         self.run_round()
         self.run_round()
-        self.round(pane="204")
-        self.run_round()
+        self.run_round(pane="204")
         self.assertEqual(self.count(), 0)
 
-    def test_a_pane_carrying_transcript_never_emits(self):
+    def test_a_pane_carrying_round_never_emits(self):
         for _ in range(5):
-            self.round(pane="204")
-            _, out = self.run_round()
+            _, out = self.run_round(pane="204")
             self.assertNotIn("pane-less manager", out)
+
+    def test_a_custom_threshold_is_honoured(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.m.main(["--session", SID, "--pane", "", "--state-dir", self.state,
+                         "--threshold", "1"])
+        self.assertIn("pane-less manager %s" % SID, out.getvalue())
+
+    def test_a_malformed_state_file_reads_as_zero(self):
+        # A corrupt or unreadable counter must not crash the round, and must not be read as
+        # a high count that fires the condition early.
+        os.makedirs(self.state, exist_ok=True)
+        with open(os.path.join(self.state, "%s.json" % SID), "w", encoding="utf-8") as fh:
+            fh.write("not json")
+        self.run_round()
+        self.assertEqual(self.count(), 1)
+
+    def test_an_empty_session_is_a_usage_error(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.main(["--session", "", "--state-dir", self.state])
+        self.assertEqual(rc, 2)
 
 
 class Wiring(unittest.TestCase):
@@ -109,8 +118,8 @@ class Wiring(unittest.TestCase):
                 text = fh.read()
             found = self.INVOCATION.findall(text)
             self.assertTrue(found, "%s never invokes the producer" % name)
-            self.assertIn("--transcript", found[0], name)
-            self.assertIn("--state-dir", found[0], name)
+            self.assertIn("--session", found[0], name)
+            self.assertIn("--pane", found[0], name)
 
 
 if __name__ == "__main__":

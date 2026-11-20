@@ -67,8 +67,7 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
    for the frame. **Never hand-draw the box.** Say so in the tick when the fallback fires: a
    table rendered through it is one whose delegation failed.
    **Then run the pane-less report for this round's subject session** —
-   `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/pane-less-report.py --transcript <this round's
-   transcript> --state-dir "$HOME/.claude/state/pane-less"` — and print its line verbatim
+   `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/pane-less-report.py --session <sid> --pane "<the pane this row resolved, empty when none>" --state-dir "$HOME/.claude/state/pane-less"` — and print its line verbatim
    when it emits one. ⚠️ **Deterministic on purpose:** the `↪️ no branch — no pane` line is
    the manager's own prose, so a pane-less manager repeats it every round with nothing
    turning it into an operator-visible condition. The script resets on a round that carries
