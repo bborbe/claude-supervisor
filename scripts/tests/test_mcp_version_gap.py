@@ -24,6 +24,7 @@ import pathlib
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "mcp-version-gap.py"
 spec = importlib.util.spec_from_file_location("mcp_version_gap", SCRIPT)
@@ -252,6 +253,13 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("UNREAD", out.getvalue())
 
+    def test_a_missing_dump_file_is_unread_not_a_traceback(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = gap.main(["--build-info", "/nonexistent/mcp-gap-dump.txt", "--line"])
+        self.assertEqual(code, 2)
+        self.assertIn("UNREAD", out.getvalue())
+
     def test_json_carries_the_reading_fields(self):
         build = self._write(LIVE_BUILD_INFO, ".txt")
         releases = self._write(RELEASES_JSON, ".json")
@@ -286,6 +294,89 @@ class PostGuardTest(unittest.TestCase):
         item_id, error = gap.post(result)
         self.assertIsNone(item_id)
         self.assertIn("only a divergence", error)
+
+
+class ReleaseOrderingTest(unittest.TestCase):
+    """`gh release list` is creation-ordered, so the latest is max-by-semver, never the head."""
+
+    def test_a_backport_cut_after_a_newer_minor_is_not_read_as_latest(self):
+        # Creation order puts the backport first; the binary on the newer minor still agrees.
+        reading = gap.compare("v0.48.0", ["v0.47.9", "v0.48.0"])
+        self.assertEqual(reading["state"], gap.AGREEMENT)
+        self.assertEqual(reading["released"], "v0.48.0")
+
+    def test_a_backport_binary_diverges_against_the_newer_minor(self):
+        reading = gap.compare("v0.47.9", ["v0.47.9", "v0.48.0"])
+        self.assertEqual(reading["state"], gap.DIVERGENT)
+        self.assertEqual(reading["released"], "v0.48.0")
+        self.assertEqual(reading["gap"], 1)
+
+
+class GapWindowTest(unittest.TestCase):
+    """A gap is countable only inside the fetched window; outside it is null, never 0."""
+
+    def test_a_base_newer_than_every_fetched_release_is_ahead_with_no_gap(self):
+        reading = gap.compare("v0.50.0", ["v0.48.0", "v0.47.0"])
+        self.assertEqual(reading["state"], gap.DIVERGENT)
+        self.assertTrue(reading.get("ahead"))
+        self.assertIsNone(reading["gap"])
+        self.assertIn("newer than every fetched release", gap.render(reading))
+
+    def test_a_base_older_than_the_window_has_a_null_gap_and_is_not_ahead(self):
+        reading = gap.compare("v0.1.0", ["v0.48.0", "v0.47.0"])
+        self.assertEqual(reading["state"], gap.DIVERGENT)
+        self.assertIsNone(reading["gap"])
+        self.assertFalse(reading.get("ahead"))
+
+
+class InvalidOverrideTest(unittest.TestCase):
+    def test_a_non_semver_fed_tag_is_named_rather_than_silently_dropped(self):
+        reading = gap.compare("v0.48.0", ["foo"])
+        self.assertEqual(reading["state"], gap.UNREAD)
+        self.assertIn("invalid release tag", reading["error"])
+        self.assertIn("foo", reading["error"])
+
+
+class PidSkipsLsofTest(unittest.TestCase):
+    def test_pid_alone_skips_the_port_lookup(self):
+        # The listener read is empty on purpose: with `--pid` given, lsof must not be consulted.
+        result = gap.probe(
+            pid=13094,
+            build_info_dump=LIVE_BUILD_INFO,
+            releases_dump=RELEASES_JSON,
+            lsof="COMMAND PID USER\n",
+            ps="/Users/bborbe/.local/bin/claude-wrapper\n",
+        )
+        self.assertEqual(result["state"], gap.DIVERGENT)
+        self.assertEqual(result["pid"], 13094)
+        self.assertEqual(result["binary"], "/Users/bborbe/.local/bin/claude-wrapper")
+
+
+class PostSuccessTest(unittest.TestCase):
+    """The successful post path: one card, a fleet-wide producer id, the item id returned."""
+
+    def test_a_measured_divergence_posts_one_card_with_the_fixed_producer_id(self):
+        result = gap.compare("v0.45.2-0.20261120032107-c84c80e5ee16",
+                             ["v0.48.0", "v0.47.0"])
+        captured = {}
+
+        class Proc:
+            returncode = 0
+            stdout = "ITEM_ID: abc123\n"
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return Proc()
+
+        with mock.patch.object(gap.subprocess, "run", fake_run):
+            item_id, error = gap.post(result)
+
+        self.assertEqual(item_id, "abc123")
+        self.assertIsNone(error)
+        cmd = captured["cmd"]
+        self.assertIn("--producer-id", cmd)
+        self.assertEqual(cmd[cmd.index("--producer-id") + 1], "mcp-version-gap")
 
 
 if __name__ == "__main__":

@@ -33,13 +33,22 @@ fed value is never mistaken for a measured one.
 strictly newer than the running version's base — so a pseudo-version from `v0.45.2` against a
 list topping at `v0.48.0` reads `gap: 3`, the same number a human gets counting the tags. When
 the base is not in the fetched window the gap is `null` and both versions are still quoted: an
-unknown distance is not an agreement.
+unknown distance is not an agreement. A running base **newer than every fetched release** is
+the same `null` gap with `ahead: true` — a build ahead of the release list, not a measured
+distance behind it.
+
+⚠️ **The latest release is the highest tag by semver, never the list's first row.** `gh release
+list` orders by creation date, so a backport cut on an older minor after a newer minor appears
+first. Taking the head would read a binary on the newer minor as `divergent` and a binary on
+the backport as `agreement` — a false agreement, the silent direction this probe exists to
+close.
 
   (default)     human report — a named state, both versions, and the gap
   --line        ONE line, for a round's own render (`commands/steps/round-readings.md` step 3)
   --json        the same reading as JSON, for `scripts/round-readings.py` and its payload
   --post        post an `ack` card on the attention board when the state is `divergent`,
-                deduped on the version pair so one divergence is one card, not one per tick
+                deduped fleet-wide on the version pair so one divergence is one card, not one
+                per tick and not one per manager tier
 
 Diagnostics, all of which still name the binary they resolved: `--pid`, `--binary`,
 `--build-info <file>` (a `go version -m` dump), `--releases-json <file>` (a `gh release list`
@@ -276,7 +285,10 @@ def compare(running, releases):
     commit no tag points at — which is the defect this exists to name.
     """
     tags = [t for t in (releases or []) if _semver(t)]
-    latest = tags[0] if tags else None
+    # ⚠️ max by semver, never the list's head: `gh release list` orders by creation date, so a
+    # backport cut on an older minor after a newer minor appears first. Taking the head would
+    # read a binary on the backport as agreement while a newer release exists.
+    latest = max(tags, key=_semver) if tags else None
     kind, base = classify_version(running)
     reading = {
         "state": UNREAD,
@@ -288,7 +300,17 @@ def compare(running, releases):
         "releases_checked": len(tags),
     }
     if latest is None:
-        reading["error"] = "no released tag to compare against"
+        # A non-semver `--released-tag` is filtered out above; name it rather than reporting a
+        # bare "no released tag", so a typo'd override is not read as an empty release list.
+        invalid = [t for t in (releases or []) if t and not _semver(t)]
+        if invalid:
+            reading["error"] = (
+                "no released tag to compare against: invalid release tag(s) "
+                + ", ".join(invalid[:3])
+                + " (expected vX.Y.Z)"
+            )
+        else:
+            reading["error"] = "no released tag to compare against"
         return reading
     if running is None:
         reading["error"] = "no running version to compare"
@@ -300,11 +322,18 @@ def compare(running, releases):
         return reading
 
     reading["state"] = DIVERGENT
-    # The gap counts releases strictly newer than the version the running build derives from.
+    # The gap counts releases strictly newer than the version the running build derives from —
+    # but only when that base is inside the fetched window. Outside it the distance is unknown
+    # (the docstring's promise), and a base newer than every fetched release is "ahead", not
+    # "0 behind": counting unconditionally would render both as a zero gap.
     if base is not None:
         base_key = _semver(base)
         if base_key is not None:
-            reading["gap"] = sum(1 for tag in tags if _semver(tag) > base_key)
+            keys = [_semver(tag) for tag in tags]
+            if base_key in keys:
+                reading["gap"] = sum(1 for key in keys if key > base_key)
+            elif base_key > max(keys):
+                reading["ahead"] = True
     return reading
 
 
@@ -336,7 +365,10 @@ def probe(port=DEFAULT_PORT, repo=DEFAULT_REPO, pid=None, binary=None,
         result["pid"] = pid
         result["binary"] = binary
     else:
-        if binary is None:
+        # ⚠️ `--pid` skips `lsof`, as its help text says. The port lookup is how the pid is
+        # *found*; once a pid is named there is nothing left for it to answer, and requiring it
+        # anyway would make the flag unusable on a host without lsof — the case it exists for.
+        if binary is None and pid is None:
             pids, error = resolve_pid(port, lsof=lsof)
             if error:
                 result.update(compare(None, None))
@@ -344,11 +376,13 @@ def probe(port=DEFAULT_PORT, repo=DEFAULT_REPO, pid=None, binary=None,
                 result["error"] = error
                 return result
             result["pids"] = pids
-            result["pid"] = pid or pids[0]
+            result["pid"] = pids[0]
+        else:
+            result["pid"] = pid
+        if binary is None:
             path, error = resolve_binary(result["pid"], ps=ps)
         else:
             path, error = binary, None
-            result["pid"] = pid
         if error:
             result.update(compare(None, None))
             result["state"] = UNREAD
@@ -402,8 +436,12 @@ def render(result):
         lines.append("  gap:      0")
     elif result["state"] == DIVERGENT:
         gap = result.get("gap")
-        lines.append(f"  gap:      {gap} release(s) behind" if gap is not None
-                     else "  gap:      unknown — the running base is outside the fetched window")
+        if gap is not None:
+            lines.append(f"  gap:      {gap} release(s) behind")
+        elif result.get("ahead"):
+            lines.append("  gap:      unknown — the running base is newer than every fetched release")
+        else:
+            lines.append("  gap:      unknown — the running base is outside the fetched window")
     else:
         lines.append(f"  why:      {result.get('error') or 'the reading could not be taken'}")
     for side in sorted(result.get("overrides") or {}):
@@ -424,7 +462,12 @@ def render_line(result):
         return f"MCP server {running} · released {released} · agreement, gap 0"
     if result["state"] == DIVERGENT:
         gap = result.get("gap")
-        gap_text = f"gap {gap}" if gap is not None else "gap unknown"
+        if gap is not None:
+            gap_text = f"gap {gap}"
+        elif result.get("ahead"):
+            gap_text = "gap unknown (ahead of every fetched release)"
+        else:
+            gap_text = "gap unknown"
         return f"MCP server {running} · released {released} · DIVERGENT, {gap_text}"
     return f"MCP server {running} · released {released} · UNREAD — {result.get('error')}"
 
@@ -432,7 +475,12 @@ def render_line(result):
 def card_payload(result):
     """The card's text: what runs, what was released, and how far apart they are."""
     gap = result.get("gap")
-    gap_text = f"{gap} release(s) behind" if gap is not None else "distance unknown"
+    if gap is not None:
+        gap_text = f"{gap} release(s) behind"
+    elif result.get("ahead"):
+        gap_text = "newer than every fetched release"
+    else:
+        gap_text = "distance unknown"
     return (
         f"MCP server runs {result.get('running')} "
         f"({result.get('running_kind')}-version, commit "
@@ -445,9 +493,14 @@ def card_payload(result):
 def post(result, producer_kind="manager"):
     """Post one `ack` card for a divergence. Returns (item_id, error).
 
-    ⚠️ **Deduped on the version pair, not on a constant.** The store suppresses a duplicate
-    push on the same `producer_id` + `dedup_key`, so a per-tick caller posts one card per
-    divergence; a *new* divergence (either side moved) is a new key and does reach the board.
+    ⚠️ **Deduped on the version pair, fleet-wide.** The store suppresses a duplicate push on
+    `producer_id` + `dedup_key`, and `attention-ask.py` defaults `producer_id` to the posting
+    session — but the round that runs this probe is taken by *every* manager tier (goal-drive,
+    topic-drive, fleet-drive), so a defaulted id would give each ticker its own producer and
+    post one card per tier for the same divergence. The fixed `--producer-id` below is what
+    makes "one divergence is one card" true across the fleet rather than per session. The card
+    is an `ack` nobody polls, and `attention-ask.py` keeps its liveness ref at `owner:<id>`
+    (unconditionally live), so a synthetic producer id is safe from pruning.
     """
     if result.get("state") != DIVERGENT:
         return None, "only a divergence is posted"
@@ -465,6 +518,10 @@ def post(result, producer_kind="manager"):
         "--context", f"mcp-version-gap.py · {result.get('binary')}",
         "--mechanism", "ack",
         "--producer-kind", producer_kind,
+        # ⚠️ FIXED, so dedup spans the fleet rather than one session per tier — see the
+        # docstring. Without it, every manager tier that takes the round posts its own card
+        # for the same divergence.
+        "--producer-id", "mcp-version-gap",
         # Self-report, not enumerated by the store; `approve` is the rung the watcher's own
         # ack cards use (`docs/rebase-agent.md` § the board fields).
         "--interrupt-class", "approve",
@@ -490,6 +547,48 @@ def _read(path):
         return handle.read()
 
 
+def _unread_result(args, error):
+    """A reading that could not be taken at all — every field present, state `unread`."""
+    return {
+        "state": UNREAD,
+        "port": args.port,
+        "repo": args.repo,
+        "pid": args.pid,
+        "pids": [],
+        "binary": args.binary,
+        "module": None,
+        "revision": None,
+        "vcs_time": None,
+        "running": None,
+        "running_kind": "unknown",
+        "running_base": None,
+        "released": None,
+        "gap": None,
+        "releases_checked": 0,
+        "overrides": {},
+        "error": error,
+    }
+
+
+def _emit(result, args):
+    """Print the reading in the requested form and return its exit code."""
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.line:
+        print(render_line(result))
+        if result.get("card"):
+            print(f"CARD: {result['card']}")
+        elif result.get("card_error"):
+            print(f"CARD FAILED: {result['card_error']}", file=sys.stderr)
+    else:
+        print(render(result))
+        if result.get("card"):
+            print(f"  card:     {result['card']}")
+        elif result.get("card_error"):
+            print(f"  card:     FAILED — {result['card_error']}", file=sys.stderr)
+    return EXIT.get(result["state"], 2)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Does the MCP server's binary match a release?")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -507,13 +606,19 @@ def main(argv=None):
     parser.add_argument("--line", action="store_true", help="print ONE line for a round's render")
     parser.add_argument("--json", action="store_true", help="print the reading as JSON")
     parser.add_argument("--post", action="store_true",
-                        help="post an ack card on divergence (deduped on the version pair)")
+                        help="post an ack card on divergence (deduped fleet-wide on the version pair)")
     parser.add_argument("--producer-kind", default="manager",
                         choices=("session", "manager", "agent", "cron", "dark-factory"))
     args = parser.parse_args(argv)
 
-    build_info_dump = _read(args.build_info) if args.build_info else None
-    releases_dump = _read(args.releases_json) if args.releases_json else None
+    # ⚠️ A missing or unreadable dump is `unread` (exit 2), never a traceback. An escaping
+    # OSError prints a traceback and exits 1 — the DIVERGENT code — so a typo'd path would read
+    # as a divergence to any caller checking `$?`.
+    try:
+        build_info_dump = _read(args.build_info) if args.build_info else None
+        releases_dump = _read(args.releases_json) if args.releases_json else None
+    except OSError as error:
+        return _emit(_unread_result(args, f"could not read a dump file: {error}"), args)
 
     result = probe(
         port=args.port,
@@ -533,21 +638,7 @@ def main(argv=None):
         elif error and result["state"] == DIVERGENT:
             result["card_error"] = error
 
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-    elif args.line:
-        print(render_line(result))
-        if result.get("card"):
-            print(f"CARD: {result['card']}")
-        elif result.get("card_error"):
-            print(f"CARD FAILED: {result['card_error']}", file=sys.stderr)
-    else:
-        print(render(result))
-        if result.get("card"):
-            print(f"  card:     {result['card']}")
-        elif result.get("card_error"):
-            print(f"  card:     FAILED — {result['card_error']}", file=sys.stderr)
-    return EXIT.get(result["state"], 2)
+    return _emit(result, args)
 
 
 if __name__ == "__main__":

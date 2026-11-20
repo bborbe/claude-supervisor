@@ -236,7 +236,10 @@ directions this instrument exists to close.
 
 **Wiring:** `scripts/round-readings.py` carries the reading into the round's readings document
 under `mcp_server` (so the receipt names it), and `commands/steps/round-readings.md` step 3
-prints the `--line` form on every tick and posts one deduped `ack` card on a divergence.
+prints the `--line` form on every tick and posts one `ack` card on a divergence. The card is
+deduped **fleet-wide** on the version pair — the probe passes a fixed `--producer-id`, so every
+manager tier that takes the round (goal-drive, topic-drive, fleet-drive) resolves to the same
+store key and one divergence is one card rather than one per ticker.
 
 ## Spawn a worker
 
