@@ -291,6 +291,97 @@ def classify(rec, wnm, get=store_get):
     return "gate-held", closer
 
 
+def pid_for_session(sid):
+    """The `claude` process whose command line carries `--resume <sid>`, or `None`.
+
+    ⚠️ **Three processes match a resumed session** — the wrapper bash, the `cc-*` launcher,
+    and the `claude` process itself. Only the last is the session; handing a caller a wrapper
+    pid would point a restart at the wrong process. ⚠️ **Never invent a pid:** an
+    unresolvable session returns `None` and the report prints `unknown`.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        pid_txt, _, command = line.strip().partition(" ")
+        if "--resume" not in command:
+            continue
+        parts = command.split()
+        try:
+            idx = parts.index("--resume")
+        except ValueError:
+            continue
+        if idx + 1 >= len(parts) or parts[idx + 1].strip() != sid:
+            continue
+        if os.path.basename(parts[0]) == "claude":
+            try:
+                return int(pid_txt)
+            except ValueError:
+                return None
+    return None
+
+
+def cwd_from_transcript(sid):
+    """The `cwd` recorded in the session's first transcript line, or `""`.
+
+    ⚠️ **Not from the project directory name.** That name encodes `/` as `-` and is not
+    reversible — `private-personal` itself contains a `-` — so the record is the only
+    honest source.
+    """
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    projects = os.environ.get("PROJECTS_DIR") or os.path.join(config, "projects")
+    try:
+        project_dirs = [os.path.join(projects, d) for d in os.listdir(projects)]
+    except OSError:
+        return ""
+    for directory in project_dirs:
+        path = os.path.join(directory, "%s.jsonl" % sid)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    cwd = rec.get("cwd")
+                    if isinstance(cwd, str) and cwd:
+                        return cwd
+                    break
+        except OSError:
+            continue
+    return ""
+
+
+def unregistered_report(sid, who_needs_me):
+    """A classified report for a live session with no registry entry, or `None`.
+
+    ⚠️ **Returns `None` unless the session is provably live**, so an unresolvable session
+    keeps today's `unknown-session-id` refusal. This verb gates a restart: a false LIVE
+    would authorise one onto a dead session, which is the direction the whole guard exists
+    to keep shut.
+    """
+    age = who_needs_me.session_transcript_age(sid)
+    if age is None or age == float("inf") or age > who_needs_me.LIVE_WINDOW:
+        return None
+    pid = pid_for_session(sid)
+    cwd = cwd_from_transcript(sid)
+    print("\n".join([
+        "🔄 restart-precheck · session %s · pid %s · (no registry entry)"
+        % (sid[:8], pid if pid is not None else "unknown"),
+        "   registry: UNREGISTERED",
+        "   liveness: LIVE (transcript written %ds ago, LIVE_WINDOW %ds)"
+        % (int(age), who_needs_me.LIVE_WINDOW),
+        "   cwd: %s" % (cwd or "unknown"),
+        "   classification: unregistered-live",
+    ]))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Read-only pre-kill probe for /supervisor:restart.",
@@ -315,6 +406,13 @@ def main():
     if path == "ambiguous":
         return refuse("ambiguous-pid", f"{len(rec)} registry entries claim session {sid}")
     if rec is None:
+        # A live session with NO registry entry is unaddressable, not unknown — every
+        # registry-keyed verb refuses it while the heartbeat reader answers LIVE (measured
+        # 2026-11-19, session 616a52dd). Report what can be proven; fall through to the
+        # refusal when it cannot be proven live.
+        report = unregistered_report(sid, who_needs_me)
+        if report is not None:
+            return report
         return refuse("unknown-session-id", f"no registry entry carries session id {sid}")
 
     cwd = (rec.get("cwd") or "").strip()
