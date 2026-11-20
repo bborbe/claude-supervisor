@@ -66,6 +66,14 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
    `python3 .../scripts/box-table.py` reading `${CLAUDE_PLUGIN_ROOT}/docs/sweep-output.md`
    for the frame. **Never hand-draw the box.** Say so in the tick when the fallback fires: a
    table rendered through it is one whose delegation failed.
+   **Then run the pane-less report for this round's subject session** —
+   `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/pane-less-report.py --transcript <this round's
+   transcript> --state-dir "$HOME/.claude/state/pane-less"` — and print its line verbatim
+   when it emits one. ⚠️ **Deterministic on purpose:** the `↪️ no branch — no pane` line is
+   the manager's own prose, so a pane-less manager repeats it every round with nothing
+   turning it into an operator-visible condition. The script resets on a round that carries
+   a pane and emits `pane-less manager <sid> — remedy: /supervisor:restart <sid>` at the
+   third consecutive pane-less round.
 
 6. **Record the sweep on the round's receipt — the leg's own payload, not a copy you wrote.**
 
