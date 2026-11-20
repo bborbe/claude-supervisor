@@ -48,18 +48,10 @@ check-spawn-keys:
 check-spawn-target:
 	@python3 scripts/check-spawn-target.py
 
-# The GOAL and TOPIC branches type their manager's start commands into the pane they just
-# spawned. Three regressions are silent: the operator-paste instruction returns, the wait
-# falls through instead of exiting, or a literal pane id replaces the just-spawned variable.
-
-# `/supervisor:open` is the operator's own open: it never refuses a goal or topic on its flag.
-# Automatic opens are flag-gated upstream (topic-keepalive, topic-spawn --goal); this pins both
-# halves, plus the manager ceiling a hand-run still obeys.
+# `/supervisor:open` is a thin caller of the wrapper's open endpoint. Fails if it regains a
+# spawn path of its own (the 2026-11-18 defect class) and fails if it loses the endpoint call.
 check-open-hand-run:
 	@python3 scripts/check-open-hand-run.py
-
-# A task whose owning subject has a live manager is held, and a held row is never silent:
-# pins the `⛔ HOLD — owner …` render, the same-run spawn-ledger leg, and the footer split.
 
 check-worker-target:
 	@python3 scripts/check-worker-target.py
@@ -117,6 +109,8 @@ check-handback-keys:
 check-handback-size:
 	@python3 scripts/check-handback-size.py
 
+# The round's hand-back must read the gate's exit code. Pins that the `check-handback-size.py`
+# invocation is not piped, captures `gate_rc=$?`, and is not deleted — an unread `$?` is silent.
 check-round-gate-exit-code:
 	@python3 scripts/check-round-gate-exit-code.py
 

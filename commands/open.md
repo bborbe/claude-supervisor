@@ -354,6 +354,14 @@ decide from the score alone.
 
 A held row is **not sent**. Report `⛔ NOT READY <score>/10 — <task>` with its gap bullets.
 
+⚠️ **One override, and it is the operator's own answer: in a `--flagged` batch a below-bar row
+opens anyway.** The flag *is* the operator's answer to the question the card would ask, so
+holding it would ask twice and defeat the "open all flagged" intent. The row is sent, and its
+gap bullets travel as its `first_step` so the worker starts *improved* rather than raw. The
+ladder still runs first — the row opens after the improvement pass, not instead of it. This
+override is P3's alone: it does not apply to a single-name open, where an operator naming one
+task gets the honest NOT READY instead.
+
 ### P4 — the operator's session hold
 
 A hold is operator **policy about a session**, not the `hold` task status and not the `HOLD`
@@ -388,6 +396,11 @@ Do not pass a marker for any of them and do not pre-check them.
 
 A batch has no single name: select the rows, apply the pre-call holds, send them **in one
 request**, render one verdict per row in request order.
+
+⚠️ **The readiness ladder (§ P3) runs on every task row in the batch, before the request.** Its
+below-bar hold is overridden here by the flag — a flagged row opens with its gap bullets as its
+`first_step` — but the improvement pass still runs first. A batch that skips the ladder opens
+every row raw and loses the whole point of the flag.
 
 **Selector — ALL VAULTS by default, and an absent `defer_date` does NOT exclude.**
 
