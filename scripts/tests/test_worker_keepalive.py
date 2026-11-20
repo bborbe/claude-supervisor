@@ -193,7 +193,7 @@ class WorkerKeepAliveTest(unittest.TestCase):
 
     def test_a_todo_task_is_not_resumed(self):
         # `phase: todo` is the operator's approval boundary — the same line the
-        # flagged-open leg protects on the other side.
+        # flagged tick protects on the other side.
         self.page(body=TASK_PAGE.format(sid="sid-1").replace(
             "phase: execution", "phase: todo"))
         rc, out = self.run_it(live="ABSENT")
