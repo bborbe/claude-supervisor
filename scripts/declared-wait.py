@@ -107,9 +107,11 @@ SESSION_BOUND = re.compile(
 #: The exemption is bounded structurally, not by a card-store poll (this reader is a
 #: pure local log read and runs per session in tight loops): an answered card resumes
 #: its session and writes a NEW `Stop`, and the newest-wins walk above makes the
-#: exemption apply only while the card wait is still the latest observable; and the
-#: `parked` branch in `flagged-rows.py` sits AFTER every liveness branch, so a dead
-#: session is never parked on this reader at all. `MAX_AGE_S` still expires every
+#: exemption apply only while the card wait is still the latest observable. A dead
+#: session whose last closer declared a card wait DOES read `parked` — `flagged-rows.py`'s
+#: branch sits AFTER every LIVE branch and BEFORE `resume` — so an answered card whose
+#: session is never resumed stays parked, bounded by `drive-escalate.py`, which cards
+#: any wait unchanged for 24 h, not by `MAX_AGE_S`. `MAX_AGE_S` still expires every
 #: non-card wait exactly as before.
 CARD_WAIT = re.compile(
     r"(?:\b(?:card|item)(?:[ _-]?id)?|\bpoll)\b[\s:#`'\"]*([0-9a-f]{8,})\b",
