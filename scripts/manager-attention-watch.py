@@ -290,6 +290,19 @@ _ENTITY = re.compile(r"&(?:nbsp|#160|#xa0);", re.I)
 # reported as neglect. Not an ask here either, so it raises no gate.
 PARKED_VERBS = ("later (on ",)
 
+# Characters that carry no operator content when they are ALL a closer body holds.
+# A worker that ended its turn with nothing to ask prints a placeholder rather than
+# a verb: the measured shape is a bare em-dash (`👤 You:    —`), and a panel may
+# render an en-dash, a hyphen or an ellipsis instead. Each is TEXT, so the
+# `nothing` prefix and `PARKED_VERBS` both miss it and the body reads as an ask —
+# the session is filed `idle+closer` and carded as parked although nothing waits on
+# the operator. Measured 2026-11-20: worker `36283b05` ended on
+# `🟢 ACTIVE · nothing running · next step is mine` / `👤 You:    —`, and the
+# watcher re-registered the park as cards `5bfd9e90…` and `6ce09d28…` while
+# `agent_status` reported no pending permission, no pending question and no call
+# in flight.
+NO_CONTENT_GLYPHS = "—-–…."
+
 # A closer whose text could not be read at all — distinct from "read it, and it
 # carries no closer". Collapsing those two is a false-`CLEARED` route; see `probe`.
 _CLOSER_UNKNOWN = object()
@@ -872,13 +885,17 @@ def normalize_closer(text):
 def is_ask(body):
     """Whether a closer body is a live ask.
 
-    Not a live ask: the `nothing` panel, and a `later (on <trigger>):` parked wait —
-    neither is something the operator can answer now. Both tests run on the
-    NORMALIZED body, because the raw one carries entity padding that defeats a
-    prefix match.
+    Not a live ask: the `nothing` panel, a `later (on <trigger>):` parked wait, and
+    a body that is only placeholder glyphs — a bare `—`, `–`, `-`, `…` or their
+    repetition, which is what a worker prints when it ended its turn with nothing
+    for the operator. None of the three is something the operator can answer now.
+    Every test runs on the NORMALIZED body, because the raw one carries entity
+    padding that defeats a prefix match.
     """
     verb = normalize_closer(body)
     if not verb:
+        return False
+    if not verb.replace(" ", "").strip(NO_CONTENT_GLYPHS):
         return False
     return not (verb.lower().startswith("nothing")
                 or verb.startswith(PARKED_VERBS))
