@@ -28,7 +28,15 @@ check is what holds it:
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/check-handback-size.py \
   --transcript ~/.claude/projects/*/<this session id>/subagents/agent-<agentId>.jsonl
+gate_rc=$?
 ```
+
+⚠️ **Capture `$?` on the very next line, and NEVER pipe this invocation.** `python3 … | tail -5;
+echo "rc=$?"` reports the *pipe's last stage*, not the script — so a `handback-size FAILED` line can
+sit beside `rc=0` and read as a pass. Measured 2026-11-20: that exact piped form was the **only**
+live invocation in a manager session's whole transcript, and it logged `size_exit=0` over a real
+exit 1 while the gate never ran again. `scripts/check-round-gate-exit-code.py`, wired into
+`precommit`, now fails the build when this block is piped before `gate_rc=$?`.
 
 ⚠️ **The `*` is the project slug and it is load-bearing** — every session lives at
 `~/.claude/projects/<project-slug>/<session-id>/…`, never directly under `projects/`, so a path
@@ -36,7 +44,7 @@ without that segment resolves to nothing. It is deliberately unquoted so the she
 the same form `docs/fleet-surface.md` and `commands/steps/fleet-triage-state.md` use.
 `<agentId>` is the id the Task tool returned.
 
-**Exit 0** → read the counts. **Exit 1** → read the script's **stderr first**, then act on what it
+**`gate_rc` 0** → read the counts. **`gate_rc` 1** → read the script's **stderr first**, then act on what it
 names: *no fence* or *over the cap* is the delegate's defect → **re-ask it once for the counts
 only**, in one line, and read nothing from its prose; *not a file* or *unreadable* is **your**
 path or a broken transcript, never a delegate defect — fix the path and re-run, do not re-ask.
