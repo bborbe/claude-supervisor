@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **`gate-answer-check.py` stops loading `gate-owner-filter.py`, and `owner_of` joins the other ownership readers in `session-ownership.py`.** The filter was already a non-dependency in substance — the four readers moved in `v0.362.10` — but this loader still pointed at it, so deleting the file would have raised `ImportError` on every manager round. ⚠️ **`round-readings.py`'s three `_load` sites are deliberately NOT repointed:** it needs the filter's store and log readers (`headless_items_checked`, `log_items`, `session_for_pane`), and repointing them broke 29 tests — so the file stays as a library for it and only `gate-answer-check.py`'s one site moves. Verified: `make precommit` EXIT=0.
+
 ## v0.362.10
 
 - refactor: **the four feed-and-ownership readers move into `session-ownership.py`, so `gate-owner-filter.py` is no longer a library dependency of two live scripts.** `feed_rows`, `headless_key`, `is_headless_key` and `is_human` — plus their two constants, `HEADLESS_PREFIX` and `REPLAY_MARK` — now live beside `load_claims`, `load_ledger_checked` and `is_manager`, and the filter re-exports all six unchanged, so every caller keeps working. `scripts/round-readings.py` and `scripts/gate-answer-check.py` were the reason the filter could not be deleted; they still import it, but nothing they use lives there any more. ⚠️ **The dependency set was six symbols, not the three the change was scoped as, and both extras were found by RUNNING the code rather than reading it:** `REPLAY_MARK` surfaced as a `NameError` on the first real `feed_rows` call, and `headless_key` — which `feed_rows` calls — surfaced as a test ERROR only after the first two moved. A signature read would have shipped two `NameError`s into the two importers this change exists to free. Verified: `python3 -m unittest test_gate_owner_filter test_round_readings` → **305 tests, OK**.
