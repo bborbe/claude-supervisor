@@ -463,6 +463,7 @@ RECORD_KEEP = 200
 # The decision and reason vocabulary — a fixed set, so a reader never parses prose.
 DECISION_ALLOW, DECISION_DENY = "allow", "deny"
 REASON_MANAGER_OWNED = "manager-owned-action"   # deny: an option names a manager-owned action
+REASON_RELOAD_ROUTE = "reload-route-offered"    # deny: a menu offers the operator-only reload alone
 REASON_NO_ACTION = "no-manager-action"          # allow: no option names one
 REASON_NON_MANAGER = "non-manager"              # allow: one is named, the session is not a manager
 REASON_KILL_SWITCH = "kill-switch"              # allow: the guard is switched off
@@ -754,6 +755,25 @@ def is_manager(entry, topics, goals):
     return manager_arm(entry, topics, goals) is not None
 
 
+RELOAD_ROUTE_RE = re.compile(r"/reload-plugins", re.IGNORECASE)
+RESTART_ROUTE_RE = re.compile(r"/supervisor:restart", re.IGNORECASE)
+
+
+def reload_route_reason(session_name):
+    """The deny text for a menu that offers the operator-only reload alone."""
+    return (
+        f"{session_name}: this menu offers `/reload-plugins`, which only the operator "
+        f"can run — it is a harness command with no tool, and the `--reload` lever is "
+        f"reserved to the operator because it types into live panes.\n"
+        f"A manager has its own route: `/supervisor:restart <sid>` is a script you run "
+        f"yourself, and the restarted session loads the installed version. Run it, or "
+        f"put it on the menu beside the reload so the operator is choosing between two "
+        f"live routes rather than doing your step. Offering the reload alone is the "
+        f"route choice this guard exists to keep off the board. See "
+        f"`docs/fleet-surface.md` § A plugin install does not reach a running session."
+    )
+
+
 def option_labels(tool_input):
     """Every option label across every question of an `AskUserQuestion` payload.
 
@@ -955,10 +975,18 @@ def evaluate(payload, environ=None):
     if (env.get(KILL_SWITCH_ENV) or "").strip().lower() == "off":
         return verdict(0, REASON_KILL_SWITCH)
     tool_input = (payload or {}).get("tool_input")
+    # The route rule's menu half: `/reload-plugins` is operator-only, and a manager
+    # always has `/supervisor:restart <sid>`, which it runs itself. A menu that offers
+    # the reload with no restart beside it spends the operator's attention on a route
+    # the manager could have taken. ⚠️ The check is "reload offered AND no restart
+    # offered", never "reload offered": a menu that carries both is a real question.
+    labels = option_labels(tool_input)
+    reload_offered = any(RELOAD_ROUTE_RE.search(label) for label in labels)
+    restart_offered = any(RESTART_ROUTE_RE.search(label) for label in labels)
     # ⚠️ The cheap half of the predicate runs first, so a menu that does not even LEAD
     # with one of the five verbs costs no vault read and no transcript read. Only a
     # payload that clears it pays for the object test's page titles.
-    if not any(leading_manager_verb(label) for label in option_labels(tool_input)):
+    if not reload_offered and not any(leading_manager_verb(label) for label in labels):
         return verdict(0, REASON_NO_ACTION)
     if not session_id:
         return verdict(0, FAIL_OPEN_NO_SESSION)
@@ -970,6 +998,12 @@ def evaluate(payload, environ=None):
         return verdict(0, FAIL_OPEN_NO_VAULT)
     verbs = manager_owned_actions_in(tool_input, tuple(topics.values()) + tuple(goals.values()))
     arm = manager_arm(entry, topics, goals)
+    if reload_offered and not restart_offered:
+        if not arm:
+            return verdict(0, REASON_NON_MANAGER, manager=False)
+        return verdict(
+            2, REASON_RELOAD_ROUTE, manager=True, arm=arm,
+            text=reload_route_reason((entry.get("name") or session_id).strip()))
     if not verbs:
         # The session's manager verdict is still recorded — it was paid for to get here.
         return verdict(0, REASON_NO_ACTION, manager=arm is not None, arm=arm)

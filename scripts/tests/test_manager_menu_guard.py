@@ -825,6 +825,35 @@ class TestNormalizerMirror(Base):
         self.assertIsNone(guard.manager_subject("Some Other Manager", topics, {}))
 
 
+class TestReloadRoute(Base):
+    """A manager menu offering the operator-only reload alone is denied.
+
+    `/reload-plugins` is a harness command only the operator can pull; a manager
+    has `/supervisor:restart <sid>`, which it runs itself. The rule fires on
+    "reload offered AND no restart offered", so a menu carrying both is a real
+    question and is left to the other rules.
+    """
+
+    RELOAD = "I run /reload-plugins in the Fleet Manager tab"
+    RESTART = "Restart the session instead (route /supervisor:restart 2de5efc8)"
+
+    def test_manager_offering_reload_alone_is_denied(self):
+        code, err = self.run_guard(self.payload("manager-1", [self.RELOAD, "Leave it"]))
+        self.assertEqual(code, 2)
+        self.assertIn("/supervisor:restart", err)
+        self.assertEqual(self.last_record("manager-1")["reason"], "reload-route-offered")
+
+    def test_worker_offering_reload_alone_is_allowed(self):
+        code, _ = self.run_guard(self.payload("worker-1", [self.RELOAD]))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.last_record("worker-1")["reason"], "non-manager")
+
+    def test_menu_carrying_both_routes_is_not_refused_for_the_reload(self):
+        self.run_guard(self.payload("manager-1", [self.RELOAD, self.RESTART]))
+        self.assertNotEqual(self.last_record("manager-1")["reason"],
+                            "reload-route-offered")
+
+
 class TestManifest(unittest.TestCase):
     """The `hooks/hooks.json` wiring — modelled on `scripts/tests/test_hooks_manifest.py`."""
 
