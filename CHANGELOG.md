@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.2
 
 - fix: **the `/who-needs-me` read bound is pinned to a measurement instead of inherited.** It was `10.0 s`, a number derived from nothing, and it sat above the endpoint's own tail — measured 2026-11-20 at the fleet's pinned load (concurrency 4, 20 calls), the board returned **p50 7.26-7.66 s / p95 10.71-11.58 s**, so a fifth of polls crossed the ceiling and refused. The cause was `attention-controller`'s `who-needs-me` globbing every project directory once per registry session (52 sessions × 132 dirs); fixed in `attention-controller` v0.107.3 by a single-pass transcript index. Re-measured on the fixed board at the same load: **p50 0.45-0.48 s / p95 0.63-0.65 s / max 0.73 s**, two-way burst peak 1.17 s. The bound is now `WHO_NEEDS_ME_TIMEOUT_SECONDS = 5.0` — deliberately **not** p95 + 20 % (~0.78 s), because the board's slowest internal step (`wezterm cli list`) is bounded at 3 s inside the service, and a client bound under it would turn the server's designed degraded answer (`sources.panes: "failed"`, gates still returned) into a client-side refusal. 5 s = that 3 s internal bound + 2 s of headroom, ~4× the burst peak, and half the old ceiling. Change set: `scripts/gate-owner-filter.py`, `scripts/tests/test_gate_owner_filter.py`, `CHANGELOG.md`.
 
