@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.10
 
 - docs: **a manager offers `/supervisor:restart <sid>`, not the operator-only `/reload-plugins`, when the target session is addressable.** Four surfaces said the reload was *the* lever and one said *a restart is not the lever* — both true of how a session picks a version up, and both silent on who may pull it, so a manager handed the operator a route it could have taken itself. `docs/fleet-surface.md` now carries the route rule (restart for an addressable session; reload only where `session-liveness.py --list --json` has no live record for the id), and `docs/session-tiers.md`, `commands/steps/round-readings.md` and `commands/steps/readings.md` point at it instead of restating the lever. The composers enforce it: `scripts/attention-ask.py post` refuses a `/reload-plugins` option when the card's `--subject` resolves live (and refuses a reload card that names no subject at all, so the guard cannot be bypassed by omitting the flag), printing `no addressable session` on the one branch it accepts; `scripts/manager-menu-guard.py` denies a manager menu offering the reload with no restart beside it. Change set: `docs/fleet-surface.md`, `docs/session-tiers.md`, `commands/steps/round-readings.md`, `commands/steps/readings.md`, `scripts/attention-ask.py`, `scripts/manager-menu-guard.py`, `scripts/tests/test_reload_route.py`, `scripts/tests/test_manager_menu_guard.py`, `CHANGELOG.md`.
 
