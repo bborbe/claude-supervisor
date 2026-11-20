@@ -116,7 +116,7 @@ Full text and the `⚠️` clauses live in `steps/rules.md`.
 - **Never preempt a busy peer** — never touch its worktree, branch or containers.
 - **Work is task/goal anchored** — every delegated message and spawned session names its task or goal.
 - **No permission laundering** — never ask a peer to run something denied here.
-- **An operator gate is never the manager's to decide** — relay the operator's answer only.
+- **An operator gate is never the manager's to decide** — relay the operator's answer only; a relayed gate is never restated on your closer (`commands/steps/needs-input.md`).
 - **No polling loops** — one round per invocation.
 - **Verify before telling a peer something did NOT happen** — check the target directly.
 - **Never forward a claim you did not measure** — quote testimony as testimony, or measure it.
