@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.362.9
 
 - fix: **A crash loop no longer asks the operator to resume a worker a manager owns.** `scripts/worker-keepalive.py` posted a `crash-loop:` attention card on every crash loop, including the case where the task declares a goal — which the fleet's own rules make manager-owned, since the fleet round restarts or resumes that goal's manager. The card therefore put a decision on the operator that the manager tier is already obliged to make, once per crash loop (measured 2026-11-20: 3 of the 6 unactionable cards in a 60-card SC1 sample, all inside 12 seconds). The card is now posted only when **no declared goal resolves** — no `goals:` key, or every declared goal page unopenable — where nothing owns the row; a resolvable goal keeps the existing `crash-loop:` hand-back row as the channel and the fleet round carries the action. `docs/session-tiers.md` § Keep-alive now states the manager action for that row (restart or resume the goal's manager, or reap/stand down the worker) and the operator-card boundary. Change set: `scripts/worker-keepalive.py`, `docs/session-tiers.md`, `scripts/tests/test_worker_keepalive.py`, `CHANGELOG.md`.
 ## v0.362.8
