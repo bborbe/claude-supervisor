@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **the fleet-drive rule says what `list_agents` actually returns.** Two shipped lines — `commands/fleet-drive.md` (INLINE) and `commands/steps/rules.md` — claimed the roster is scoped to the workers this session spawned, which stopped being true when the rehydrated roster shipped: the roster lists **every** worker, including rows adopted from the ledger regardless of which process spawned them. Only this session's **parks** are this session's to answer. A manager reading the old line could answer another manager's worker, or fail to look for its own rehydrated worker, and neither error surfaces. Both lines now state that split, and `fleet-drive.md` still fits its 10 240-byte tick budget (10 142 bytes, 98 free). Change set: `commands/fleet-drive.md`, `commands/steps/rules.md`, `CHANGELOG.md`.
+
 ## v0.360.2
 
 - docs: **operator work found inside an agent row now has one rule.** New `docs/attention-and-delegation.md` defines attention, human task and agent task, the size test (one answer, ~2 min, no artifact → attention card; else its own `role: human` row), the five channels with use-when / never-use-for, evidence ownership per shape, and what a manager decides alone. `docs/role-mode-matrix.md` gains Rule 5 carrying the test and split bookkeeping (operator ruling 2026-11-20). Rules 1–4 unchanged.
