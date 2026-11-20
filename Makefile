@@ -117,6 +117,9 @@ check-handback-keys:
 check-handback-size:
 	@python3 scripts/check-handback-size.py
 
+check-round-gate-exit-code:
+	@python3 scripts/check-round-gate-exit-code.py
+
 check-round-overlap:
 	@python3 scripts/check-round-overlap.py
 
@@ -225,6 +228,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-overlap check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-gate-exit-code check-round-overlap check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-overlap check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-hand-run check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-round-split check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-handback-size check-round-gate-exit-code check-round-overlap check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing

@@ -177,9 +177,10 @@ req = urllib.request.Request(
     },
 )
 # A create/resume verdict returns only once the tab exists and its ready-gated start
-# commands are sent (a goal manager's second send waits up to 300 s), so the budget has to
-# scale with the row count — a batch of N rows can legitimately take N times one row's wait.
-timeout = 600 * max(1, len(rows))
+# commands are sent (a goal manager's second send waits up to 300 s). The socket timeout is
+# a backstop only: the Bash harness kills the call at 600 s regardless, so a batch that would
+# outlast that is chunked by the caller (see the note below), never run in one request.
+timeout = 600
 try:
     print(urllib.request.urlopen(req, timeout=timeout).read().decode())
 except urllib.error.HTTPError as exc:
@@ -205,10 +206,15 @@ to 300 s). Use a generous timeout; a short one abandons an open that is still in
 reports nothing.
 
 ⚠️ **Pass the timeout on the Bash tool call itself, not only inside the script.** The Bash
-tool's default is 120 s and its maximum is 600 s, so a `create` on the goal path fails at the
-default exactly where the wait matters. Set the call's timeout to at least 300 s for one row
-and to `600` for a batch — the in-script `timeout=` above cannot rescue a call the harness has
-already killed.
+tool's default is 120 s and its maximum is **600 s**, so a `create` on the goal path fails at
+the default exactly where the wait matters. Set the call's timeout to at least 300 s — the
+in-script `timeout=` above cannot rescue a call the harness has already killed.
+
+⚠️ **A batch must fit in 600 s, and that is a hard ceiling, not a per-row budget.** The
+harness cap is absolute, so a `--flagged` batch whose rows could each take 300 s cannot be
+opened in one call: split it into chunks that each fit, and send them as separate requests.
+Scaling the socket timeout past 600 does nothing — the harness kills the process first, and
+the operator sees a partial batch with no verdicts printed.
 
 ⚠️ **`X-Claude-Code-Session-Id` is what the answer-path probe checks** — it must be *this*
 session's id, so a headless worker's prompts park with the manager that opened it. Omitting the
