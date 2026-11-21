@@ -10,6 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: **the gate-answerer dispatch now fires on the wake job's own line shape, not only on the feed's.** `commands/steps/attention-watcher.md` keyed the dispatch on `hst:<item-id>`, which is what `gate-owner-filter.py --feed` prints — while `attention-controller`'s in-process wake job types `attention gate: <item-id>` into the manager's pane (`managerWakeLinePrefix`). The rule would have gone **silently inert** the moment the feed arm is retired: the wake still arrives, and nothing answers it. Both shapes are now named, with the reason, so the arm removal cannot disable the dispatch without failing a read of this file.
+
 - refactor: **the permission-channel reading moves into `permission-channel.py`, so `round-readings.py` no longer imports `manager-attention-watch.py`.** The watcher and the round both need the same window, staleness bound and abort reader, and the round was reaching them by loading the whole watcher — the last live module load of a script that is being deleted, so deleting it would have broken `permission_channel_sid` on every manager round. The **policy still differs per caller** and is now stated in one place: the round applies `PERM_CHANNEL_STALE_S`, the watcher deliberately does not, because a stale-id bound would un-mark exactly the dead-channel session that cause exists for. `manager-attention-watch.py` re-exports every moved name unchanged, so no other caller had to move. Verified: `python3 -m unittest test_round_readings test_manager_attention_watch` → **261 tests, OK**.
 
 ## v0.364.0

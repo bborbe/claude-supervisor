@@ -19,14 +19,16 @@ When: every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `p
 
     ⚠️ **Keep this arm alive CONTINUOUSLY, in every manager tier — goal, topic and fleet.** Arm it with `timeout_ms: 1800000` (the `Monitor` maximum) and, **on its expiry or death notice, re-arm it in that same turn before anything else** — it is never "alive for 30 min after a round", because a manager whose feed `Monitor` is down has no instant gate path. Re-arm the answered-card arm below the same way.
 
-  - **On every feed line carrying an `hst:<item-id>` token, dispatch the gate answerer IMMEDIATELY — in the turn that line woke, never at the next round:**
+  - **On every feed line carrying an `hst:<item-id>` token — or a pane-typed `attention gate: <item-id>` line — dispatch the gate answerer IMMEDIATELY — in the turn that line woke, never at the next round:**
+
+    ⚠️ **Two line shapes carry the same signal, and both must dispatch.** `gate-owner-filter.py --feed` prints `hst:<store item id>` on a `Monitor` line; `attention-controller`'s in-process wake job types `attention gate: <item-id>` into the manager's own pane (`managerWakeLinePrefix`, `pkg/manager-wake-job.go`). A dispatch rule that keys on `hst:` alone goes **silently inert** the moment the feed arm is retired — the wake still arrives, and nothing answers it — which is why both are named here rather than only the one this file's own arm happens to print.
 
     ```
     Task tool with:
       subagent_type: 'supervisor:gate-answerer'
       run_in_background: true
       prompt: 'Manager session: <this-session-id>
-               Gates: <every hst:<item-id> token on the line>'
+               Gates: <every hst:<item-id> token on the line, and every item id in an `attention gate: <item-id>` line>'
     ```
 
     ⚠️ **ONE background dispatch per line, and nothing else for that line in this turn** — a `--digest` line carrying several `hst:` tokens hands them all to the one agent. A re-arm re-emits every still-open gate; dispatch anyway — the check's per-manager ledger (`~/.claude/state/gate-answer/<this-session-id>.json`) makes an item this manager already judged or left a `skip` for its lifetime, so a re-emission costs one cheap agent turn and never a second answer. The agent takes two card kinds. A **permission** card it checks mechanically (`scripts/gate-answer-check.py`: open, no operator hold, a worker this manager spawned or adopted, a parked wrapper question, not `operator` tier, exactly one readable brief), judges on `docs/permission-allowlist.md` § *How a manager applies it*, and answers `allow` — the claude-wrapper daemon delivers it to the headless child (carrier `claude-wrapper:board`). A worker's closer **`pick —`** card is `skip` today: the pick path exists but is disabled until the carriers render a manager's answer in the manager's voice (`docs/permission-allowlist.md` § *A worker's closer pick*). Answers go through `gate-answer-check.py --answer --expect <hash>`, which refuses unless the re-check still reads the call that was judged (the daemon then settles the worker's current park — `docs/permission-allowlist.md` § The instant path names that residual race); anything else is left for the operator. It never answers an `operator`-tier gate, an `mcp__*` / `WebFetch` / `Agent` call, a write outside the worker's cwd and `/tmp`, or unseen code (a script file, an inline program, a launcher), and never denies. Its report arrives as a background notification; act on it only when it names a `recorded, not delivered` answer. A bare pane id (a tab worker's gate) is not dispatched — it keeps the relay path below.
