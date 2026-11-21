@@ -164,5 +164,54 @@ class QuotedBraces(unittest.TestCase):
         self.assertEqual(self._got("echo $'{a,b}'").get("form"), "unverifiable")
 
 
+class RemainingUnverifiableCauses(unittest.TestCase):
+    """One control per cause that is NOT the brace expansion fixed in v0.349.1.
+
+    The brace cause was loosened narrowly: only quoted or escaped braces stopped rating
+    `unverifiable`. These eight causes share the same branch but not the same reason, so a
+    future "fix" that widens the tier instead of the syntax would satisfy the brace fixtures
+    while opening a real gate here. Each stays fail-closed on purpose.
+    """
+
+    def _got(self, cmd):
+        return tier.tier_for("Bash", {"command": cmd}, ENTRIES, {"runnerConfigClean": True})
+
+    def test_here_string_stays_unverifiable(self):
+        # A here-string feeds stdin to a program whose input this check never sees.
+        self.assertEqual(self._got('grep foo <<< "$bar"').get("form"), "unverifiable")
+
+    def test_command_word_expansion_stays_unverifiable(self):
+        # `$CMD` can be any program at run time.
+        self.assertEqual(self._got("$CMD --version").get("form"), "unverifiable")
+
+    def test_gh_subcommand_expansion_stays_unverifiable(self):
+        # The expansion decides the subcommand, so `gh api …` is not proven to be a read.
+        self.assertEqual(self._got('gh api "repos/$x/pulls" --jq .').get("form"), "unverifiable")
+
+    def test_truncated_payload_stays_unverifiable(self):
+        # What the classifier actually sees when the attention store cut the card at its cap.
+        payload = "Bash: echo " + "x" * (tier.PAYLOAD_CAP - 11)
+        self.assertEqual(len(payload), tier.PAYLOAD_CAP)
+        got = tier.tier_for_payload(payload, ENTRIES)
+        self.assertEqual(got["form"], "unverifiable")
+        self.assertEqual(got["reason"], "payload truncated at the store cap")
+
+    def test_curl_method_expansion_stays_unverifiable(self):
+        # The expansion may carry the method or body, which decides publish vs read.
+        self.assertEqual(self._got('curl -X "$METHOD" https://example.com').get("form"), "unverifiable")
+
+    def test_git_tag_expansion_stays_unverifiable(self):
+        # The expansion decides what `git tag` runs (a create, a delete, a read).
+        self.assertEqual(self._got('git tag "$NAME"').get("form"), "unverifiable")
+
+    def test_ansi_c_quoting_stays_unverifiable(self):
+        # `$'…'` is `echo A` to bash but `$\\x41` to shlex, so the subcommand check cannot see it.
+        self.assertEqual(self._got("echo $'\\x41'").get("form"), "unverifiable")
+
+    def test_unterminated_double_quote_stays_unverifiable(self):
+        # A quote the lexer cannot close hides everything after it (and a truncated payload ends in one).
+        self.assertEqual(self._got('echo "abc').get("form"), "unverifiable")
+
+
 if __name__ == "__main__":
     unittest.main()

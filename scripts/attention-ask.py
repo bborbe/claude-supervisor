@@ -106,6 +106,7 @@ import math
 import os
 import re
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -318,7 +319,7 @@ def _positive_float_env(name, default):
 # concurrent readers, 2.26 s peak under 20 — under 1.5x headroom at the old 3 s,
 # and a gate lost to a timeout is worse than a gate that arrives late. 10 s is
 # the value two siblings already use (`attention-card-lookup.py`,
-# `answered-watch.py`).
+# the retired answered-card watcher).
 #
 # ⚠️ The repo therefore reads this variable with TWO defaults, and that is stated
 # rather than hidden — it is the condition the note below sets. `attention-answer.py`,
@@ -329,7 +330,7 @@ def _positive_float_env(name, default):
 #
 # ⚠️ Deliberately left as the bare `float(...)` form rather than routed through
 # `_positive_float_env`, and that is a scope decision, not an oversight: the same
-# variable is read the same bare way by `pod-attention.py` and `answered-watch.py`,
+# variable is read the same bare way by `pod-attention.py` and the retired answered-card watcher,
 # so hardening one of the three would leave the repo reading one env var two
 # different ways with nothing saying which was intended. Hardening all three
 # belongs in its own change.
@@ -639,6 +640,108 @@ def is_manager_session(guard, producer_id):
     except Exception as err:
         _warn(f"manager scoping failed ({err}) — card allowed")
         return False
+
+
+RELOAD_ROUTE_RE = re.compile(r"/reload-plugins", re.IGNORECASE)
+
+
+def _option_labels(options):
+    return [o.get("label") or "" for o in (options or []) if isinstance(o, dict)]
+
+
+def names_reload_route(options, payload):
+    """True when an option offers `/reload-plugins`, or the payload names it."""
+    if any(RELOAD_ROUTE_RE.search(label) for label in _option_labels(options)):
+        return True
+    return bool(RELOAD_ROUTE_RE.search(payload or ""))
+
+
+def _liveness_rows(script_dir=None, timeout=20):
+    """The `session-liveness.py --list --json` rows, or `None` when unreadable."""
+    path = os.path.join(
+        script_dir or os.path.dirname(os.path.abspath(__file__)),
+        "session-liveness.py")
+    if not os.path.exists(path):
+        return None
+    try:
+        proc = subprocess.run(
+            [sys.executable, path, "--list", "--json"],
+            capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    # The render prints a `rows=… registry_live=… degraded=…` header before the
+    # JSON body, so parse from the first `[` rather than the whole stdout.
+    start = (proc.stdout or "").find("[")
+    if start < 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout[start:])
+    except Exception:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def subject_live(subject, script_dir=None):
+    """`True` live · `False` absent · `None` unknown (the read failed).
+
+    ⚠️ **Unknown is not absent.** A missing script, a timeout, an unparseable
+    payload and a failed exit all return `None`, and the caller refuses nothing
+    on an unknown — turning a broken probe into "no session there" would let
+    every card through on the day the probe breaks, which is the failure mode
+    `manager_settleable_only` already refuses to take.
+    """
+    wanted = (subject or "").strip().lower()
+    if not wanted:
+        return None
+    rows = _liveness_rows(script_dir)
+    if rows is None:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("sessionId") or row.get("session_id") or "").lower()
+        if sid.startswith(wanted):
+            return bool(row.get("alive"))
+    return False
+
+
+def reload_route_verdict(options, payload, subject, script_dir=None):
+    """`(refusal, note)` for a card that offers `/reload-plugins`.
+
+    Four outcomes, and the third is the one this rule exists for:
+
+      * no `/reload-plugins` anywhere              → `(None, None)` — not this rule
+      * `/reload-plugins`, no `--subject`           → refusal, so the guard cannot
+        be bypassed by omitting the flag
+      * `/reload-plugins`, subject live             → refusal: the asking manager
+        can run `/supervisor:restart <sid>` itself
+      * `/reload-plugins`, subject absent/unknown   → accepted, with the
+        `no addressable session` note printed before the post
+
+    ⚠️ The route rule is *not* conditional on a `/supervisor:restart` option
+    being present. A reload-only card is the shape the rewrite of the guidance
+    leaves as the remaining defect, so it is refused on exactly the same grounds.
+    """
+    if not names_reload_route(options, payload):
+        return None, None
+    subject = (subject or "").strip()
+    if not subject:
+        return (
+            "--subject is required when an option or payload names "
+            "/reload-plugins: the route rule cannot tell whether the target "
+            "session is addressable without it. Pass --subject <sid>, or drop "
+            "the reload option.", None)
+    if subject_live(subject, script_dir):
+        return (
+            f"session {subject} is addressable, so the route is "
+            f"/supervisor:restart {subject} — a script the asking manager runs "
+            "itself. Offering /reload-plugins spends the operator's attention on "
+            "a route the manager could have taken. Replace the option, or re-run "
+            "with --force if the reload really is the only route.", None)
+    return None, (f"no addressable session for {subject} — "
+                  "/reload-plugins is the remaining route")
 
 
 def manager_settleable_only(options, producer_id=""):
@@ -1124,6 +1227,16 @@ def cmd_post(args, out=sys.stdout):
     except ValueError as err:
         print(f"REFUSED: {err}", file=out)
         return 2
+    # The route rule: a manager offers `/supervisor:restart <sid>`, which it runs
+    # itself, rather than the operator-only `/reload-plugins` — and says why when
+    # there is genuinely no addressable session to restart.
+    route_refusal, route_note = reload_route_verdict(
+        options, args.payload, getattr(args, "subject", ""))
+    if route_refusal and not getattr(args, "force", False):
+        print(f"REFUSED: {route_refusal}", file=out)
+        return 2
+    if route_note:
+        print(route_note, file=out)
     # Class 2 of the board-noise task: every choice is a manager-owned action, so
     # the card asks the operator to ratify a decision already made. Refused by
     # default for a MANAGER asker only (see `is_manager_session`); `--force`
@@ -1401,6 +1514,15 @@ def main(argv=None):
     # The `👤 You:` line this card answers, when the poster knows it. Optional:
     # omitted, nothing is recorded and the hook behaves exactly as it did before.
     post.add_argument("--closer", default="")
+    # The session this card is ABOUT (not the asker), for the route rule: a card
+    # offering `/reload-plugins` must name its target so the composer can tell
+    # whether the manager could restart it instead. Required exactly then.
+    post.add_argument(
+        "--subject",
+        default="",
+        help="the session this card is about (id or prefix); required when an "
+             "option or payload names /reload-plugins",
+    )
 
     batch = sub.add_parser("post-batch")
     batch.add_argument("--dedup-key", required=True)

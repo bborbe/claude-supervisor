@@ -1,12 +1,12 @@
-"""`scripts/check-open-hand-run.py` — each guard fires on the one mutation it exists to catch.
+"""Unit tests for `scripts/check-open-hand-run.py`.
 
-Every fixture starts from the real `commands/open.md` and changes exactly one thing, so a
-guard that cannot fail (the defect a first revision of guard (d) had: it matched a backtick
-placement the prose never uses) turns this file red.
+The check was rewritten on 2026-11-20 with `commands/open.md`: the command is a thin
+caller of the wrapper's open endpoint now, so the guard is no longer "the spawn branches
+carry the right flag" but "no spawn path comes back, and the endpoint call stays".
 
-Run: python3 -m unittest discover -s scripts/tests -p 'test_check_open_hand_run.py'
+Each case mutates the REAL `commands/open.md` rather than a synthetic fixture, so a case
+fails loudly when the anchor it depends on disappears from the file.
 """
-
 import contextlib
 import importlib.util
 import io
@@ -15,11 +15,7 @@ import pathlib
 import tempfile
 import unittest
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(os.path.dirname(_HERE))
-
-_NONE_CALL = '`topic-spawn.py --vault "<vault-root>" --topic "<topic>" --topic-open --hand-run`'
-_UNKNOWN_ARM = "drop `--hand-run`: `topic-unflagged` (1) → print `⏸ held — no flag` and STOP"
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _load():
@@ -50,37 +46,47 @@ class CheckOpenHandRun(unittest.TestCase):
         return rc, out.getvalue()
 
     def _mutate(self, old, new):
-        self.assertEqual(1, self.real.count(old), "fixture anchor not unique: %r" % old)
+        self.assertGreaterEqual(self.real.count(old), 1, "fixture anchor absent: %r" % old)
         return self.real.replace(old, new)
 
     def test_the_real_command_passes(self):
-        self.assertEqual(0, self._run(self.real)[0])
+        rc, out = self._run(self.real)
+        self.assertEqual(0, rc, out)
+        self.assertIn("thin caller", out)
 
-    def test_hand_run_on_the_unknown_arm_fires(self):
-        """Guard (d): `--hand-run` moved onto the resume arm opens an unflagged topic fresh."""
-        text = self._mutate(_UNKNOWN_ARM, "run " + _NONE_CALL + ": `topic-unflagged` (1) → STOP")
+    def test_a_reintroduced_tab_spawn_fires(self):
+        rc, out = self._run(self._mutate("## ", "wezterm cli spawn --window-id 2 -- x\n\n## "))
+        self.assertEqual(1, rc)
+        self.assertIn("wezterm cli spawn", out)
+
+    def test_a_reintroduced_headless_spawn_fires(self):
+        rc, out = self._run(self._mutate("## ", "spawn_agent(prompt=row.name)\n\n## "))
+        self.assertEqual(1, rc)
+        self.assertIn("spawn_agent", out)
+
+    def test_a_reintroduced_agents_window_fires(self):
+        rc, out = self._run(self._mutate("## ", '{"agent": "Agents"}\n\n## '))
+        self.assertEqual(1, rc)
+        self.assertIn("Agents", out)
+
+    def test_a_reintroduced_manager_recipe_fires(self):
+        rc, out = self._run(self._mutate("## ", "manager-launcher.py --goal x\n\n## "))
+        self.assertEqual(1, rc)
+        self.assertIn("manager-launcher.py", out)
+
+    def test_losing_the_endpoint_call_fires(self):
+        text = self.real.replace("api/1.0/open", "some/other/path").replace("open_rows", "rows")
         rc, out = self._run(text)
         self.assertEqual(1, rc)
-        self.assertIn("outside the `None` arm", out)
+        self.assertIn("no route", out.replace("\n", " "))
 
-    def test_unknown_arm_without_the_flag_check_fires(self):
-        text = self._mutate(_UNKNOWN_ARM, "keep the call as is")
-        rc, out = self._run(text)
+    def test_a_missing_file_fails(self):
+        self.check.COMMAND = pathlib.Path(self._tmp.name) / "absent.md"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.check.main()
         self.assertEqual(1, rc)
-        self.assertIn("UNKNOWN/AMBIGUOUS arm does not keep the flag check", out)
-
-    def test_no_hand_run_anywhere_fires(self):
-        text = self._mutate(_NONE_CALL, _NONE_CALL.replace(" --hand-run", ""))
-        rc, out = self._run(text)
-        self.assertEqual(1, rc)
-        self.assertIn("never passes --hand-run", out)
-
-    def test_a_goal_flag_stop_fires(self):
-        anchor = "## Step 2C — Topic branch"
-        text = self._mutate(anchor, "On `goal-unflagged` print it and STOP.\n\n" + anchor)
-        rc, out = self._run(text)
-        self.assertEqual(1, rc)
-        self.assertIn("STOPs on goal-unflagged", out)
+        self.assertIn("missing", out.getvalue())
 
 
 if __name__ == "__main__":

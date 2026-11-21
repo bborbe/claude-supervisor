@@ -901,7 +901,7 @@ class WindowIdIsNeverStale(unittest.TestCase):
         tasks = os.path.join(root, "25 Tasks")
         write(os.path.join(tasks, "A Task.md"),
               page("page_type: task\nflag: true\nstatus: in_progress\n"
-                   "role: agent\nflag_set_by: operator"))
+                   "role: human\nflag_set_by: operator"))
         cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
         ctx = {"today": "2026-11-01", "role_map": fr.role_map(role_map_path),
                "template_root": None, "no_liveness": True, "managers": set(),
@@ -913,9 +913,11 @@ class WindowIdIsNeverStale(unittest.TestCase):
 
     def test_a_rewritten_map_reaches_the_next_row(self):
         path = os.path.join(tempfile.mkdtemp(), "role-map.json")
-        write(path, json.dumps({"Agents": {"chip": "pink", "window_id": 4}}))
+        # `Direct` is a role that HAS a window; an agent row never resolves one (matrix
+        # Rule 2), so it could not exercise the per-row re-read this test pins.
+        write(path, json.dumps({"Direct": {"chip": "pink", "window_id": 4}}))
         self.assertEqual(self.row_with_map(path)["window_id"], 4)
-        write(path, json.dumps({"Agents": {"chip": "red", "window_id": 9}}))
+        write(path, json.dumps({"Direct": {"chip": "red", "window_id": 9}}))
         row = self.row_with_map(path)
         self.assertEqual(row["window_id"], 9)
         self.assertEqual(row["chip"], "red")

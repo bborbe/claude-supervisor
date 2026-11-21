@@ -56,7 +56,7 @@ renders nothing itself and adds no close path.
 The board link. An `asked-of-you` now carries the item id of the card its ask lives on
 (`card_item_id`), the option set that card was built from (`card_options`), and which label
 it recommends. That field is what closes the last hop of the answer chain:
-`answered-watch.py` emits `ANSWERED <item-id>` for a card this session posted and knows
+the retired answered-card watcher emits `ANSWERED <item-id>` for a card this session posted and knows
 nothing about ledgers, and `card-answer` / `card-sync` find the entry to close by matching
 that id. Without it the watcher's signal had nowhere to land, so every `asked-of-you` still
 needed a manager to notice the answer by hand — which is the defect this removes.
@@ -783,7 +783,7 @@ def post_card(item, sid, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
     """Post this entry's ask as a board card and return its item id, or None.
 
     Shelled out rather than re-implemented; see `ATTENTION_ASK` for why. The producer is the
-    RAISING session, never left to the store's default: `answered-watch.py` keys on
+    RAISING session, never left to the store's default: the retired answered-card watcher keys on
     `Item.ProducerID`, so a card posted under any other producer would never fire that
     watcher for the session that can act on the answer.
 
@@ -807,7 +807,7 @@ def post_card(item, sid, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
         # loop's (see the module docstring — "manager loops: fleet-loop /
         # manager-loop"), so the card it posts is a manager's escalation. The
         # `--producer-id` above is still the raising session, which is what
-        # `answered-watch.py` keys on; the kind describes the producing loop.
+        # the retired answered-card watcher keys on; the kind describes the producing loop.
         "--producer-kind", "manager",
         "--dedup-key", CARD_DEDUP_PREFIX + item["id"],
         "--payload", item["text"],
@@ -847,7 +847,7 @@ def poll_card(item_id, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
     question — and collapsing the two would forge the operator attribution that `answer`
     exists to protect. The rule has one home (`answered-attribution.py`); this arm consumes
     its already-rendered form rather than restating it, which is the same discipline
-    `answered-watch.py` states for its own stream arm.
+    the retired answered-card watcher states for its own stream arm.
     """
     cmd = [
         sys.executable,
@@ -951,7 +951,7 @@ def cmd_options(args):
 def cmd_card_answer(args):
     """Close the entry whose card is the one the operator just answered.
 
-    The last hop of `answered-watch.py` → `attention-ask.py poll` → here. The watcher emits
+    The last hop of the retired answered-card watcher → `attention-ask.py poll` → here. The watcher emits
     `ANSWERED <item-id>` and knows nothing about ledgers; the entry that posted that card is
     found by `card_item_id`, which is the whole reason the field had to exist before this hop
     could be written.
@@ -1605,7 +1605,7 @@ def main():
     p_card_answer = sub.add_parser(
         "card-answer",
         help="close the entry whose card is the one just answered — the last hop of the "
-        "answered-watch -> poll -> close chain",
+        "answer -> poll -> close chain",
     )
     p_card_answer.add_argument(
         "--item-id", dest="item_id", required=True, help="the board item id that was answered"

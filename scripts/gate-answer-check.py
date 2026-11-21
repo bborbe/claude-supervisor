@@ -732,7 +732,7 @@ def load_inputs(self_id=""):
     """
     tier_mod = _load("permission_tier", "permission-tier.py")
     own_mod = _load("own_park_check", "own-park-check.py")
-    filt = _load("gate_owner_filter", "gate-owner-filter.py")
+    filt = _load("session_ownership", "session-ownership.py")
     fleet_mod = _load("fleet_sessions", "fleet-sessions.py")
     scope_mod = _load("session_scope", "session-scope.py")
     return {

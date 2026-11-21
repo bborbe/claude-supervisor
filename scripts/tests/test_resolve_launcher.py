@@ -84,7 +84,7 @@ class ResolveLauncherCli(unittest.TestCase):
         self.page("T", "claude_session_id: s1\nrole: agent")
         self.assertEqual(
             self.fields(self.run_cli("s1")),
-            [os.path.join(self.scripts, "cc-private-deepseek"), "worker-default", "agent", "purple"],
+            [os.path.join(self.scripts, "cc-private-deepseek"), "worker-default", "agent", "pink"],
         )
 
     def test_a_human_row_resolves_to_the_worker_default_with_the_map_chip(self):
@@ -108,7 +108,7 @@ class ResolveLauncherCli(unittest.TestCase):
     def test_an_absent_role_reads_as_agent(self):
         """Matrix Rule 1: no `role:` key is agent, and the chip follows the resolved role."""
         self.page("T", "claude_session_id: s1")
-        self.assertEqual(self.fields(self.run_cli("s1"))[2:], ["agent", "purple"])
+        self.assertEqual(self.fields(self.run_cli("s1"))[2:], ["agent", "pink"])
 
     def test_a_manager_session_is_coloured_as_a_manager(self):
         """A manager carries no task page, so the claimant lookup alone would read it as a
@@ -156,7 +156,7 @@ class ResolveLauncherCli(unittest.TestCase):
         self.page("T", 'claude_session_id: s1\nrole: agent\tcyan"; rm -rf / #')
         fields = self.fields(self.run_cli("s1"))
         self.assertEqual(len(fields), 4)
-        self.assertEqual(fields[2:], ["agent", "purple"])
+        self.assertEqual(fields[2:], ["agent", "pink"])
 
     def test_an_unresolvable_launcher_refuses_rather_than_guessing(self):
         result = self.run_cli("nobody", cwd="/tmp")

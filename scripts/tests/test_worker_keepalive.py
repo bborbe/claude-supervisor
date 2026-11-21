@@ -363,6 +363,38 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("crash-loop", out[0])
         self.assertEqual([("A Task", 3)], self.cards)
 
+    def test_a_goal_declaring_crash_loop_posts_no_operator_card(self):
+        # SC2: a resolvable goal makes the row manager-owned — the `crash-loop:` hand-back
+        # row is the channel, so the operator is never asked to decide a resume the manager
+        # tier is obliged to make. The card would be a decision the manager already owns.
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution",
+            "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            "---\npage_type: goal\n---\n", encoding="utf-8")
+        now = 1_800_000_000.0
+        self.seed([now - 60, now - 120, now - 180])
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(1, rc)
+        self.assertEqual("crash-loop", out[0])
+        self.assertIn("WORKER CRASH-LOOP", out[1])
+        self.assertEqual([], self.cards)
+
+    def test_a_goal_page_that_cannot_be_opened_still_posts_one_card(self):
+        # SC3: declared but unresolvable is the operator side — `goal_owners()` skips an
+        # unopenable page, so nothing owns the row and the operator is the only decision
+        # left. The card is the channel for that case.
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution",
+            "phase: execution\ngoals:\n    - '[[A Missing Goal]]'"))
+        now = 1_800_000_000.0
+        self.seed([now - 60, now - 120, now - 180])
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(1, rc)
+        self.assertEqual("crash-loop", out[0])
+        self.assertEqual([("A Task", 3)], self.cards)
+
     def test_a_resume_that_did_not_take_does_not_arm_the_cap(self):
         self.page()
         self.kp.session_verdict = lambda sid: "ABSENT"
@@ -502,6 +534,43 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("recorded", out.getvalue().splitlines()[0])
         with open(self.k.state_path(str(self.vault), "A Task"), encoding="utf-8") as fh:
             self.assertEqual(1, len(json.load(fh)["resumes"]))
+
+
+class CrashLoopCardPayloadTest(unittest.TestCase):
+    """SC3: the one card that survives is a question, not a notification.
+
+    The crash-loop tests above stub `post_card` out, so they prove a card is posted and
+    never what it says. A card carrying no question is exactly the unanswerable shape this
+    row exists to remove, so the payload is pinned here against the real `post_card`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.k = load()
+        self.calls = []
+        self._orig_run = self.k.subprocess.run
+        self.k.subprocess.run = self._capture
+
+    def tearDown(self):
+        self.k.subprocess.run = self._orig_run
+
+    def _capture(self, argv, **kwargs):
+        self.calls.append(argv)
+
+    def test_the_card_carries_a_question_naming_the_decision(self):
+        self.k.post_card("A Task", 3)
+        self.assertEqual(1, len(self.calls))
+        argv = self.calls[0]
+        payload = argv[argv.index("--payload") + 1]
+        self.assertIn("Resume anyway?", payload)
+        self.assertIn("A Task", payload)
+        self.assertIn("3 resumes", payload)
+        # A question with no options is not answerable, and the dedup key is the join back
+        # to the mechanism — one card per task, never one per crash loop.
+        self.assertEqual(["keep stopped", "resume anyway"],
+                         [argv[i + 1] for i, a in enumerate(argv) if a == "--option"])
+        self.assertEqual("crash-loop:a-task", argv[argv.index("--dedup-key") + 1])
 
 
 if __name__ == "__main__":

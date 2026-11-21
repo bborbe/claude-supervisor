@@ -71,12 +71,12 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 10 | Escalate | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/escalate.md` |
 | 11 | Needs-input batch + relay | hand-back reports `blocked` > 0, `parks-routed` > 0, or a routed spawn | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
-| 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
+| 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --digest --self "<sid>" --interval 60`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Readings | every tick — take all seven readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 | 16b | Manager reap | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
-| 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
+| 18 | Persist | this round's `.digest` marker is missing — run: `python3 $P/fleet-snapshot.py --digest-path <this round's payload path>` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
@@ -96,7 +96,7 @@ Full text and the `⚠️` clauses live in `steps/rules.md`.
 - **Dispatch is the manager's verb alone** — a worker routes out-of-scope work to its manager.
 - **Before spawning, check for a supervised worker** — the session registry is the guard.
 - **Never answer another manager's workers** — route to the owning manager; own-goal admits excepted.
-- **`mcp__supervisor__list_agents` sees only workers this session spawned** — empty is not absence.
+- **`mcp__supervisor__list_agents` lists every worker; only this session's parks are this session's to answer** — empty is not absence.
 - **An empty `mcp__supervisor__pending_permissions` is not absence of a gate** — take the worker's own reading first.
 - **`~/.claude/sessions/*.json` is the authoritative liveness store** — never stamp a session from a ledger reading.
 - **The PR is the boundary** — opening a PR is never management; worktree, branch and commits go to a worker.
@@ -115,7 +115,7 @@ Full text and the `⚠️` clauses live in `steps/rules.md`.
 - **Never preempt a busy peer** — never touch its worktree, branch or containers.
 - **Work is task/goal anchored** — every delegated message and spawned session names its task or goal.
 - **No permission laundering** — never ask a peer to run something denied here.
-- **An operator gate is never the manager's to decide** — relay the operator's answer only.
+- **An operator gate is never the manager's to decide** — relay the operator's answer only; a relayed gate is never restated on your closer (`commands/steps/needs-input.md`).
 - **No polling loops** — one round per invocation.
 - **Verify before telling a peer something did NOT happen** — check the target directly.
 - **Never forward a claim you did not measure** — quote testimony as testimony, or measure it.
