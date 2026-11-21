@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.365.0
 
 - feat: **the fleet round's adopt leg is gone — the wrapper's adopt job replaces it.** Row 4 is removed from `commands/fleet-drive.md` and `agents/fleet-round.md`, `commands/steps/adopt.md` is deleted, and the render loses its Adoption item (the remaining items renumber, with every live cross-reference shifted: `item 13` → `12` for the `Legs` block, `item 12` → `11` for the round's debt). `claude-wrapper` v0.50.0 runs the same job in-process on the flagged tick's cadence, logging `job=adopt action=tick adopted=<n> skipped=<n> adopted_sessions=<ids>`, so the round no longer spends a leg on it. ⚠️ **`git grep 'adopt-orphans' -- commands/` now returns no match** — `commands/steps/readings.md`'s note about the population is repointed at the wrapper's adopt tick. The Python `scripts/adopt-orphans.py` stays: it is the reference implementation the Go port was written against and still runs by hand, but nothing in the round invokes it. Change set: `commands/fleet-drive.md`, `commands/steps/round-dispatch.md`, `commands/steps/adopt.md` (deleted), `commands/steps/readings.md`, `commands/steps/output-shape.md`, `agents/fleet-round.md`, `agents/fleet-keepalive-actor.md`, `agents/fleet-sweep-reader.md`, `scripts/check-handback-keys.py`, `scripts/fleet-legs.py`, `scripts/manager-receipt.py`, `scripts/tests/*`, `CLAUDE.md`, `CHANGELOG.md`.
 
