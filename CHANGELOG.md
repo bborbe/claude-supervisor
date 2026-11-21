@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.364.0
 
 - feat: **the fleet round reads the wrapper's page buckets as a SECOND layer, and never merges it with its session classes.** The step-8 classes answer *is this session doing anything*; the wrapper's page buckets answer *what state is this record in* — different domains, so step 8c enumerates the gate's subjects from `/api/1.0/sweep/subjects`, reads them in one `sweep-buckets.py` call, and renders a `PAGES` line in the digest plus a `pages=` key in the hand-back. Two rules are load-bearing rather than incidental: bucket names are echoed **verbatim**, so a value the round has never seen still appears as served (folding it into `other` would make the output indistinguishable from a round that re-derived its own classification — the defect the route removes), and the two layers are **never** collapsed into one key, because one field two readers interpret differently is worse than two fields. An unreachable wrapper prints `UNKNOWN (read failed)`, never `(none)`, which would read as "no pages tracked". The fixed-section allowance moves 49 → 50. Change set: `agents/fleet-sweep-reader.md`, `CHANGELOG.md`.
 
