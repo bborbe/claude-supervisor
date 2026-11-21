@@ -144,7 +144,7 @@ SENTINEL = "INCOMPLETE ROUND"
 # verdict families to `<slug>.readings`. It is the step the 12:17 round skipped while
 # still rendering a complete-looking table, so it is the one this receipt most needs
 # to name.
-STEPS = ("needs-you", "sweep", "watcher", "readings", "drive")
+STEPS = ("needs-you", "sweep", "readings", "drive")
 
 # The steps a TOPIC round owes, and the reason this tuple exists at all.
 #
@@ -160,7 +160,7 @@ STEPS = ("needs-you", "sweep", "watcher", "readings", "drive")
 # step would let a round that skips its sweep report complete — this check's own defect,
 # one tier over. The missing record call is the topic sweep's to add, not this tuple's
 # to excuse.
-TOPIC_STEPS = ("needs-you", "readings", "sweep", "watcher")
+TOPIC_STEPS = ("needs-you", "readings", "sweep")
 
 # The fleet round's own two load-bearing steps, in their own tuple rather than appended
 # to STEPS. A goal or topic round owes no digest, so a shared tuple would make every such
@@ -1690,39 +1690,6 @@ def record_ts(value):
         return None
 
 
-def watcher_shape(artifact: str, started: float, now: float) -> bool:
-    """The tracked-set arm's newest `events.jsonl` record, inside the round window.
-
-    Read from the RECORD's own `ts`, never the file's mtime: the arm appends on every
-    poll, so the file's mtime only says it was touched, while the newest record's ts
-    says the arm was still polling during this round.
-
-    The lower bound is floored to the producer's own resolution: `ts` carries whole
-    seconds, so a record appended in the same wall-clock second the round opened
-    would otherwise compare as *before* a fractional `round_started_at` and be
-    rejected by up to one second. Flooring widens the window by at most that second,
-    which is the honest cost of a one-second timestamp.
-    """
-    started = int(started)
-    newest = None
-    try:
-        with open(artifact, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                ts = record_ts(rec.get("ts"))
-                if ts is not None:
-                    newest = ts if newest is None else max(newest, ts)
-    except OSError:
-        return False
-    return newest is not None and started <= newest <= now
-
-
 def _tail_epochs_beside(artifact: str) -> set:
     """The `<slug>.tail` store beside a `<slug>.arms` ring, as epoch keys.
 
@@ -1849,10 +1816,6 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
         artifact = fields.get(step)
         if not artifact:
             skipped.append((step, "no artifact recorded"))
-            continue
-        if step == "watcher":
-            if not watcher_shape(artifact, started, now):
-                skipped.append((step, f"no events.jsonl record inside the round window ({artifact})"))
             continue
         if step == "re-arm":
             if not rearm_shape(artifact, started, now):

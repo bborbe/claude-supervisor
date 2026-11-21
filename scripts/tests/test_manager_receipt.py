@@ -187,8 +187,7 @@ class Receipt(unittest.TestCase):
         ev = self.events_log("events.jsonl", [time.time()])
         rd = self.artifact("readings.json", READINGS_OK)
         dv = self.artifact("drive.txt", DRIVE_OK)
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev),
-                        ("readings", rd), ("drive", dv)):
+        for step, p in (("needs-you", ny), ("sweep", sw), ("readings", rd), ("drive", dv)):
             self.record(step, p)
 
     # --- the red/green property ------------------------------------------------
@@ -219,13 +218,12 @@ class Receipt(unittest.TestCase):
     # --- the drive leg ---------------------------------------------------------
 
     def test_a_round_that_sweeps_and_skips_the_drive_leg_is_red(self):
-        # The measured incident: readings, needs-you, sweep and watcher all present and
+        # The measured incident: readings, needs-you and sweep all present and
         # real, five sweep readers after the last drive dispatch, and `--check` green
         # because the tuple had no field for the leg that never ran.
         self.start()
         for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
                         ("sweep", self.artifact("sweep.json", SWEEP_OK)),
-                        ("watcher", self.events_log("events.jsonl", [time.time()])),
                         ("readings", self.artifact("readings.json", READINGS_OK))):
             self.record(step, p)
         rc, out = self.check()
@@ -367,7 +365,7 @@ class Receipt(unittest.TestCase):
         ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
         sw = self.artifact("sweep.json", SWEEP_OK, age=3600)  # written before the round
         ev = self.events_log("events.jsonl", [time.time()])
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        for step, p in (("needs-you", ny), ("sweep", sw)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
@@ -379,7 +377,7 @@ class Receipt(unittest.TestCase):
         ny = self.artifact("needs-you.txt", NEEDS_YOU_OK, age=3600)
         sw = self.artifact("sweep.json", SWEEP_OK)
         ev = self.events_log("events.jsonl", [time.time()])
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        for step, p in (("needs-you", ny), ("sweep", sw)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
@@ -392,7 +390,7 @@ class Receipt(unittest.TestCase):
         ny = self.artifact("needs-you.txt", "")
         sw = self.artifact("sweep.json", "")
         ev = self.events_log("events.jsonl", [time.time()])
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        for step, p in (("needs-you", ny), ("sweep", sw)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
@@ -408,7 +406,7 @@ class Receipt(unittest.TestCase):
         # canonical wrong shape, because no producer writes it.
         sw = self.artifact("sweep.json", json.dumps({"header": ["Topic"], "rows": []}))
         ev = self.events_log("events.jsonl", [time.time()])
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        for step, p in (("needs-you", ny), ("sweep", sw)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
@@ -485,115 +483,6 @@ class Receipt(unittest.TestCase):
         # A `return True` stub fails every line above; so does one that only looks for
         # `│` anywhere, which a truncated frame still carries.
 
-    def test_watcher_shape_accepts_a_log_written_by_the_attention_watch(self):
-        # Call the producer's own writer, not a fixture: log_event is what appends
-        # every LIVENESS record the arm produces.
-        p = os.path.join(self.arts.name, "events.jsonl")
-        now = time.time()
-        # ⚠️ Written here rather than by the producer: the arm that wrote this file is
-        # retired, and importing it to prove the reader works would keep the deleted
-        # script alive as a test dependency. The shape is the contract, not the writer.
-        _write_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated · 33 held")
-        self.assertTrue(self.m.watcher_shape(p, now - 5, now + 5))
-
-    def test_watcher_shape_rejects_every_record_outside_the_window(self):
-        # The window excludes the log's newest record: the arm polled, but not this
-        # round. This is the rejection half — a predicate that accepts any parseable
-        # ts regardless of the window fails here.
-        p = os.path.join(self.arts.name, "events.jsonl")
-        _write_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated")
-        now = time.time()
-        self.assertFalse(self.m.watcher_shape(p, now - 7200, now - 3600))
-
-    # --- the heartbeat reads the record's ts, not the file's mtime -------------
-
-    def test_watcher_reads_record_ts_not_file_mtime(self):
-        # A fresh mtime over an arm that stopped polling: the file was touched, the
-        # arm was not alive. Only the newest RECORD's ts can tell these apart.
-        self.start()
-        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
-        sw = self.artifact("sweep.json", SWEEP_OK)
-        ev = self.events_log("events.jsonl", [time.time() - 3600])  # fresh mtime
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
-            self.record(step, p)
-        rc, out = self.check()
-        self.assertEqual(rc, self.m.EXIT_SKIPPED)
-        self.assertIn("skipped: watcher", out)
-
-    def test_watcher_absent_log_is_flagged(self):
-        self.start()
-        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
-        sw = self.artifact("sweep.json", SWEEP_OK)
-        for step, p in (("needs-you", ny), ("sweep", sw)):
-            self.record(step, p)
-        self.record("watcher", os.path.join(self.arts.name, "nope.jsonl"))
-        rc, out = self.check()
-        self.assertEqual(rc, self.m.EXIT_SKIPPED)
-        self.assertIn("skipped: watcher", out)
-
-    def test_watcher_empty_log_is_flagged(self):
-        # The arm armed but never appended: the file exists and its mtime is fresh,
-        # so an existence-or-recency check passes while nothing ever polled. Only
-        # the absent RECORD tells this apart from a live arm.
-        self.start()
-        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
-        sw = self.artifact("sweep.json", SWEEP_OK)
-        ev = self.artifact("events.jsonl", "")
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
-            self.record(step, p)
-        rc, out = self.check()
-        self.assertEqual(rc, self.m.EXIT_SKIPPED)
-        self.assertIn("skipped: watcher", out)
-
-    def test_watcher_malformed_records_do_not_mask_a_live_one(self):
-        # A torn line must be SKIPPED, not fatal: the arm appends while the manager
-        # reads, so a half-flushed record is an ordinary state and must not hide the
-        # good record beside it.
-        self.start()
-        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
-        sw = self.artifact("sweep.json", SWEEP_OK)
-        ev = os.path.join(self.arts.name, "events.jsonl")
-        with open(ev, "w", encoding="utf-8") as fh:
-            fh.write('{"kind": "LIVENESS", "ts": \n')  # torn write
-            fh.write("not json at all\n")              # garbage
-            fh.write("\n")                             # blank line
-            fh.write(json.dumps({"kind": "LIVENESS", "ts": time.time()}) + "\n")
-        rd = self.artifact("readings.json", READINGS_OK)
-        dv = self.artifact("drive.txt", DRIVE_OK)
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev),
-                        ("readings", rd), ("drive", dv)):
-            self.record(step, p)
-        rc, out = self.check()
-        self.assertEqual(rc, 0, out)
-
-    def test_watcher_log_of_only_malformed_records_is_flagged(self):
-        self.start()
-        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
-        sw = self.artifact("sweep.json", SWEEP_OK)
-        ev = os.path.join(self.arts.name, "events.jsonl")
-        with open(ev, "w", encoding="utf-8") as fh:
-            fh.write('{"kind": "LIVENESS", "ts": \n')          # torn write
-            fh.write('{"kind": "LIVENESS"}\n')                 # no ts at all
-            fh.write('{"kind": "LIVENESS", "ts": "soon"}\n')   # non-numeric ts
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
-            self.record(step, p)
-        rc, out = self.check()
-        self.assertEqual(rc, self.m.EXIT_SKIPPED)
-        self.assertIn("skipped: watcher", out)
-
-    def test_watcher_future_record_is_not_in_the_window(self):
-        # Clock skew, or a hand-written record: a ts AFTER `now` is not evidence the
-        # arm polled during this round.
-        self.start()
-        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
-        sw = self.artifact("sweep.json", SWEEP_OK)
-        ev = self.events_log("events.jsonl", [time.time() + 3600])
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
-            self.record(step, p)
-        rc, out = self.check()
-        self.assertEqual(rc, self.m.EXIT_SKIPPED)
-        self.assertIn("skipped: watcher", out)
-
     # --- the round window and receipt lifecycle --------------------------------
 
     def test_a_receipt_cannot_inherit_the_previous_rounds_artifacts(self):
@@ -646,7 +535,6 @@ class Receipt(unittest.TestCase):
         for step in ("needs-you", "sweep"):
             fp = d["fields"][step]
             os.utime(fp, (now - 700, now - 700))
-        d["fields"]["watcher"] = self.events_log("events2.jsonl", [now - 700])
         with open(p, "w") as fh:
             fh.write(json.dumps(d))
         rc, out = self.check()
@@ -1480,7 +1368,6 @@ class KeepAliveVerdicts(unittest.TestCase):
             fh.write(json.dumps({"kind": "LIVENESS", "ts": iso_ts(time.time())}) + "\n")
         for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
                         ("sweep", self.artifact("sweep.txt", SWEEP_OK)),
-                        ("watcher", ev),
                         ("readings", self.artifact("readings.json", READINGS_OK))):
             self.cli("--record", "--topic", self.topic, "--step", step, "--path", p)
 
