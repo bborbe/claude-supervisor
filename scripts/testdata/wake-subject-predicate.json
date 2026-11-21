@@ -32,10 +32,10 @@
       "keep": false
     },
     {
-      "name": "dead-manager-foreign",
-      "manager": {"subject": "Goal A", "fleet": false, "resolved": true},
+      "name": "fleet-with-no-subject-keeps",
+      "manager": {"subject": "", "fleet": true, "resolved": true},
       "producer": {"subject": "Goal B", "fleet": false, "resolved": true},
-      "keep": false
+      "keep": true
     },
     {
       "name": "manager-unresolved",
