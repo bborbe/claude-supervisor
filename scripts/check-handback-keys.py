@@ -103,7 +103,7 @@ LEGS = {
     # whose `legs=` vanished would render counts no digest carries, and the render reads the
     # digest. `dead-scan` is emitted because the digest write branches on it: it is the
     # `--floor` / `--exact` label, and inferring it from the count is the "a number with no
-    # label reads as a measurement" defect `output-shape.md` item 13 exists to remove.
+    # label reads as a measurement" defect `output-shape.md` item 12 exists to remove.
     "supervisor:fleet-keepalive-actor": {
         "agent": "agents/fleet-keepalive-actor.md",
         "sites": ("commands/steps/keepalive.md",),
