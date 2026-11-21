@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.364.3
 
 - docs: **`permission-channel.py`'s header no longer names the script it was extracted from.** The two mentions were the last retired-script references in a file created by this extraction, so rewording them removes the module from the set the deletion criterion has to clear. The behaviour is unchanged and nothing else in the file moved.
 
