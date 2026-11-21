@@ -96,7 +96,6 @@ once, reading its step file yourself:
 | 0 | Rules — always, before anything else | `steps/rules.md` |
 | 2 | Sweep — dispatch `supervisor:fleet-sweep-reader`, keep its ≤ 1 KB hand-back | `steps/sweep.md` |
 | 3 | Confirm the digest's candidates — only when the hand-back reports `orphan`, `collision` or `unmanaged` > 0 | `steps/confirm-candidates.md` |
-| 4 | Adopt — only when `adopt-orphans.py` printed rows or exited non-zero | `steps/adopt.md` |
 | 5 | Drive leg — every round | `steps/drive.md` |
 | 5b | Keep alive — every round, dispatch `supervisor:fleet-keepalive-actor` | `steps/keepalive.md` |
 | 5d | Own parks — every round; its `routed` parks and their request ids go to `parks=` so the manager's row 11 can put the ask | `steps/own-parks.md` |

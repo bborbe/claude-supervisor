@@ -1872,7 +1872,7 @@ class RearmShapeCountsHeadBeatsOnly(unittest.TestCase):
     Since the round grew a closing beat, one round writes two epochs into the same
     `<slug>.arms` ring inside the same window. Counting them alike let the tail beat
     clear a head arm that never ran: `--check` reports `skipped: re-arm`, then
-    `output-shape.md` item 12's row-20 `--debt` re-reads the ring, finds the tail epoch
+    `output-shape.md` item 11's row-20 `--debt` re-reads the ring, finds the tail epoch
     inside the window, and pays the debt — so the round that skipped its head arm reads
     complete one step later, which is the false green this predicate exists to prevent.
 
