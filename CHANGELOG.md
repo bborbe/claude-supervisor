@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- test: **the wake-subject ownership rule is one rule, pinned by a shared fixture.** `session-ownership.py` gains `wake_subject_keeps` — the subject-ownership decision the Go wake job (`bborbe/attention-controller` `pkg/wake-ownership.go` `WakeOwnership.Keeps`) now mirrors — and `scripts/testdata/wake-subject-predicate.json` is vendored byte-identically from that repo. `scripts/tests/test_wake_subject_predicate.py` asserts every fixture case against the Python implementation and fails if any arm defines a private copy of the rule. What is shared is the DECISION, not the loading: this module resolves subjects from the vault and the ledger, the Go job from `worker-manager`/`context` records. The live arms' exclusion logic is unchanged.
+
 ## v0.365.0
 
 - fix: **`manager-receipt.py --start` prints the round id (`round=<stem>`), and `round-dispatch.md` names it as the only source.** Round artifacts are named by the six-decimal stem, but `--start` printed only the slug, so the manager rebuilt the id itself. Measured 2026-11-21: one round passed an ISO timestamp, another the receipt float's 7-decimal repr (`1795255389.1027682` against artifacts under `1795255389.102768`), and the tail's `fleet-legs.py --status` read `UNKNOWN`. Change set: `scripts/manager-receipt.py`, `scripts/tests/test_manager_receipt.py`, `commands/steps/round-dispatch.md`, `CHANGELOG.md`.

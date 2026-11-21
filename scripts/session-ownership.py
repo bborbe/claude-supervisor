@@ -295,3 +295,34 @@ def live_ids(registry_dir=None):
         if sid:
             out.add(sid)
     return out
+
+
+def wake_subject_keeps(manager_subject, manager_fleet, producer_subject, producer_resolved):
+    """The subject ownership rule, shared with the Go wake job.
+
+    This is the ONE definition of the decision the fixture
+    `scripts/testdata/wake-subject-predicate.json` pins, and the Go side
+    (`pkg/wake-ownership.go` `WakeOwnership.Keeps`) must return the same verdict
+    for every case in it. The two implementations differ in how they LOAD their
+    inputs — this module reads the vault and the ledger, the Go job reads
+    `worker-manager`/`context` records — and that loading is deliberately not
+    shared. The DECISION is.
+
+    Branches, and why each is the fail-open direction:
+
+      * an unresolved producer, or one whose record names no subject, is unowned,
+        not foreign — no manager can prove the card is not theirs. It is kept by
+        the Fleet Manager alone, which is the one session whose job is the
+        fleet-wide residue.
+      * a manager with no resolved subject is not evidence of a foreign card, so
+        it keeps — the spawn-edge rule then decides, exactly as before.
+      * both resolved and equal — the card is this manager's, keep.
+      * both resolved and different — DROP. This is the only branch that drops,
+        and it drops on a POSITIVE foreign resolution, never on an absence.
+    """
+    if not producer_resolved or not producer_subject:
+        return bool(manager_fleet)
+    if not manager_subject:
+        return True
+    return manager_subject == producer_subject
+

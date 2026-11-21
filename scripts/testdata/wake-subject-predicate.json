@@ -1,0 +1,47 @@
+{
+  "description": "The subject ownership rule, shared by the Go wake job (pkg/wake-ownership.go) and the claude-supervisor Python arms. Each case is one (manager, producer) pair and the verdict the rule must return. The Go test and the Python test both read THIS file, so the two implementations cannot drift without one of them failing.",
+  "cases": [
+    {
+      "name": "foreign-goal",
+      "manager": {"subject": "Goal A", "fleet": false, "resolved": true},
+      "producer": {"subject": "Goal B", "fleet": false, "resolved": true},
+      "keep": false
+    },
+    {
+      "name": "own-goal",
+      "manager": {"subject": "Goal A", "fleet": false, "resolved": true},
+      "producer": {"subject": "Goal A", "fleet": false, "resolved": true},
+      "keep": true
+    },
+    {
+      "name": "unowned-non-fleet",
+      "manager": {"subject": "Goal A", "fleet": false, "resolved": true},
+      "producer": {"subject": "", "fleet": false, "resolved": false},
+      "keep": false
+    },
+    {
+      "name": "unowned-fleet",
+      "manager": {"subject": "", "fleet": true, "resolved": true},
+      "producer": {"subject": "", "fleet": false, "resolved": false},
+      "keep": true
+    },
+    {
+      "name": "empty-subject-non-fleet",
+      "manager": {"subject": "Goal A", "fleet": false, "resolved": true},
+      "producer": {"subject": "", "fleet": false, "resolved": true},
+      "keep": false
+    },
+    {
+      "name": "dead-manager-foreign",
+      "manager": {"subject": "Goal A", "fleet": false, "resolved": true},
+      "producer": {"subject": "Goal B", "fleet": false, "resolved": true},
+      "keep": false
+    },
+    {
+      "name": "manager-unresolved",
+      "manager": {"subject": "", "fleet": false, "resolved": false},
+      "producer": {"subject": "Goal B", "fleet": false, "resolved": true},
+      "keep": true
+    }
+  ]
+}
