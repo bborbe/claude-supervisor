@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.364.1
 
 - fix: **the gate-answerer dispatch now fires on the wake job's own line shape, not only on the feed's.** `commands/steps/attention-watcher.md` keyed the dispatch on `hst:<item-id>`, which is what `gate-owner-filter.py --feed` prints — while `attention-controller`'s in-process wake job types `attention gate: <item-id>` into the manager's pane (`managerWakeLinePrefix`). The rule would have gone **silently inert** the moment the feed arm is retired: the wake still arrives, and nothing answers it. Both shapes are now named, with the reason, so the arm removal cannot disable the dispatch without failing a read of this file.
 
