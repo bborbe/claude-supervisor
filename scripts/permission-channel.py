@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""The permission-channel reading, shared by the watcher and the round.
+"""The permission-channel reading, shared by the manager watcher and the round.
 
-`manager-attention-watch.py` decides whether a session's permission channel is
-aborting; `round-readings.py` needs the same reading for a different population —
-every id a row ever ran under, rather than the one tracked session. Keeping two
-copies would put the window in two places, and a drift would be SILENT: too short
-a window reads as "no aborts" rather than as an error.
+The manager watcher decides whether a session's permission channel is aborting;
+`round-readings.py` needs the same reading for a different population — every id a
+row ever ran under, rather than the one tracked session. Keeping two copies would
+put the window in two places, and a drift would be SILENT: too short a window reads
+as "no aborts" rather than as an error.
 
 ⚠️ The two callers apply `PERM_CHANNEL_STALE_S` differently ON PURPOSE — the round
 applies it, the watcher does not. See that constant's own comment before changing
 either. Sharing the reader does not mean sharing the policy.
 
-Extracted from `manager-attention-watch.py`, which re-exports every name here
-unchanged, so no caller had to move.
+The manager watcher re-exports every name here unchanged, so no caller had to move.
 """
 
 import datetime
