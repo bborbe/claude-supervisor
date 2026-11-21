@@ -18,6 +18,14 @@ the operator questions, the watchers, the voice and the round tail, and you prin
 file **after** that tail. The split, and why the manager no longer reads the step files, is
 `agents/fleet-round.md`.
 
+⚠️ **The round id is the `round=` token `manager-receipt.py --start` printed — verbatim.**
+Pass that token to the delegate and use it for every `<round>.*` path in the tail. Never
+re-read the receipt's `round_started_at` (its repr can carry a seventh decimal) and never pass
+a timestamp: the artifacts are named by the six-decimal stem, so any other spelling names files
+that do not exist. Measured 2026-11-21: one round passed an ISO stamp, another
+`1795255389.1027682` against artifacts under `1795255389.102768`, and the tail's
+`fleet-legs.py --status` read `UNKNOWN`.
+
 ⚠️ **The verdict is CHECKED, not trusted — run the gate before you read a single count.**
 `agents/fleet-round.md` already says *emit the fence and NOTHING else*, and the delegates
 ignore it: measured 2026-11-18 across eight live `supervisor:fleet-round` runs, **seven emitted

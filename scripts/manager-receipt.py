@@ -1330,7 +1330,11 @@ def start(topic: str, branch: str = "") -> int:
     elif started is not None:
         d["previous_round_started_at"] = started
     write_atomic(path(s), json.dumps(d) + "\n")
-    print(f"started {s}")
+    # ⚠️ **The round id is printed, never reconstructed by the caller.** Artifacts are
+    # named by `handback_stem` (six decimals); a caller re-reading the receipt float gets
+    # Python's repr (`1795255389.1027682`) and names a digest that does not exist.
+    # Measured 2026-11-21: one round passed an ISO stamp, another the 7-decimal repr.
+    print(f"started {s} round={handback_stem(d['round_started_at'])}")
     return 0
 
 

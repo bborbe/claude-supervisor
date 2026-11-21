@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2813,6 +2814,43 @@ class RoundEndPersisted(unittest.TestCase):
         with open(self.m.handback_path(started), "w", encoding="utf-8") as fh:
             fh.write("legacy body, no stamp\n")
         self.assertIsNone(self.m.round_end_from_handback(started))
+
+
+class StartPrintsRoundId(unittest.TestCase):
+    """`--start` prints the round id the artifacts are named by, so no caller rebuilds it.
+
+    Measured 2026-11-21 on the Fleet Manager: one round passed an ISO stamp as the round
+    id, another read the receipt float as `1795255389.1027682` (Python's repr) while the
+    artifacts were written under the six-decimal stem `1795255389.102768` — the tail's
+    digest path then named a file that did not exist.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        for t in (self.tmp, self.live):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def test_round_token_matches_the_artifact_stem(self):
+        started = 1795255389.1027682  # repr carries 7 decimals; the stem keeps 6
+        out, old = io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", "--start", "--topic", "Fleet Manager"]
+        try:
+            with unittest.mock.patch.object(self.m.time, "time", return_value=started), \
+                    redirect_stdout(out), redirect_stderr(io.StringIO()):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        out = out.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("round=1795255389.102768", out)
+        self.assertNotIn("round=1795255389.1027682", out)
+        self.assertEqual(out.split("round=", 1)[1].strip(), self.m.handback_stem(started))
 
 
 if __name__ == "__main__":
