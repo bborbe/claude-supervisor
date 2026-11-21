@@ -32,15 +32,22 @@ The base URL resolves `--base-url`, then `$SUPERVISOR_WRAPPER_URL`, then
 `http://localhost:18090` — the same convention `manager-liveness.py`, `deliver-message.py`
 and `reap-idle-headless.py` already follow. The override is what lets a probe point the
 caller at a second daemon (`claude-wrapper -listen :18091` with its own
-`SWEEP_GATE_STATE_DIR`) instead of stubbing the live one.
+`SWEEP_GATE_STATE_DIR`) instead of stubbing the live one. ⚠️ **It must be an ORIGIN, with
+no path** — the route is appended to it, so a value carrying a path would collect a
+route-level 404 the caller cannot tell from a gate that is down. A redirect is refused
+rather than followed, for the same reason `deliver-message.py` refuses one.
 
 Exit codes:
 
   0  at least one subject answered. A subject that failed is reported in `failed=` and is
      never silently dropped — a partial read that reads as a complete one is the same
-     false-quiet this task exists to remove.
-  1  every subject failed (the wrapper is down, or the state dir is unpopulated).
-  2  usage error: no subject, or a subject carrying a path separator or `..`.
+     false-quiet this task exists to remove. ⚠️ **Counting is per READ, not per distinct
+     subject:** `--subject X --subject X` is two reads, so two failures report `failed=2`
+     and exit 1. Keying on the subject name would collapse the repeat and return 0 on a
+     total failure.
+  1  every read failed (the wrapper is down, or the state dir is unpopulated).
+  2  usage error: no subject, a subject carrying a path separator or `..`, or a base URL
+     that is not an origin.
 
 ⚠️ **A 503 is an ANSWER, not a failure to retry.** The route refuses with 503 when the
 tick has not written rows yet, or when the cached rows are older than three tick intervals.
@@ -65,14 +72,37 @@ EXIT_ALL_FAILED = 1
 EXIT_USAGE = 2
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect instead of following it.
+
+    `urlopen` follows a 3xx by default, so a proxy or a misrouted port could turn this
+    read into a request to somewhere else and still report success. A redirect here means
+    the address is not what the caller thinks it is, which is a refusal. Same convention
+    as `deliver-message.py`.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def resolve_base_url(cli_value):
-    """`--base-url`, then `$SUPERVISOR_WRAPPER_URL`, then the local default."""
-    if cli_value:
-        return cli_value.rstrip("/")
-    env = os.environ.get("SUPERVISOR_WRAPPER_URL", "").strip()
-    if env:
-        return env.rstrip("/")
-    return DEFAULT_BASE_URL
+    """Return `(origin, None)` or `(None, problem)`.
+
+    ⚠️ **An ORIGIN, with no path.** The route is appended to this value, so a base URL
+    carrying a path would hit `<path>/api/1.0/sweep` and collect a route-level 404 — which
+    a caller cannot tell from a gate that is down. `rstrip("/")` does not enforce that;
+    `urlsplit` does. Same rule as `manager-liveness.py`'s reach probe.
+    """
+    raw = (cli_value or os.environ.get("SUPERVISOR_WRAPPER_URL", "") or DEFAULT_BASE_URL).strip()
+    parts = urllib.parse.urlsplit(raw)
+    if not parts.scheme or not parts.netloc:
+        return None, "base URL {!r} is not an origin".format(raw)
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return None, "base URL {!r} carries a path — the route is appended to an origin".format(raw)
+    return "{}://{}".format(parts.scheme, parts.netloc), None
 
 
 def refuse_unsafe_subject(subject):
@@ -100,7 +130,7 @@ def fetch_rows(base_url, subject, timeout=10.0):
         base_url, urllib.parse.quote(subject, safe="")
     )
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with _OPENER.open(url, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
@@ -187,39 +217,43 @@ def main(argv=None):
             print("bad-subject: {} ({!r})".format(problem, subject), file=sys.stderr)
             return EXIT_USAGE
 
-    base_url = resolve_base_url(args.base_url)
+    base_url, problem = resolve_base_url(args.base_url)
+    if problem:
+        print("bad-base-url: {}".format(problem), file=sys.stderr)
+        return EXIT_USAGE
 
     merged = collections.Counter()
-    per_subject = collections.OrderedDict()
-    failures = collections.OrderedDict()
+    # ⚠️ Both collections are LISTS keyed by occurrence, never dicts keyed by subject.
+    # A dict collapses a repeated `--subject`, so `--subject X --subject X` with both
+    # reads failing would leave one failure entry against two requested reads and return
+    # EXIT_OK on a total failure — the false-quiet this script exists to prevent.
+    results = []
+    failures = []
+    answered = 0
 
     for subject in args.subject:
         rows, reason = fetch_rows(base_url, subject)
         if reason is not None:
-            failures[subject] = reason
-            per_subject[subject] = {"error": reason}
+            failures.append({"subject": subject, "reason": reason})
+            results.append({"subject": subject, "error": reason})
             continue
         counts = count_buckets(rows)
         merged.update(counts)
-        per_subject[subject] = {
-            "buckets": dict(counts),
-            "rows": rows,
-        }
-
-    answered = len(args.subject) - len(failures)
+        answered += 1
+        results.append({"subject": subject, "buckets": dict(counts), "rows": rows})
 
     if args.json:
         payload = {
             "base_url": base_url,
             "pages": dict(sorted(merged.items())),
-            "failed": dict(failures),
-            "subjects": per_subject,
+            "failed": failures,
+            "subjects": results,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(render_pages_line(collections.OrderedDict(sorted(merged.items()))))
-        for subject, reason in failures.items():
-            print("failed={} reason={}".format(subject, reason))
+        for failure in failures:
+            print("failed={} reason={}".format(failure["subject"], failure["reason"]))
         if failures:
             print("failed={}".format(len(failures)))
 

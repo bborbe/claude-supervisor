@@ -146,7 +146,45 @@ class TestSweepBuckets(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(out)
         self.assertEqual(payload["pages"], {"probe-b": 1})
-        self.assertEqual(payload["failed"], {})
+        self.assertEqual(payload["failed"], [])
+        self.assertEqual(payload["subjects"][0]["subject"], "S")
+
+    def test_duplicate_subject_both_failing_is_not_a_success(self):
+        # The defect a review caught: keying failures by subject collapses a repeat, so
+        # two reads that BOTH failed left one entry against two requests and returned 0.
+        # A total failure reported as success is the false-quiet this script prevents.
+        with _Server({}) as srv:
+            code, out, _ = run(["--subject", "X", "--subject", "X", "--base-url", srv.base_url])
+        self.assertEqual(code, 1)
+        self.assertIn("failed=2", out)
+
+    def test_duplicate_subject_with_one_answer_counts_once(self):
+        with _Server({"X": (200, rows("done"))}) as srv:
+            code, out, _ = run(["--subject", "X", "--subject", "X", "--base-url", srv.base_url])
+        self.assertEqual(code, 0)
+        # Two reads of one subject are two rows, not one — the count is per READ.
+        self.assertIn("done=2", out)
+
+    def test_base_url_carrying_a_path_is_a_usage_error(self):
+        # The route is appended to the base, so a path would collect a route-level 404
+        # that is indistinguishable from a gate that is down.
+        code, _, err = run(["--subject", "S", "--base-url", "http://127.0.0.1:1/some/path"])
+        self.assertEqual(code, 2)
+        self.assertIn("bad-base-url", err)
+
+    def test_redirect_is_refused_not_followed(self):
+        # A proxy or a misrouted port must not silently turn this read into a request
+        # somewhere else that then reports success.
+        with _Server({"S": (302, {"Location": "http://example.invalid/x"})}) as srv:
+            code, out, _ = run(["--subject", "S", "--base-url", srv.base_url])
+        self.assertEqual(code, 1)
+        self.assertIn("failed=S", out)
+
+    def test_unparseable_body_fails_that_subject(self):
+        with _Server({"S": (200, "not json at all")}) as srv:
+            code, out, _ = run(["--subject", "S", "--base-url", srv.base_url])
+        self.assertEqual(code, 1)
+        self.assertIn("unparseable body", out)
 
     def test_base_url_env_var_is_honoured(self):
         # The convention the sibling scripts already follow; a probe relies on it to point
