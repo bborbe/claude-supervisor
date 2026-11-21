@@ -17,9 +17,14 @@ importing the whole filter, which would otherwise keep the filter undeletable. T
 imports them back and re-exports them unchanged.
 """
 
+import glob
 import importlib.util
 import json
 import os
+
+#: Where the session registry lives. Same default the filter's `--registry-dir` uses,
+#: so a reader here and a reader there cannot disagree about which directory is live.
+REGISTRY = os.path.expanduser("~/.claude/sessions")
 
 # Same env override the writer (`ownership-claim.py`) honours, deliberately: a
 # writer pointed at one file while every reader reads another is a SILENT
@@ -262,3 +267,31 @@ def owner_of(lines, index):
         if match:
             return match.group(1)
     return None
+
+
+def live_ids(registry_dir=None):
+    """Session ids the registry lists, or None when the registry is unreadable.
+
+    None is not "nothing is live": it is unknown, and the caller fails open.
+    """
+    if registry_dir is None:
+        registry_dir = REGISTRY
+    if not os.path.isdir(registry_dir):
+        return None
+    out = set()
+    for path in glob.glob(os.path.join(registry_dir, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                rec = json.load(handle)
+            # Same guard, same reason as `load_ledger` above: valid-but-non-object JSON
+            # parses and then has no `.get`. A registry entry is Claude Code's file, not
+            # ours, so a shape this reader did not anticipate is a live possibility rather
+            # than a hypothetical -- and crashing here takes the liveness read down with it.
+            if not isinstance(rec, dict):
+                continue
+        except (OSError, ValueError):
+            continue
+        sid = rec.get("sessionId") or rec.get("session_id")
+        if sid:
+            out.add(sid)
+    return out

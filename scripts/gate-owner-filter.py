@@ -284,6 +284,7 @@ is_human = _ownership.is_human
 feed_rows = _ownership.feed_rows
 headless_key = _ownership.headless_key
 owner_of = _ownership.owner_of
+live_ids = _ownership.live_ids
 REPLAY_MARK = _ownership.REPLAY_MARK
 
 EMIT = "emit"
@@ -582,32 +583,6 @@ def load_ledger(endpoint=None):
     return load_ledger_checked(endpoint) or {}
 
 
-
-
-def live_ids(registry_dir=REGISTRY):
-    """Session ids the registry lists, or None when the registry is unreadable.
-
-    None is not "nothing is live": it is unknown, and the caller fails open.
-    """
-    if not os.path.isdir(registry_dir):
-        return None
-    out = set()
-    for path in glob.glob(os.path.join(registry_dir, "*.json")):
-        try:
-            with open(path, encoding="utf-8") as handle:
-                rec = json.load(handle)
-            # Same guard, same reason as `load_ledger` above: valid-but-non-object JSON
-            # parses and then has no `.get`. A registry entry is Claude Code's file, not
-            # ours, so a shape this reader did not anticipate is a live possibility rather
-            # than a hypothetical -- and crashing here takes the liveness read down with it.
-            if not isinstance(rec, dict):
-                continue
-        except (OSError, ValueError):
-            continue
-        sid = rec.get("sessionId") or rec.get("session_id")
-        if sid:
-            out.add(sid)
-    return out
 
 
 def fleet_manager(live, directory=None):
