@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the four per-session Python attention watchers are gone — no manager arms a `Monitor` for the attention feed any more.** `attention-controller`'s in-process wake job watches the store and types `attention gate: <item-id>` into the manager's own pane, so the wake is a line in the pane rather than a poller's stdout. `commands/fleet-drive.md` row 13, `commands/steps/attention-watcher.md` and `commands/steps/round-tail.md` no longer arm anything, and `scripts/manager-attention-watch.py` plus its two suites are deleted. ⚠️ **The ownership filtering the arm did is not lost — it moved in-process**, and every branch has its own test: peer drop and dead-manager keep (`keeps()`), the operator's own `role: human` row (`#318`), another goal's gate (`#321`, reading the vault's stamps), and the line shape both the job and `agents/gate-answerer.md` now agree on. The dispatch rule keeps `hst:` beside `attention gate:` because a manager may still hold an older feed line in flight; nothing produces `hst:` any more.
+
 ## v0.365.0
 
 - fix: **`manager-receipt.py --start` prints the round id (`round=<stem>`), and `round-dispatch.md` names it as the only source.** Round artifacts are named by the six-decimal stem, but `--start` printed only the slug, so the manager rebuilt the id itself. Measured 2026-11-21: one round passed an ISO timestamp, another the receipt float's 7-decimal repr (`1795255389.1027682` against artifacts under `1795255389.102768`), and the tail's `fleet-legs.py --status` read `UNKNOWN`. Change set: `scripts/manager-receipt.py`, `scripts/tests/test_manager_receipt.py`, `commands/steps/round-dispatch.md`, `CHANGELOG.md`.
