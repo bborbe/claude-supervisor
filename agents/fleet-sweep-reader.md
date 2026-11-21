@@ -215,4 +215,6 @@ blocked=<n> · closers=<n> · orphan=<n> · reap=<n> · collision=<n> · unmanag
 ⚠️ **Every class the render's `CLASSIFICATION` line emits needs a key here, `held` included.** The hand-back is the caller's only view of the bucket set, so a class that appears in the render and is absent here is a bucket the caller cannot see at all — and `held` is the one class the render treats as winning over every other, which makes its absence the most misleading of the set.
 
 ⚠️ **A key whose pass did not run carries `UNKNOWN (pass not run)` in the value's place, never `0`** — the same discipline the render above applies to its own sections, for the same reason. ⚠️ **`payload=` is the path you wrote**, and it is the one value the caller forwards verbatim. Read the contract for the form; it is not restated here.
+
+⚠️ **Emit the fence and NOTHING else — no heading, preamble, table or trailing note.** The hand-back is the `text` block above and stops at its last count; an explanation belongs in the payload. Measured 2026-11-21: a prose `Notes:` block pushed this leg to **1 089–1 690 B** against the 1 024 B cap, 8 of 20 rounds over it. `agents/fleet-round.md:274` states the same rule.
 </output_format>

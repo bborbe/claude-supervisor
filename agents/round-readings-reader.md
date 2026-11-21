@@ -204,6 +204,8 @@ a park past its threshold); name those rows on one line under the counts,
 caller forwards `payload=` verbatim, renders the sweep dispatch's four map slots from it, and the
 sweep reader re-reads the same file as its own input and lets it win — which is why the counts,
 not the rows, are what your hand-back carries.
+
+⚠️ **Emit the fence and NOTHING else — no heading, preamble, table or trailing note.** The hand-back is the `text` block above and stops at its last count; an explanation belongs in the payload. Measured 2026-11-21: a prose `Notes:` block pushed this leg to **1 811 B** against the 1 024 B cap, 1 of 1 over it. `agents/fleet-round.md:274` states the same rule.
 </output_format>
 
 <success_criteria>
