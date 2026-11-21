@@ -33,7 +33,20 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(_HERE)
 BOX_TABLE = os.path.join(SCRIPTS, "box-table.py")
 PREDISPATCH = os.path.join(SCRIPTS, "manager-predispatch.py")
-ATTENTION_WATCH = os.path.join(SCRIPTS, "manager-attention-watch.py")
+# ⚠️ The arm that wrote `events.jsonl` is retired, so its record shape is written
+# here instead of imported from it — see `_write_event`. A reader test that depends
+# on a deleted producer keeps that producer alive as a test dependency.
+def _write_event(path, kind, sid8, label, detail):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "kind": kind,
+            "session": sid8,
+            "task": label,
+            "detail": detail,
+        }) + "\n")
+
 
 NEEDS_YOU_OK = "Needs you (0)\n\nNothing needs you.\n"
 
@@ -84,7 +97,7 @@ def render_table(header, rows):
 
 
 def iso_ts(epoch):
-    """A `ts` in the producer's own format — `manager-attention-watch.py:1445`."""
+    """A `ts` in the retired arm's format."""
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(epoch))
 
 
@@ -134,7 +147,7 @@ class Receipt(unittest.TestCase):
         """An events.jsonl whose NEWEST RECORD carries `newest_ts`.
 
         Written in the producer's own format — an ISO-8601 string with a numeric
-        offset, exactly as `manager-attention-watch.py:1445` writes it. A numeric
+        offset, exactly as the retired arm wrote it. A numeric
         fixture here would let a predicate that only accepts numbers look correct,
         which is the defect: it matched 0 of the 526 records in the measured log.
         """
@@ -475,19 +488,20 @@ class Receipt(unittest.TestCase):
     def test_watcher_shape_accepts_a_log_written_by_the_attention_watch(self):
         # Call the producer's own writer, not a fixture: log_event is what appends
         # every LIVENESS record the arm produces.
-        mw = load_module("manager_attention_watch", ATTENTION_WATCH)
         p = os.path.join(self.arts.name, "events.jsonl")
         now = time.time()
-        mw.log_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated · 33 held")
+        # ⚠️ Written here rather than by the producer: the arm that wrote this file is
+        # retired, and importing it to prove the reader works would keep the deleted
+        # script alive as a test dependency. The shape is the contract, not the writer.
+        _write_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated · 33 held")
         self.assertTrue(self.m.watcher_shape(p, now - 5, now + 5))
 
     def test_watcher_shape_rejects_every_record_outside_the_window(self):
         # The window excludes the log's newest record: the arm polled, but not this
         # round. This is the rejection half — a predicate that accepts any parseable
         # ts regardless of the window fails here.
-        mw = load_module("manager_attention_watch", ATTENTION_WATCH)
         p = os.path.join(self.arts.name, "events.jsonl")
-        mw.log_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated")
+        _write_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated")
         now = time.time()
         self.assertFalse(self.m.watcher_shape(p, now - 7200, now - 3600))
 
