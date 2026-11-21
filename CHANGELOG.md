@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- fix: **the gate-answerer dispatch now fires on the wake job's own line shape, not only on the feed's.** `commands/steps/attention-watcher.md` keyed the dispatch on `hst:<item-id>`, which is what `gate-owner-filter.py --feed` prints — while `attention-controller`'s in-process wake job types `attention gate: <item-id>` into the manager's pane (`managerWakeLinePrefix`). The rule would have gone **silently inert** the moment the feed arm is retired: the wake still arrives, and nothing answers it. Both shapes are now named, with the reason, so the arm removal cannot disable the dispatch without failing a read of this file.
+- fix: **the gate-answerer dispatch now fires on the wake job's own line shape, not only on the feed's.** `commands/steps/attention-watcher.md` keyed the dispatch on `hst:<item-id>`, which is what `gate-owner-filter.py --feed` prints — while `attention-controller`'s in-process wake job types `attention gate: <item-id>` into the manager's pane (`managerWakeLinePrefix`). The rule would have gone **silently inert** the moment the feed arm is retired: the wake still arrives, and nothing answers it. Both shapes are now named, with the reason, so the arm removal cannot disable the dispatch without failing a read of this file. ⚠️ **The dispatch alone was not enough — the review caught that the agent it dispatches to still accepted only `hst:` and would have reported the new shape `skip | tab gate`**, the same silent-inert outcome one hop later; `agents/gate-answerer.md` now takes both token shapes too.
 
 ## v0.364.1
 
