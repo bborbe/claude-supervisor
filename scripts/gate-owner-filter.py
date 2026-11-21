@@ -283,6 +283,8 @@ is_headless_key = _ownership.is_headless_key
 is_human = _ownership.is_human
 feed_rows = _ownership.feed_rows
 headless_key = _ownership.headless_key
+owner_of = _ownership.owner_of
+live_ids = _ownership.live_ids
 REPLAY_MARK = _ownership.REPLAY_MARK
 
 EMIT = "emit"
@@ -581,32 +583,6 @@ def load_ledger(endpoint=None):
     return load_ledger_checked(endpoint) or {}
 
 
-
-
-def live_ids(registry_dir=REGISTRY):
-    """Session ids the registry lists, or None when the registry is unreadable.
-
-    None is not "nothing is live": it is unknown, and the caller fails open.
-    """
-    if not os.path.isdir(registry_dir):
-        return None
-    out = set()
-    for path in glob.glob(os.path.join(registry_dir, "*.json")):
-        try:
-            with open(path, encoding="utf-8") as handle:
-                rec = json.load(handle)
-            # Same guard, same reason as `load_ledger` above: valid-but-non-object JSON
-            # parses and then has no `.get`. A registry entry is Claude Code's file, not
-            # ours, so a shape this reader did not anticipate is a live possibility rather
-            # than a hypothetical -- and crashing here takes the liveness read down with it.
-            if not isinstance(rec, dict):
-                continue
-        except (OSError, ValueError):
-            continue
-        sid = rec.get("sessionId") or rec.get("session_id")
-        if sid:
-            out.add(sid)
-    return out
 
 
 def fleet_manager(live, directory=None):
@@ -1097,35 +1073,6 @@ STORE_UNREAD = "unread"      # the read itself failed — nothing is known about
 # `grep -F` separates them and neither is a substring of the other.
 UNATTRIBUTED_TOKEN = "session=unattributed"
 STORE_FAILED_TOKEN = "store=unreachable"
-
-
-def owner_of(lines, index):
-    """The session id a pane-less row declares on its `owner:` line, or None.
-
-    A row with no pane cannot be joined to its session through the event log —
-    `session_for_pane` has no pane to match. `who-needs-me.py` knows the owner (it
-    read it from the store, or from the log on the fallback branch), so it renders
-    it on the row's continuation block; this reads it back.
-
-    The scan stops at the next `[...]` row marker, so an `owner:` line can never be
-    borrowed from a neighbouring row — the same guard `headless_key` applies.
-
-    ⚠️ **The alternative is a SECOND attention-store read.** `headless_items`
-    re-reads the store to recover exactly this mapping, and a transient 3 s
-    timeout there blanked every row's feed verdict for a whole manager round
-    (measured 2026-11-08 05:06:29Z: `gated=0 · clear=0 · unread=11` for 11 rows,
-    while the feed itself was answering). Carrying the owner on the row removes
-    that read and the failure with it.
-    """
-    import re
-
-    for line in lines[index + 1:]:
-        if re.match(r"\s*\[", line):
-            return None
-        match = re.search(r"^\s*owner:\s*(\S+)\s*$", line)
-        if match:
-            return match.group(1)
-    return None
 
 
 def headless_items_checked(keys, endpoint=None):
