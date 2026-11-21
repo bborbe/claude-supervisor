@@ -33,21 +33,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(_HERE)
 BOX_TABLE = os.path.join(SCRIPTS, "box-table.py")
 PREDISPATCH = os.path.join(SCRIPTS, "manager-predispatch.py")
-# ⚠️ The arm that wrote `events.jsonl` is retired, so its record shape is written
-# here instead of imported from it — see `_write_event`. A reader test that depends
-# on a deleted producer keeps that producer alive as a test dependency.
-def _write_event(path, kind, sid8, label, detail):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "kind": kind,
-            "session": sid8,
-            "task": label,
-            "detail": detail,
-        }) + "\n")
-
-
 NEEDS_YOU_OK = "Needs you (0)\n\nNothing needs you.\n"
 
 # The shape `scripts/round-readings.py` writes: the four verdict families per row.

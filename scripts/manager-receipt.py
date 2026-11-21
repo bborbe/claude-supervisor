@@ -1667,29 +1667,6 @@ def drive_shape(text: str) -> bool:
     return any(marker in body for marker in markers)
 
 
-def record_ts(value):
-    """A record's `ts` as epoch seconds, or None when it is not a timestamp.
-
-    `manager-attention-watch.py:1445` writes `time.strftime("%Y-%m-%dT%H:%M:%S%z")`
-    — an ISO-8601 string with a numeric offset. The predicate this replaced accepted
-    only `isinstance(ts, (int, float))`, so it matched **0** of the 526 records in
-    the measured log and every round reported `skipped: watcher` even while the arm
-    demonstrably polled inside the window.
-
-    A bare number stays accepted: it costs nothing and keeps a hand-written or older
-    log readable. Anything else — a torn line's junk, `"soon"`, a missing key —
-    returns None and is ignored, so one bad record never masks a good one.
-    """
-    if isinstance(value, (int, float)):
-        return float(value)
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z").timestamp()
-    except ValueError:
-        return None
-
-
 def _tail_epochs_beside(artifact: str) -> set:
     """The `<slug>.tail` store beside a `<slug>.arms` ring, as epoch keys.
 
