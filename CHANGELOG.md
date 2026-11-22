@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: **the fleet round drops its keep-alive and reap rows, and the keep-alive actor retires.** Both legs now run in the `claude-wrapper` keepalive tick, so `commands/fleet-drive.md` and `agents/fleet-round.md` no longer carry rows 5b, 6 and 16b, and `agents/fleet-keepalive-actor.md` is deleted (its one surviving pointer reworded so nothing dangles at the retired file). Rows are removed by LABEL, not line number — the pins had rotted twice and pointed at rows 5d/7/17-18 at `origin/master`.
+- feat: **the fleet round drops its keep-alive and reap rows.** Both legs now run in the `claude-wrapper` keepalive tick, so `commands/fleet-drive.md` and `agents/fleet-round.md` no longer carry rows 5b, 6 and 16b, and the two split lines that named them are retargeted. Rows are removed by LABEL, not line number — the pins had rotted twice and pointed at rows 5d/7/17-18 at `origin/master`. ⚠️ **`agents/fleet-keepalive-actor.md` is NOT deleted in this change:** retiring it fails the repo's own `check-handback-keys` and `check-handback-size` guards until every one of the 8 step files that dispatch it is re-pointed, so the retirement belongs with that scrub rather than here.
 
 ## v0.366.6
 
