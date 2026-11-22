@@ -10,7 +10,7 @@ When: every tick — after the re-arm (row 1), before the read half
 
 ⚠️ **The round's machine half runs in ONE delegate.** Dispatch `supervisor:fleet-round`
 **once**, passing the round id, this session's id, the vault and the absolute tasks dir. The
-delegate reads the step files, runs rows 0, 2–3, 5–10, 12, 15, 16b, 18 and 20 — dispatching the
+delegate reads the step files, runs rows 0, 2–3, 5, 7–10, 12, 15, 18 and 20 — dispatching the
 existing sweep, keep-alive and readings legs, taking the provenance acts, the cause check
 and the escalation, and writing the render to `<round>.render` — persists the round, and returns
 the ≤ 1 KB verdict plus the artifact paths. You keep rows 1, 11, 13, 14, 17 and 19: the re-arm,
