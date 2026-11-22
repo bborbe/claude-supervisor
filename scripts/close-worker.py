@@ -562,6 +562,42 @@ def find_task_checked(session_id, cwd, vault_root=None):
     return handed_off, error
 
 
+def _session_grep(session_id, dirs, timeout=15):
+    """`(paths, error)` — every task file in `dirs` that mentions `session_id`.
+
+    The one grep pass both task matchers share. `paths` carries whatever the search
+    printed, `error` carries why it may be incomplete, and the caller weighs the two: a
+    match is evidence even when the search also failed, while an empty result from a
+    failed search is not.
+
+    ⚠️ **ripgrep when it exists, and the difference is not cosmetic.** `grep -rl` over the
+    11 375-file `private-personal/25 Tasks` measured **19.6 s** on 2026-11-12 — past this
+    call's 15 s timeout — and a timeout here is indistinguishable from "no task claims this
+    session". That is the false `task-unresolved` the `find_task` docstring records, and for
+    the resume guard it is worse: `task is None` reads as "no anchor, allow the resume", so
+    the terminal-task guard went silently inert for a task that was plainly there.
+    `rg -l -F` over the same directory: **0.7 s**. The fallback keeps a host without rg
+    working, with grep's known cost.
+
+    ⚠️ **Parse the stdout BEFORE judging the exit code.** `grep -rl` can exit ≥ 2 and still
+    have printed every match it found before the error — discarding that output would lose a
+    task that is plainly there, which is the failure the exit-code check is meant to
+    prevent, arrived at from the other side.
+    """
+    rg = shutil.which("rg")
+    argv = (["rg", "-l", "-F", session_id, *dirs] if rg
+            else ["grep", "-rl", "--fixed-strings", session_id, *dirs])
+    try:
+        found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        return [], f"task lookup failed ({exc})"
+    paths = sorted((found.stdout or "").splitlines())
+    # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
+    if found.returncode not in (0, 1):
+        return paths, f"task lookup failed (exit {found.returncode})"
+    return paths, None
+
+
 def _grep_task(session_id, dirs, timeout=15):
     """`(own, handed_off, error)` for one grep pass over `dirs`; each of the first two may
     be `None`.
@@ -574,27 +610,9 @@ def _grep_task(session_id, dirs, timeout=15):
     out separately — and a caller that reads the absence as proof closes a live anchored
     session.
     """
-    # ⚠️ **ripgrep when it exists, and the difference is not cosmetic.** `grep -rl` over the
-    # 11 375-file `private-personal/25 Tasks` measured **19.6 s** on 2026-11-12 — past this
-    # call's 15 s timeout — and a timeout here is indistinguishable from "no task claims this
-    # session". That is the false `task-unresolved` the `find_task` docstring records, and for
-    # the resume guard it is worse: `task is None` reads as "no anchor, allow the resume", so
-    # the terminal-task guard went silently inert for a task that was plainly there.
-    # `rg -l -F` over the same directory: **0.7 s**. The fallback keeps a host without rg
-    # working, with grep's known cost.
-    rg = shutil.which("rg")
-    argv = (["rg", "-l", "-F", session_id, *dirs] if rg
-            else ["grep", "-rl", "--fixed-strings", session_id, *dirs])
-    try:
-        found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except Exception as exc:
-        return None, None, f"task lookup failed ({exc})"
-    # ⚠️ **Parse the stdout BEFORE judging the exit code.** `grep -rl` can exit ≥ 2 and
-    # still have printed every match it found before the error — discarding that output
-    # would lose a task that is plainly there, which is the failure the exit-code check is
-    # meant to prevent, arrived at from the other side.
+    paths, error = _session_grep(session_id, dirs, timeout)
     handed_off = None
-    for path in sorted((found.stdout or "").splitlines()):
+    for path in paths:
         fm = frontmatter(path)
         if (fm.get("claude_session_id") or "").strip() == session_id:
             return (path, fm, False), None, None
@@ -602,10 +620,9 @@ def _grep_task(session_id, dirs, timeout=15):
             handed_off = (path, fm, True)
     if handed_off is not None:
         return None, handed_off, None
-    # No match AND a failed search is the one combination that must not read as absence:
-    # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
-    if found.returncode not in (0, 1):
-        return None, None, f"task lookup failed (exit {found.returncode})"
+    # No match AND a failed search is the one combination that must not read as absence.
+    if error:
+        return None, None, error
     return None, None, None
 
 
@@ -621,34 +638,22 @@ def _grep_tasks(session_id, dirs, timeout=15):
 
     `held` are tasks whose `claude_session_id` is this session, `handed` tasks that list it
     only under `metrics_sessions` (a recorded handover); each entry is
-    `(path, frontmatter, handed_off)`. `error` is a string when the lookup failed, and the
-    caller must refuse on it: a failed grep is not evidence that no live task exists.
+    `(path, frontmatter, handed_off)`. `error` is carried out unchanged from
+    `_session_grep`, for the caller to weigh against the set it collected.
     """
-    rg = shutil.which("rg")
-    argv = (["rg", "-l", "-F", session_id, *dirs] if rg
-            else ["grep", "-rl", "--fixed-strings", session_id, *dirs])
-    try:
-        found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except Exception as exc:
-        return [], [], f"task lookup failed ({exc})"
-    # ⚠️ Parse the stdout BEFORE judging the exit code — `grep -rl` can exit ≥ 2 and still
-    # have printed every match it found before the error.
+    paths, error = _session_grep(session_id, dirs, timeout)
     held, handed = [], []
-    for path in sorted((found.stdout or "").splitlines()):
+    for path in paths:
         fm = frontmatter(path)
         if (fm.get("claude_session_id") or "").strip() == session_id:
             held.append((path, fm, False))
         elif session_id in metrics_session_ids(path):
             handed.append((path, fm, True))
-    # A match that was found is evidence even when the search also errored; only an empty
-    # result from a failed search is the unreadable-vs-absent collapse this module forbids.
-    if not held and not handed and found.returncode not in (0, 1):
-        return [], [], f"task lookup failed (exit {found.returncode})"
-    return held, handed, None
+    return held, handed, error
 
 
 def find_tasks(session_id, cwd, vault_root=None):
-    """`(held, handed, error)` — every task that records this session, across all vaults.
+    """`(held, handed, error)` — every TASK that records this session.
 
     The collect-all sibling of `find_task`, and **close-only**. `find_task` and
     `find_task_checked` keep their first-candidate contract: `restart-worker.py`,
@@ -656,10 +661,23 @@ def find_tasks(session_id, cwd, vault_root=None):
     import them, so changing `_grep_task`'s return semantics in place would move the
     resume guard and the reap decision with it.
 
+    ⚠️ **`task_dirs_for`, not `fleet_task_dirs`.** The fleet set is the *anchor* population
+    — it includes `24 Goals` and `23 Goals` (`FLEET_PROBE_DIRS`) because an absence proof
+    must cover every page a session can be anchored by. Collecting from it here would read
+    a goal page as a task and take the task branch for a session that holds only a goal,
+    bypassing `find_pages`/`page_verdict` and their different terminal rule. Goals and
+    topics keep their own path below; this function is tasks only.
+
     Both passes are scanned — unlike `find_task`, which stops at the first batch that
     answers — because a close needs the whole bound set, not one anchor. The cwd-derived
-    directories still go first, so the most relevant task is collected even if the wider
-    scan then times out; `error` is reported only alongside a set the caller can judge.
+    directories still go first, so the most relevant task is collected even when the wider
+    scan fails.
+
+    ⚠️ **A hit suppresses the error**, the rule `find_task_checked` already applies: a set
+    that was found is evidence, and only an EMPTY set from a failed search is the
+    unreadable-vs-absent collapse this module forbids. Refusing on any partial failure
+    would make the verb unusable on a host without `ripgrep`, where the wider pass costs the
+    measured 19.6 s and times out on every close — a refusal that names no live task at all.
     """
     held, handed = [], []
     if not session_id:
@@ -681,6 +699,8 @@ def find_tasks(session_id, cwd, vault_root=None):
             if entry[0] not in seen:
                 seen.add(entry[0])
                 (held if not entry[2] else handed).append(entry)
+    if held or handed:
+        error = None
     return held, handed, error
 
 
@@ -757,7 +777,7 @@ def task_verdict(task, today):
     )
 
 
-def task_gate(tasks, today):
+def held_task_gate(tasks, today):
     """The first refusal across every task the session holds, or `None` when all permit.
 
     A session can be bound to more than one task — a finished one and a live one — so the
@@ -981,7 +1001,7 @@ def main():
         # Every held task must pass. A session can be bound to a finished task and a live
         # one at once, so a first-candidate verdict closes on whichever sorts first — the
         # defect this gate exists to remove.
-        bad = task_gate(held_tasks, defer_date.as_now())
+        bad = held_task_gate(held_tasks, defer_date.as_now())
     else:
         # No held task. A task matched only through `metrics_sessions` (handed off) is
         # weaker evidence than a page the session still holds, so the pages are read in

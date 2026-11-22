@@ -375,7 +375,7 @@ class TestFindTasks(unittest.TestCase):
         self.assertEqual([os.path.basename(p) for p, _, _ in handed], ["z.md"])
 
 
-class TestTaskGate(unittest.TestCase):
+class TestHeldTaskGate(unittest.TestCase):
     """The multi-task close rule: any live task refuses, whatever sorts first.
 
     The motivating case is session `f8544288` (2026-11-09): a `completed` row and an
@@ -398,7 +398,7 @@ class TestTaskGate(unittest.TestCase):
             self._task("a-terminal.md", status="completed"),
             self._task("z-live.md", status="in_progress"),
         ]
-        refusal, detail = cw.task_gate(tasks, self.today)
+        refusal, detail = cw.held_task_gate(tasks, self.today)
         self.assertEqual(refusal, "task-not-terminal")
         self.assertIn("z-live.md", detail)
         self.assertNotIn("a-terminal.md", detail)
@@ -408,7 +408,7 @@ class TestTaskGate(unittest.TestCase):
             self._task("a-live.md", status="in_progress"),
             self._task("z-terminal.md", status="completed"),
         ]
-        refusal, detail = cw.task_gate(tasks, self.today)
+        refusal, detail = cw.held_task_gate(tasks, self.today)
         self.assertEqual(refusal, "task-not-terminal")
         self.assertIn("a-live.md", detail)
 
@@ -418,22 +418,22 @@ class TestTaskGate(unittest.TestCase):
             self._task("a.md", status="completed"),
             self._task("b.md", status="aborted"),
         ]
-        self.assertIsNone(cw.task_gate(tasks, self.today))
+        self.assertIsNone(cw.held_task_gate(tasks, self.today))
 
     def test_a_single_terminal_task_still_closes(self):
-        self.assertIsNone(cw.task_gate([self._task("a.md", status="completed")], self.today))
+        self.assertIsNone(cw.held_task_gate([self._task("a.md", status="completed")], self.today))
 
     def test_a_handed_off_live_task_still_closes(self):
         """A task the session handed over is the successor's business, not this session's."""
         handed = ("/v/25 Tasks/h.md", {"status": "in_progress"}, True)
-        self.assertIsNone(cw.task_gate([handed], self.today))
+        self.assertIsNone(cw.held_task_gate([handed], self.today))
 
     def test_a_live_task_behind_a_handed_off_one_still_refuses(self):
         tasks = [
             ("/v/25 Tasks/a-handed.md", {"status": "in_progress"}, True),
             self._task("z-live.md", status="in_progress"),
         ]
-        refusal, detail = cw.task_gate(tasks, self.today)
+        refusal, detail = cw.held_task_gate(tasks, self.today)
         self.assertEqual(refusal, "task-not-terminal")
         self.assertIn("z-live.md", detail)
 
@@ -526,9 +526,9 @@ class TestCliRefusals(unittest.TestCase):
         with open(os.path.join(self.sessions, f"{rec['pid']}.json"), "w", encoding="utf-8") as handle:
             json.dump(rec, handle)
 
-    def _task(self, **fm):
+    def _task(self, name="t.md", **fm):
         lines = ["---"] + [f"{k}: {v}" for k, v in fm.items()] + ["---", ""]
-        with open(os.path.join(self.tasks, "t.md"), "w", encoding="utf-8") as handle:
+        with open(os.path.join(self.tasks, name), "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines))
 
     def _run(self, *extra, holds=None, bin_dir=None, home=None):
@@ -549,6 +549,31 @@ class TestCliRefusals(unittest.TestCase):
             [sys.executable, SCRIPT, SID, *extra],
             capture_output=True, text=True, env=env, timeout=60,
         )
+
+    def test_a_second_live_task_blocks_the_close(self):
+        """A session bound to a terminal task AND a live one refuses, naming the live one.
+
+        The motivating defect: `_grep_task` returned the first `claude_session_id` match, so
+        `a-terminal.md` sorting first closed the session while `z-live.md` was still being
+        worked. This runs the whole CLI, so reverting `main()` to `find_task` fails here even
+        though every helper-level test still passes.
+        """
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("a-terminal.md", **{"claude_session_id": SID, "status": "completed"})
+        self._task("z-live.md", **{"claude_session_id": SID, "status": "in_progress"})
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertIn("z-live.md", done.stdout)
+        self.assertNotIn("a-terminal.md", done.stdout)
+
+    def test_a_single_terminal_task_still_closes(self):
+        """The multi-task gate must not over-refuse: one finished task still closes."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("a-terminal.md", **{"claude_session_id": SID, "status": "completed"})
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("would close", done.stdout)
 
     def test_unknown_session_id(self):
         done = self._run()
