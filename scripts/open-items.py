@@ -141,7 +141,7 @@ MARKERS = {
 DETAIL_SUFFIX = {"ok": "", "unknown": " (not searched)"}
 
 # The sibling that owns the board POST. Shelled out rather than re-implemented, for the
-# reason `manager-attention-watch.py` records for its own re-post site: `attention-ask.py`
+# reason the delivery arm records for its own re-post site: `attention-ask.py`
 # owns the dedup key, the `owner:` liveness default and the TTL bound, and a second POST
 # site here would be a second place for all three to drift — with the store's pruning rule
 # turning a wrong `liveness_ref` into a silently deleted card rather than an error anyone
@@ -789,7 +789,7 @@ def post_card(item, sid, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
 
     ⚠️ `liveness_ref` is deliberately left at `attention-ask.py`'s `owner:` default. A
     `session:<id>` subject makes the store PRUNE the card on the first read after the poster
-    exits (`manager-attention-watch.py:1143`), which would delete precisely the asks this
+    exits (the delivery arm's prune), which would delete precisely the asks this
     ledger exists to keep outstanding across a session boundary.
 
     Returns None — never raises — when the entry carries too few options or the store is

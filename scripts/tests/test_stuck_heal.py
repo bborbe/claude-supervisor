@@ -1,5 +1,5 @@
 """Tests for scripts/stuck-heal.py — the heal ladder the manager executes on a
-`stuck:` gate from scripts/manager-attention-watch.py.
+`stuck:` gate from the manager-wake job.
 
 The script only DECIDES; every effect is injected, so the ladder is tested as a
 table plus a fake-effects run, and the ledger join against synthetic records.

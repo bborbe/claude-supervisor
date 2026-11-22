@@ -1627,7 +1627,7 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
 
     ⚠️ **A `LIVENESS` line per poll is load-bearing, not decoration.** A
     change-detector is silent when nothing changes, and silence is byte-identical
-    to a dead arm — the defect `manager-attention-watch.py` closed for its own arm
+    to a dead arm — the defect the manager-wake job closed for its own arm
     with the same record. Its presence answers *alive or stuck?* and its age is
     the arm's last heartbeat.
 

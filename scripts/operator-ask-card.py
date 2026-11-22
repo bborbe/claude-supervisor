@@ -27,7 +27,7 @@ garbage.
 
 ⚠️ **`--closer` takes the whole `👤 You:` line, so the verb is NOT at position 0.** Panes
 render `👤 You: pick — …`, sometimes with markdown emphasis or `&nbsp;` padding, and
-`manager-attention-watch.py` carries a `normalize_closer()` for exactly that. Anchoring the
+the manager-wake job carries a `normalize_closer()` for exactly that. Anchoring the
 verb at the raw string's start classified the documented input shape as NOT-AN-ASK — the
 loophole that would hide every `pick` parked session. `normalize_closer()` strips the
 prefix, the entities and the leading marker characters first.
@@ -87,7 +87,7 @@ def normalize_closer(text):
 
     ⚠️ Load-bearing, not cosmetic: the verb is anchored at the body's start, and the
     documented input is the whole panel line — panes have emitted `👤 You: &nbsp;&nbsp;nothing`.
-    `manager-attention-watch.py` splits the same problem across two helpers (`closer_line()`
+    the manager-wake job splits the same problem across two helpers (`closer_line()`
     extracts the line, `normalize_closer()` unescapes it); this one does both in a pass,
     and additionally strips leading markers, because `⚠️ pick — …` is a real panel shape.
     """
