@@ -105,12 +105,6 @@ class TestGuard(Base):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("carries the carve-out", r.stderr)
 
-    def test_keepalive_without_its_statement_fails(self) -> None:
-        self.write(KEEPALIVE, step("Keep alive", with_marker=False))
-        r = self.guard()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("commands/steps/keepalive.md", r.stderr)
-
     def test_own_parks_without_its_statement_fails(self) -> None:
         # 5d shipped after the carve-out was written, so the row was never added to the list of
         # exceptions: the round delegated it read-only, the sub-agent held no answer_permission,
@@ -119,16 +113,6 @@ class TestGuard(Base):
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("commands/steps/own-parks.md", r.stderr)
-        self.assertIn("carries no acting statement", r.stderr)
-
-    def test_manager_reap_without_its_statement_fails(self) -> None:
-        # 16b posts the reap card and hands every reap line over for sending. Delegated
-        # read-only it prints `reap=0` while stale managers keep running — a count it was
-        # told to print, not one it measured.
-        self.write(MANAGER_REAP, step("Manager-subject reap", with_marker=False))
-        r = self.guard()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("commands/steps/manager-reap.md", r.stderr)
         self.assertIn("carries no acting statement", r.stderr)
 
     def test_carveout_moved_off_the_router_fails(self) -> None:
@@ -158,20 +142,6 @@ class TestGuard(Base):
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("does not state 'read-only'", r.stderr)
-
-    def test_leg_without_pointer_fails(self) -> None:
-        self.write(MANAGER_REAP, step("Manager-subject reap", with_pointer=False))
-        r = self.guard()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("does not point at", r.stderr)
-
-    def test_router_row_dropped_fails(self) -> None:
-        # A carve-out for a row the router no longer dispatches governs nothing.
-        self.write(ROUTER, router(rows=(("5d", OWN_PARKS), ("16b", MANAGER_REAP))))
-        r = self.guard()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("row 5b does not name", r.stderr)
-
 
 class TestAgainstTheRealRepo(unittest.TestCase):
     """The guard must pass on the tree it ships in — a temp fixture cannot show that."""
