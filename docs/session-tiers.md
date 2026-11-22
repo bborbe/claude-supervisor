@@ -167,14 +167,17 @@ subject — two sessions on one subject are a double writer.
 | **Worker** — task with no goal | the fleet manager, or the topic manager listing the task | the **fleet round** | `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `worker--<slug>` cap; a task with no recorded id is reported, never opened |
 | **Background sub-agent** | its worker | **no keeper, by decision 2026-11-08** | — | it dies with its parent session, so a worker never parks a wait on one |
 
-⚠️ **A worker crash loop is a manager decision, and only the goal-less row reaches the
-operator.** `scripts/worker-keepalive.py` posts its `crash-loop:` attention card only when
-`goal_owners()` resolved **no** declared goal — no `goals:` key, or every declared goal page
-unopenable. A task with a resolvable goal is manager-owned even when that goal's manager is
-dead: the `crash-loop:` row in the keep-alive hand-back is the channel, and the fleet round
-carries the action — restart or resume the goal's manager through the same `lapsed-managers`
-mechanism, or reap/stand down the worker. Asking the operator to decide a resume the manager
-tier is already obliged to make is the defect this boundary removes.
+⚠️ **A worker crash loop is a manager decision, and no card reaches the operator.** A crash
+loop is by definition already stopped, so `scripts/worker-keepalive.py`'s card recommended
+`keep stopped` — the state the row is in — and asked the operator to ratify the no-op the
+system performs on its own: 189 cards in 24 h, not one answered. `post_card()` therefore
+refuses a card whose recommendation equals the row's current state, which suppresses the mint
+for **every** row whatever its parentage. The `crash-loop:` row in the keep-alive hand-back is
+the channel, and the fleet round carries the action — restart or resume the goal's manager
+through the same `lapsed-managers` mechanism, or reap/stand down the worker. A row whose goal
+manager is dead is manager-owned all the same; a goal-less row is the fleet leg's own. Asking
+the operator to decide a resume the manager tier is already obliged to make is the defect this
+boundary removes.
 
 Infrastructure outside the session tree is owned by **launchd** (the `claude-wrapper` daemon,
 the attention watcher, the model-free gate loop) and cluster work by its **controller**. Those
