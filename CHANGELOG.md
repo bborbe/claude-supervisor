@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.7
 
 - fix: **a crash-loop posts no attention card, because its recommended option was the no-op the system already performs.** `post_card()` hardcoded `--recommend "keep stopped"`, and a crash-looping row is already stopped, so every card asked the operator to ratify what happens anyway — 189 `crash-loop:` cards in 24 h (11.3 % of the board), none answered, three dedup keys re-minted 62 times each at a 19-minute median gap. A new `card_is_noop()` predicate gates the mint, so a card whose recommendation equals the row's current state is not posted; the `crash-loop:` row in the fleet leg's hand-back remains the channel. This **supersedes the routing #1056 (v0.362.9) added** for a task with no resolvable goal page — that card is a no-op whatever the row's parentage — and the test that pinned it is rewritten rather than deleted. `recommend`/`current` are parameters so the guard is a filter and not a blanket suppression, and both directions are pinned. Change set: `scripts/worker-keepalive.py`, `scripts/tests/test_worker_keepalive.py`, `docs/session-tiers.md`, `CHANGELOG.md`.
 ## v0.366.6
