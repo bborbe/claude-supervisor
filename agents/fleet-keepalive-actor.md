@@ -122,43 +122,24 @@ The topic tier has no keep-alive of its own, so a lapsed topic manager stayed la
 leg is the missing rung: **restart is not open**, so resuming one that already
 owns its subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 
-**Population — every topic page carrying a session id.** Read the vault's topic directory, not
-the roster: a topic manager whose session died is absent from the roster, which is the row this
-leg exists to recover. ⚠️ **Resolve the directory from the vault's own config, never
-assume `23 Topics`** — a renamed directory would glob nothing and the leg would report a clean
-round, the exact silent failure it exists to remove:
+**Population — every topic page whose verdict is not `loop-stopped`.** ⚠️ **Never select on
+`claude_session_id`.** That is the field the stood-down handover clears, so filtering on it
+drops the page a close just handed over and no replacement manager is ever opened for it.
+Read the vault's topic directory, not the roster: a topic manager whose session died is
+absent from the roster, which is the row this leg exists to recover. The selection lives in
+`scripts/topic-candidates.py`, which asks `scripts/owner.py` — the one ownership definition —
+and refuses only `loop-stopped`; it also resolves the directory from the vault's own config,
+so a renamed topics directory cannot glob nothing and report a clean round.
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-F=$(python3 "$P/resolve-folders.py" --vault "<vault>" --require topics_dir)
-python3 -c '
-import pathlib, re, subprocess, sys
-vault, f, script = sys.argv[1:4]
-if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
-topics = f.split("|")[0]
-for f in sorted((pathlib.Path(vault) / topics).glob("*.md")):
-    if f.name.startswith("."):
-        continue                       # bash `*.md` never matches a dotfile
-    try:
-        text = f.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        continue                       # an unreadable file fails `grep -q` too
-    if not re.search(r"^claude_session_id: *[^ \n]", text, re.M):
-        continue
-    out = subprocess.run(
-        [sys.executable or "python3", script, "--vault", vault, "--subject", f.stem,
-         "--branch", "topic", "--dir", topics],
-        stdout=subprocess.PIPE, text=True).stdout
-    lines = out.split("\n")
-    head = "\n".join(lines[:2]) + ("\n" if len(lines) > 2 else "")
-    print(f.stem + "\t" + head.replace("\n", "\t"), end="\n")
-' "<vault>" "$F" "$P/topic-keepalive.py"
+python3 "$P/topic-candidates.py" --vault "<vault>"
 ```
 
 ⚠️ **One `python3` call, never a shell `for`.** `allowed-tools` grants fixed command **prefixes**,
 and a `for … do … done` matches none of them, so a shell loop escalates a permission prompt every
-round and the leg stops running unattended. The snippet prints one line per page — `name<TAB>`,
-then the script's first two lines each tab-terminated.
+round and the leg stops running unattended. The script prints one line per candidate —
+`name<TAB>`, then the ladder's first two lines each tab-terminated.
 
 ⚠️ **Step 0's read first, on the topic page's session id** — a held topic manager is **neither
 restarted nor resumed**, whatever the verdict says: a hold is operator policy about a session, so

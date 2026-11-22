@@ -226,12 +226,12 @@ manager is the first step of a chain, not a single-step fix**: the topic page be
 armed manager reads `"declaring topic(s) have no live armed manager"`
 (`scripts/keeper-census.py:396-397`).
 
-⚠️ **And the chain does not close by itself.** The handover clears the page's
-`claude_session_id`, and the keep-alive leg's § 1 population is *every topic page carrying a
-session id* (`agents/fleet-keepalive-actor.md:149`) — so a page this leg has handed over drops
-out of that population and § 1 will not open a replacement manager for it. Re-opening is a
-**separate gap, not a consequence of this close**, and a round must not report the goals kept
-after a close on the assumption that it follows.
+⚠️ **The handover no longer strands the page — the `STOPPED` rule is what keeps the chain
+open.** § 1 selects on `scripts/owner.py`'s verdict through `scripts/topic-candidates.py` and
+refuses only `loop-stopped`, so a page this leg has handed over **stays in the population** and
+a re-manageable topic gets a replacement manager. A `STOPPED` topic is still never re-opened,
+so for one of those the goals stay unkept — a round must not report them kept after a close on
+the assumption that it follows.
 
 ### Three invariants
 
