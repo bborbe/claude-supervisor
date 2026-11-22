@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.6
 
 - docs: **the `clock` durable-observable comment now names only forms the arm actually rejects, states that the arm is prefix-bounded, and records the separator limitation.** Three residuals left by #730: the comment listed `2026-11-09T15` and `2026-11-09T15:30abc` as rejected though both CLEAR (backtracking to a `YYYY-MM-DDThh` prefix), said nothing about that prefix-bounding, and left the parser-accepted-but-blocked separator family (`2026-11-09X15:30`, `2026-11-09123` read as 23:00) unstated. The comment now names `2026-11-09abc` / `2026-11-0912` as the genuine rejections, documents the prefix-bounded looseness, and records the separator limitation as deliberately deferred; a new `test_the_clock_comment_names_only_genuinely_rejected_forms` reads the comment text so a green suite cannot pass over a lying comment, and `test_an_iso_datetime_is_a_clock_observable` pins `2026-11-09X15:30` as staying blocked. Comment and tests only — the `clock` regex is unchanged. Change set: `scripts/closer-gate-lint.py`, `scripts/tests/test_closer_gate_lint.py`, `CHANGELOG.md`.
 
