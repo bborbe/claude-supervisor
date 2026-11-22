@@ -384,8 +384,16 @@ SESSION_BOUND = (
 # ⚠️ Two boundary rules, each bought with a measured regression:
 #
 #  1. The terminator is `(?!\w)`, never `\b`. A `Z` suffix is a WORD character, so `\b`
-#     after the final digit can never match `2026-11-09T15:30Z`. `(?!\w)` also rejects
-#     every trailing word run (`2026-11-09T15`, `2026-11-09T15:30abc`, `2026-11-09123`).
+#     after the final digit can never match `2026-11-09T15:30Z`. `(?!\w)` rejects a
+#     trailing word run only where it is not a single-character separator: `2026-11-09abc`
+#     and `2026-11-0912` are rejected, while `2026-11-09123` is accepted by the parser as
+#     23:00 (separator `1`, hour `23`) — see the known limitation below.
+#
+#     ⚠️ The arm is PREFIX-bounded, not shape-bounded: `2026-11-09T15` and
+#     `2026-11-09T15:30abc` both CLEAR, by backtracking to a `YYYY-MM-DDThh` prefix that
+#     terminates at end-of-string or before the `:`. Any cleared line still carries a
+#     complete durable date, so the looseness is acceptable for this class — but it is
+#     not rejection, and the rejected examples above are the only genuine ones.
 #  2. It must NOT include `-`. `\b` matched between `9` and `-`, so `(?![\w-])` newly
 #     blocked `2026-11-09-15:30` — which `datetime.fromisoformat` accepts, with `-` as
 #     the separator — and `2026-11-09-rollout`. A narrowing that blocks a compliant
@@ -395,6 +403,12 @@ SESSION_BOUND = (
 # both cases: it rewrites a lowercase `z` to `+00:00`, and `fromisoformat` takes any
 # single separator character. Hours may stand alone (`2026-11-09T15`), which the parser
 # also accepts.
+#
+# ⚠️ Known limitation: because this arm accepts only `[Tt ]` as the date/time separator,
+# a parser-accepted clock using any other single separator — `2026-11-09X15:30`, or
+# `2026-11-09123` read as 23:00 — is still BLOCKED. That is a false positive of the same
+# family PR #730 fixed, left deliberately: widening the separator class is a separate
+# change (it alters a `Stop` hook loaded in every session), tracked outside this fix.
 #
 # The arm remains a SHAPE-subset of `defer-date.py`'s `parse_defer_date`, not a range
 # subset: `2026-11-09T99:99` matches here and the parser calls it invalid. That
