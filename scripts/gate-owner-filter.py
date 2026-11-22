@@ -402,7 +402,7 @@ FEED_STATE_DIR = os.environ.get("GATE_FEED_STATE_DIR") or os.path.expanduser(
 # event-only delivery, with nothing left to re-drive it. The re-arm used to be that
 # backstop (`65 Runbooks/Manager Session.md`, both copies: *"the re-arm is the
 # documented backstop for a wake that was lost"*), and persisting the state removes
-# it. `manager-attention-watch.py`'s `AGED` rung is NOT a full replacement: it fires
+# it. The manager-wake job's `AGED` rung is NOT a full replacement: it fires
 # on the TRACKED set, while this filter's kept set is wider -- unowned panes, a dead
 # spawner's panes, peer non-managers -- and a gate in that residual class would have
 # no re-drive at all.
@@ -1691,7 +1691,7 @@ def poll(args, items, scope=None):
     ⚠️ **A `LIVENESS` line goes to stderr on EVERY poll, and it is the point of
     the loop rather than decoration.** A change-detector is silent when nothing
     changes, and silence is byte-identical to a dead arm — the defect
-    `manager-attention-watch.py` closed for its own arm with the same record. The
+    the manager-wake job closed for its own arm with the same record. The
     line carries the counts, so an arm that is up and finding nothing reads
     differently from one that never ran.
 
@@ -1803,7 +1803,7 @@ def poll(args, items, scope=None):
 
         # ⚠️ The bound is checked BEFORE the sleep, so `--max-polls 1` is a real
         # single poll rather than one poll plus an interval of dead waiting. It
-        # exists for the same reason its sibling in `manager-attention-watch.py`
+        # exists for the same reason its sibling in the manager-wake job
         # does: an unbounded loop is testable only by killing it, and a test that
         # races the clock pins nothing.
         polls += 1

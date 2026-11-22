@@ -191,7 +191,7 @@ SITE_LIST = {
     # The split is load-bearing: `""` is what licenses `HEADLESS` and `None` is retried as
     # `tty-unreadable`, so a failed read can never excuse a missed wake as headless.
     ("manager-wake.py", "_pid_tty"),
-    # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
+    # added 2026-10-22 — the manager-wake job's pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
     # absent, and the card must degrade to "no jump target" rather than claim there is

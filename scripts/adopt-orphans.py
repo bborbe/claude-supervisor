@@ -226,7 +226,7 @@ def parked_workers(workers, registry):
     request against the live spawner the adoption just named.
 
     ⚠️ **`waiting` is the registry's own word for parked**, the same field
-    `manager-attention-watch.py` reads for `registry:waiting`. A worker that is `busy` is
+    the manager-wake job reads for `registry:waiting`. A worker that is `busy` is
     mid-turn and a worker that is `idle` is between turns; neither is waiting on an answer
     that will never come, so neither belongs here.
 

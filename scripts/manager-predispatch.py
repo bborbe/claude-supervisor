@@ -1979,7 +1979,7 @@ def digest_of(tracked: list[dict]) -> str:
     it never calls `--print` or `--check`, so it never consults this digest at all, and
     its attention-feed read is step 4's first bullet (`commands/goal-loop.md:186`),
     which runs before any verdict. The independent surfacing that does hold is step 7's
-    `manager-attention-watch.py` / feed-Monitor arms, which fire `NEW GATE` off the
+    the manager-wake job / feed-Monitor arms, which fire `NEW GATE` off the
     registry and the feed rather than off this digest.
 
     ⚠️ **The churn suppression is NOT absolute, and the second route is named here rather

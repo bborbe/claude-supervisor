@@ -347,7 +347,7 @@ def fetch_history(store, timeout, limit):
     """Proposal cards only — the store narrows server-side on `dedup_key_prefix`.
 
     The unfiltered history read is ~19k items / ~16 MB and was measured at 41 % of the
-    store's allocation (`manager-attention-watch.py` added the same prefix for the same
+    store's allocation (the delivery arm added the same prefix for the same
     reason). This caller runs on every fleet tick, so it narrows to its own key space
     instead of pulling the whole board each time.
     """

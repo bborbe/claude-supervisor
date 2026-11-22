@@ -14,7 +14,7 @@ resolution. Two mechanisms make a close read as an answer and neither of them is
     session stays frozen exactly as it was (`attention-controller`
     pkg/attention-store-attempt.go: "a close is a clear, not an answer -- the
     discriminator is `answered_at`");
-  * `scripts/manager-attention-watch.py` emits `CLEARED` when a worker settles at
+  * the manager-wake job emits `CLEARED` when a worker settles at
     `idle` carrying no closer line, which is a transcript-shape settle, not proof the
     worker acted after the answer.
 
@@ -1079,7 +1079,7 @@ def parse_any_ts(value):
 def transcript_for(projects_root, session_id):
     """The transcript for a session, resolved by id PREFIX — the watcher's own join.
 
-    `manager-attention-watch.py` resolves the same way (`<sid8>*.jsonl` under the
+    the manager-wake job resolves the same way (`<sid8>*.jsonl` under the
     projects root), so this reuses that convention rather than inventing a second
     one. A full-uuid filename match would miss every transcript whose directory is
     named from a munged cwd.
