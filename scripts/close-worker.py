@@ -989,15 +989,7 @@ def main():
     held_tasks, handed_tasks, task_error = find_tasks(sid, cwd, VAULTS_ROOT)
     task = held_tasks[0] if held_tasks else (handed_tasks[0] if handed_tasks else None)
     pages = []
-    if task_error:
-        # A failed lookup is not evidence that no live task holds the session, so it
-        # refuses rather than falling through to the pages with an unproven absence.
-        bad = (
-            "task-unresolved",
-            f"{task_error}; a failed lookup is not evidence that no live task holds "
-            "this session",
-        )
-    elif held_tasks:
+    if held_tasks:
         # Every held task must pass. A session can be bound to a finished task and a live
         # one at once, so a first-candidate verdict closes on whichever sorts first — the
         # defect this gate exists to remove.
@@ -1024,6 +1016,16 @@ def main():
                     pages = held
                 elif task is None and handed:
                     pages = handed[:1]
+                elif task_error:
+                    # ⚠️ The task search failed AND nothing else resolves the session — no
+                    # held task, no held page, no handed page. Only here is the failure the
+                    # reason to refuse: a page that does resolve it decides, as it did
+                    # before, so a goal-only session is not refused over a task-dir error.
+                    bad = (
+                        "task-unresolved",
+                        f"{task_error}; a failed lookup is not evidence that no live "
+                        "task holds this session",
+                    )
                 else:
                     bad = (
                         resolution_refusal(sid, cwd, VAULTS_ROOT)

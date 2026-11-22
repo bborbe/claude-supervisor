@@ -939,6 +939,24 @@ class TestCliRefusals(unittest.TestCase):
                 os.remove(path)
                 os.remove(os.path.join(self.sessions, f"{child.pid}.json"))
 
+    def test_a_goal_page_decides_when_the_task_search_failed(self):
+        """Review finding: a failed TASK lookup must not refuse a session a page resolves.
+
+        Removing the task directory makes the task grep exit 2. The goal page still holds
+        the session, so the page verdict decides — the same answer the close gave before the
+        multi-task gate existed. Reading the task error first refused the close with
+        `task-unresolved` and made a goal-only session unclosable on the no-ripgrep path.
+        """
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        path = self._page("goal", claude_session_id=SID, status="completed")
+        os.rmdir(self.tasks)
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("would close", done.stdout)
+        self.assertNotIn("task-unresolved", done.stdout)
+        self.assertIn(path, done.stdout)
+
     def test_handed_off_task_does_not_outrank_a_held_live_goal(self):
         """Review finding: a metrics-only task match is weaker than a page still held."""
         self._registry()
