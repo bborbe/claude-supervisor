@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.2
 
 - docs: **the fleet round's INLINE rules carry the ownership fallback, not just the prohibition.** `commands/fleet-drive.md`'s INLINE list said *"Never answer another manager's workers — route to the owning manager"* without the rule that a subject with no lower-tier manager is the fleet manager's, so a manager read the prohibition and missed who owns an unmanaged subject — measured 2026-11-22, when two live topics were described as *unmanaged* and the operator corrected it (*"They are not unmanaged. Every session has a manager as long as the fleet manager runs."*). The list gains one bullet naming the fleet manager as the owner and citing `docs/fleet-surface.md` § Which manager owns a subject; `commands/steps/rules.md:28` no longer sends a no-goal worker to the operator — it routes to the owning manager per the same section, leaving the two-page and foreign-goal branches escalating. Change set: `commands/fleet-drive.md`, `commands/steps/rules.md`, `CHANGELOG.md`.
 
