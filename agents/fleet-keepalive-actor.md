@@ -453,16 +453,7 @@ the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell
 line. ⚠️ **One dropped count per list, never one shared `truncated=`** — `crash-loop-truncated=`
 and `cannot-tell-truncated=` each say how many rows of THAT list ride `payload=`, since a shared
 count cannot tell which list lost rows and the caller's arithmetic could not be satisfied.
-⚠️ **`crash-loop:` and `cannot-tell:` are the only lines
-that truncate — never a count.** Their full lists go to
-`~/.claude/state/fleet-handback/<round timestamp>.keepalive`, written through one `python3`
-call (`Path.mkdir(parents=True, exist_ok=True)`, write `<path>.tmp`, `os.replace`) — the same
-atomic rule `agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the
-round's `.digest` cannot drift apart — and pruned by that file's prune clause, which covers
-`.keepalive` and is its single home. ⚠️ **The cap, the per-list counts, and what the
-caller does with the payload are `docs/handback-contract.md` § The shape — the truncation
-exception** — not restated here. When nothing is truncated, both counts are `0` and `payload=—`. ⚠️ **The hand-back carries no rules** — no
-procedure text, no population, no guard; a caller that re-reads them here pays every round.
+⚠️ **`crash-loop:` and `cannot-tell:` are the only lines that truncate — never a count.** Their full lists go to `~/.claude/state/fleet-handback/<round timestamp>.keepalive` (one atomic `python3` write, the same rule `agents/fleet-sweep-reader.md` states; pruned by that file's clause, its single home). ⚠️ **The cap, the per-list counts and the payload rule are `docs/handback-contract.md` § The shape — the truncation exception** — not restated here; when nothing is truncated both counts are `0` and `payload=—`. ⚠️ **Emit the counts and the rows this block mandates, and NOTHING else — no heading, preamble, table, trailing note or explanation.** Measured 2026-11-21: a prose `Notes:` block pushed this leg to **1 235–2 563 B**, 10 of 20 over cap. `agents/fleet-round.md` § `<output_format>` states the same rule. ⚠️ **It carries no rules** — no procedure text, no population, no guard.
 
 **Digest** — never restate it in the hand-back; never write a count the digest does not carry;
 the caller renders `LEGS` from it.
