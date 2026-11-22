@@ -197,6 +197,43 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn("missing 0", out)
 
+    def test_a_three_field_refusal_still_joins_on_the_name_alone(self):
+        """The token is a third field, never part of the name — joining on it would miss the row."""
+        drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
+        self._write(
+            "2026-11-12T10-08-16Z.freeable",
+            "refused\tUpdate All Service Repos Go Modules 2026-11"
+            "\tdeferred 2026-11-22T19:07+01:00\n",
+        )
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("acted 1", out)
+        self.assertIn("missing 0", out)
+
+    def test_the_line_counts_the_refusal_tokens_it_read(self):
+        """The token is reported, so a refusal is routable rather than parsed and discarded."""
+        drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
+        self._write(
+            "2026-11-12T10-08-16Z.freeable",
+            "refused\tUpdate All Service Repos Go Modules 2026-11"
+            "\tdeferred 2026-11-22T19:07+01:00\n"
+            "refused\tCleanup Email Inbox (Work) - 2026W46-thu\tunknown-session-id\n",
+        )
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("refused: deferred=1 · unknown-session-id=1", out)
+
+    def test_the_tally_prints_none_when_no_token_was_recorded(self):
+        """The tally is unconditional, so a quiet or unlinked round cannot skip it silently."""
+        drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
+        self._write(
+            "2026-11-12T10-08-16Z.freeable",
+            "closed\tUpdate All Service Repos Go Modules 2026-11\n",
+        )
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("refused: (none)", out)
+
     def test_a_bare_sent_entry_is_not_an_act_on_a_freeable_row(self):
         """A plain name is a `sent` entry — messaging a freeable row is the defect itself."""
         drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
