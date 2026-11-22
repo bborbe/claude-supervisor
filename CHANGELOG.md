@@ -8,9 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.366.4
+## Unreleased
 
 - fix: **`close-worker.py` closes a live session when the session is bound to two tasks — one finished, one still being worked.** `_grep_task` returned on the FIRST `claude_session_id` match under `sorted(paths)`, so a session holding a `completed` row and an `in_progress`/`execution` row closed on whichever sorted first; measured 2026-11-09 on session `f8544288`, whose reap closed it off the completed row while a second task was still live. The close path now collects every task the session holds (`find_tasks` / `_grep_tasks`) and refuses `task-not-terminal` naming the live task when any is non-terminal (`held_task_gate`); a task reached only through `metrics_sessions` stays the documented hand-off case and does not refuse. A hit suppresses a failed-search error — only an empty set from a failed lookup refuses, the rule `find_task_checked` already applies — so a host without `ripgrep` does not refuse every close on the wider pass's 19.6 s timeout. The task search's failure is consulted LAST: a goal or topic page that resolves the session still decides, so a goal-only session is not refused over a task-directory error. `find_task`, `find_task_checked` and `_grep_task` keep their first-candidate contract for their five other importers (`restart-worker.py`, `reap-idle-headless.py`, `close-idle-tab.py`, `park-nudge.py`, `task-standdown.py`), and the grep invocation they share moves to `_session_grep` rather than a copied second matcher. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `docs/fleet-surface.md`, `CHANGELOG.md`.
+
+## v0.366.4
+
 - fix: **a dead `SITE_LIST` entry no longer names a deleted watcher script.** `scripts/transport-read-check.py` enumerated `("manager-attention-watch.py", "pane_for_session_name")`, but that script is deleted and the function exists nowhere live — `git grep pane_for_session_name` matches only that entry and a `CHANGELOG-archive.md` line. Its replacement needs no new entry: `manager-wake.py`'s `find_pane` does the join, and its own docstring states the read is `jump.py`'s `wezterm_panes`, which the list already enumerates and drives. A dead entry is not harmless here — it claims a mechanism nothing can fail, the "enumerated but never driven" gap the list exists to catch. Change set: `scripts/transport-read-check.py`, `CHANGELOG.md`.
 
 ## v0.366.3
