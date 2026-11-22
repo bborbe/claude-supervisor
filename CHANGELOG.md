@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.1
 
 - fix: **the hand-back stops at its last required line — stated in the contract and in the four legs that broke it.** `agents/fleet-round.md` has said *emit the fence and NOTHING else* since v0.356.x; the other legs carry only *≤ 1 KB, payload off the hand-back*, so four of them appended a prose `Notes:` block after their counts. Measured 2026-11-21 on a live Fleet Manager's first 8 closed rounds after `v0.362.4` loaded: **fleet-keepalive-actor 10 of 20 over cap (1 235–2 563 B), fleet-sweep-reader 8 of 20 (1 089–1 690 B), fleet-drive 9 of 20 (1 052–2 194 B), round-readings-reader 1 of 1 (1 811 B)** — while `fleet-round` complied 8/8 at 511–514 B. The rule is added to `agents/fleet-keepalive-actor.md`, `agents/fleet-sweep-reader.md`, `agents/fleet-drive.md` and `agents/round-readings-reader.md`, and stated once in `docs/handback-contract.md` § The shape for the remaining legs. `check-budget.py` governs the agent bodies: `fleet-keepalive-actor` is unbaselined and hard-capped at 30 720 B, so its addition is paid for by compressing the adjacent payload/truncation prose (final **30 701 B**); `fleet-sweep-reader` and `fleet-drive` are deliberate growth, so their `scripts/budget-baseline.json` entries move with them (final **46 727 B** and **50 006 B**, matching the shipped tree). Change set: the four agent files, `docs/handback-contract.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 ## v0.366.0
