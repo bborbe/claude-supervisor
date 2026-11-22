@@ -79,7 +79,7 @@ does not exist yet, which is a guess at a reading rather than the reading.
 
 ⚠️ **A missing input is named, never defaulted.** A defaulted vault root reads another
 vault's pages and a defaulted tasks dir classifies another fleet's rows
-(`agents/fleet-keepalive-actor.md` § inputs states the same rule for its own leg).
+(the keep-alive leg that used to live in `agents/fleet-keepalive-actor.md` followed the same rule; that leg now runs in the `claude-wrapper` keepalive tick, and the file is retired).
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
@@ -97,16 +97,13 @@ once, reading its step file yourself:
 | 2 | Sweep — dispatch `supervisor:fleet-sweep-reader`, keep its ≤ 1 KB hand-back | `steps/sweep.md` |
 | 3 | Confirm the digest's candidates — only when the hand-back reports `orphan`, `collision` or `unmanaged` > 0 | `steps/confirm-candidates.md` |
 | 5 | Drive leg — every round | `steps/drive.md` |
-| 5b | Keep alive — every round, dispatch `supervisor:fleet-keepalive-actor` | `steps/keepalive.md` |
 | 5d | Own parks — every round; its `routed` parks and their request ids go to `parks=` so the manager's row 11 can put the ask | `steps/own-parks.md` |
-| 6 | Reap contract — when the drive leg runs | `steps/reap.md` |
 | 7 | Answer a parked or exited worker — **route** it, never answer in the operator's voice | `steps/worker-channels.md` |
 | 8 | Act on the open-items ledger | `steps/act.md` · `steps/open-items.md` |
 | 9 | Verify a named cause | `steps/cause-verify.md` |
 | 10 | Escalate — render the material and route it; row 11 asks | `steps/escalate.md` |
 | 12 | Covered-subject invariant — when a covered subject's manager is live | `steps/covered-subject-invariant.md` |
 | 15 | Readings — every round, dispatch `supervisor:round-readings-reader` | `steps/readings.md` |
-| 16b | Manager reap — every round | `steps/manager-reap.md` |
 | 18 | Persist — only when the snapshot path is missing or its write failed | `steps/persist.md` |
 | 20 | Render the output shape — write `<round>.render`, never print, never ask | `steps/output-shape.md` |
 
