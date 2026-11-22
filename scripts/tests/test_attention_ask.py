@@ -1590,7 +1590,6 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
             "commands/steps/goal-under-target.md",
             "commands/steps/needs-input.md",
             "commands/steps/readings.md",
-            "commands/steps/round-tail.md",
         ]
         invocation = re.compile(r"attention-ask\.py\s+(post-batch|post)(?!`)")
         seen = 0
@@ -1610,9 +1609,10 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
                         "not pass --producer-kind manager",
                     )
         # 9 until 2026-11-20, when `commands/open.md` left the list with the thin-caller
-        # rewrite (it posts no card of its own). The floor drops by exactly that one, so a
-        # silently emptied list still trips here.
-        self.assertGreaterEqual(seen, 8, "the site list stopped covering the tree")
+        # rewrite (it posts no card of its own); 7 since `commands/steps/round-tail.md` left
+        # it — the wake job raises that class now, so a card there would double-post. The
+        # floor drops by exactly one each time, so a silently emptied list still trips here.
+        self.assertGreaterEqual(seen, 7, "the site list stopped covering the tree")
 
 
 class StoreTokenTest(unittest.TestCase):
