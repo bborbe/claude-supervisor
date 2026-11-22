@@ -205,7 +205,7 @@ caller forwards `payload=` verbatim, renders the sweep dispatch's four map slots
 sweep reader re-reads the same file as its own input and lets it win — which is why the counts,
 not the rows, are what your hand-back carries.
 
-⚠️ **Emit the fence and NOTHING else — no heading, preamble, table, trailing note or explanation.** The hand-back is the `text` block above and stops at its last required line (its counts, plus any `crash-loop:` / `cannot-tell:` row the contract sanctions); anything else belongs in the payload. Measured 2026-11-21: a prose `Notes:` block pushed this leg to **1 811 B** against the 1 024 B cap, 1 of 1 over it. `agents/fleet-round.md:274` states the same rule.
+⚠️ **Emit the fence and NOTHING else — no heading, preamble, table, trailing note or explanation.** The hand-back is the `text` block above: its counts and any row that block itself mandates, and nothing after them. Measured 2026-11-21: a prose `Notes:` block pushed this leg to **1 811 B** against the 1 024 B cap, 1 of 1 over it. `agents/fleet-round.md` § `<output_format>` states the same rule.
 </output_format>
 
 <success_criteria>
