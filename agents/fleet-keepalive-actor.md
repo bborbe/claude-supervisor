@@ -297,11 +297,10 @@ of them** — item 12's block is the digest's `LEGS` section, which admits exact
 
 ## 4. Resume a worker whose session died
 
-⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note made
-a dead worker the operator's problem every round; rule 1 says a crashed or lapsed worker is
-restarted automatically, and a worker that already owns its task decides nothing new by being
-resumed. Escalation stays only for one that **cannot** be resumed (no id, a spent cap, an
-undecidable probe).
+⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** A crashed or
+lapsed worker is restarted automatically; one that already owns its task decides nothing new by
+being resumed. Escalate only one that **cannot** be resumed (no id, a spent cap, an undecidable
+probe).
 
 **Population — every task page carrying a non-empty `claude_session_id`.** The script narrows
 it: a terminal status, a parked one (`hold`/`blocked`, or `human_review`/`todo`/`done` phase), a
@@ -356,31 +355,32 @@ that task and escalate once with the `⚠️ WORKER CRASH-LOOP` line; `cannot-te
 never act.
 
 ⚠️ **A task with no `claude_session_id` prints `cannot-tell` and is reported** — opening it is
-rule 3's approved-work path, not this leg's. Both resume paths continue the **recorded id** and
-neither opens a second worker (constraints, first bullet).
+rule 3's approved-work path, not this leg's.
 
 ⚠️ **Four worker mechanisms, four populations — never merge.**
 `scripts/restart-worker.py` restarts a **live, idle** session on stale code (refuses
-`busy-target` and `headless-target`); `scripts/stuck-heal.py` heals a **stuck** headless worker
-whose channel died while it lives; this leg resumes one whose session is **gone**;
-**run `<plugin root>/commands/steps/keepalive-stalled-tabs.md`** (absolute) for a **stalled
-tab**: it reports the refusal and hands the restart over — a stall is `busy`, so the lift is
-the operator's alone.
+`busy-target`, `headless-target`); `scripts/stuck-heal.py` heals a **stuck** headless worker
+whose channel died while it lives; this leg resumes one whose session is **gone**; for a
+**stalled tab** run `<plugin root>/commands/steps/keepalive-stalled-tabs.md` (absolute) — a
+stall is `busy`, so the lift is the operator's alone.
 
 ⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population; `worker-keepalive.py`
 enforces the exclusion.** Both legs record only **after** the instrument reads `LIVE`, so a
 check-then-act race lets two resumes land before either cap arms — the goal tier's
-`last_auto_resume` and this leg's `worker--<slug>`. `scripts/owner.py` answers for each declared goal — the ONE ownership
-definition (`docs/session-tiers.md` § Keep-alive) — so only an **owner** (session `LIVE`
-**and** loop `OK`/`STALE`) returns `jump`; a stood-down manager holds nothing, and a
-`cannot-tell` is reported, never resumed.
+`last_auto_resume` and this leg's `worker--<slug>`. `scripts/owner.py` answers for each declared
+goal — the ONE ownership definition (`docs/session-tiers.md` § Keep-alive) — so only an
+**owner** (session `LIVE` **and** loop `OK`/`STALE`) returns `jump`; a stood-down manager holds
+nothing, and a `cannot-tell` is reported, never resumed.
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`.
-`--floor` renders `(lower bound, scan incomplete)`; `--exact` asserts completion.
-⚠️ **A bare `dead-workers` count is refused** — one of the two is mandatory: an unlabelled
-number reads as a measurement. Both flags are refused on any other key; format and
-rationale: `commands/steps/output-shape.md` item 12.
+⚠️ **A bare `dead-workers` count is refused** — `--floor` or `--exact` is mandatory, since an
+unlabelled number reads as a measurement; format: `commands/steps/output-shape.md` item 12.
+
+⚠️ **Never state a capacity comparison this leg did not obtain from a cap instrument** — it
+computes no count of its own; `list_agents`, `live-workers.py` and the raw session-registry
+entry count are context, never a cap denominator. Quote a refused resume's refusal verbatim;
+report capacity only as `workers: <live>/<target>` (`commands/steps/output-shape.md` item 1).
 
 ## 4b. Stood-down close
 
