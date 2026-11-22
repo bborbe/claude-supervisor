@@ -996,15 +996,52 @@ class CloserGateLintTest(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 self.assertIsNone(self.mod.session_bound_class(body))
-        # The other half, and the guard against a permissive fix: a truncated date or a
-        # trailing digit run is not a clock `parse_defer_date` accepts, so the
-        # session-bound watcher still blocks.
+        # The other half, and the guard against a permissive fix: a truncated date blocks,
+        # and two parser-accepted-but-separator-different clocks stay blocked (the known
+        # limitation documented on the `clock` arm) — `2026-11-09123` reads as 23:00 and
+        # `2026-11-09X15:30` as 15:30 under `parse_defer_date`, yet this arm accepts only
+        # `[Tt ]` as the date/time separator.
         for body in (
             "⏰ Ends:   2026-11-9 (CronCreate j4f2 as early wake)",
             "⏰ Ends:   2026-11-09123 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09X15:30 (CronCreate j4f2 as early wake)",
         ):
             with self.subTest(body=body):
                 self.assertEqual("cron-create", self.mod.session_bound_class(body))
+
+    def test_the_clock_comment_names_only_genuinely_rejected_forms(self):
+        # ⚠️ Reads the SOURCE COMMENT, not the behaviour: a green suite passes with the
+        # comment untouched, which is the defect this task exists to fix. The rejected
+        # examples must name only forms the arm actually rejects, and the arm must be
+        # documented as prefix-bounded rather than shape-bounded.
+        with open(_SCRIPT, encoding="utf-8") as handle:
+            source = handle.read()
+        # The old rejected-examples list named two forms the arm CLEARS — `…T15` and
+        # `…T15:30abc` — so their contiguous appearance as a rejected list is the failure.
+        self.assertNotIn(
+            "`2026-11-09T15`, `2026-11-09T15:30abc`",
+            source,
+            "the clock comment still lists `2026-11-09T15` / `2026-11-09T15:30abc` as "
+            "rejected; both CLEAR the arm",
+        )
+        # The prefix-bounded looseness must be stated, not left implicit.
+        self.assertIn(
+            "PREFIX-bounded",
+            source,
+            "the clock comment must state that the arm is prefix-bounded",
+        )
+        # At least one genuinely rejected form must still be named, so deleting the
+        # examples wholesale cannot satisfy the check vacuously.
+        self.assertTrue(
+            "2026-11-09abc" in source or "2026-11-0912" in source,
+            "the clock comment must still name a genuinely rejected form",
+        )
+        # And the separator limitation must be stated, per the SC2 half.
+        self.assertIn(
+            "Known limitation",
+            source,
+            "the clock comment must state the separator limitation",
+        )
 
     def test_a_representative_sample_of_parser_accepted_clocks_clears_the_clock_class(self):
         # ⚠️ A SAMPLE, not the parser's full accepted set. `parse_defer_date` accepts an
