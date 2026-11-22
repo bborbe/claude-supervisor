@@ -10,13 +10,21 @@ When: every tick — after the re-arm (row 1), before the read half
 
 ⚠️ **The round's machine half runs in ONE delegate.** Dispatch `supervisor:fleet-round`
 **once**, passing the round id, this session's id, the vault and the absolute tasks dir. The
-delegate reads the step files, runs rows 0, 2–10, 12, 15, 16b, 18 and 20 — dispatching the
+delegate reads the step files, runs rows 0, 2–3, 5–10, 12, 15, 16b, 18 and 20 — dispatching the
 existing sweep, keep-alive and readings legs, taking the provenance acts, the cause check
 and the escalation, and writing the render to `<round>.render` — persists the round, and returns
 the ≤ 1 KB verdict plus the artifact paths. You keep rows 1, 11, 13, 14, 17 and 19: the re-arm,
 the operator questions, the watchers, the voice and the round tail, and you print the render
 file **after** that tail. The split, and why the manager no longer reads the step files, is
 `agents/fleet-round.md`.
+
+⚠️ **The round id is the `round=` token `manager-receipt.py --start` printed — verbatim.**
+Pass that token to the delegate and use it for every `<round>.*` path in the tail. Never
+re-read the receipt's `round_started_at` (its repr can carry a seventh decimal) and never pass
+a timestamp: the artifacts are named by the six-decimal stem, so any other spelling names files
+that do not exist. Measured 2026-11-21: one round passed an ISO stamp, another
+`1795255389.1027682` against artifacts under `1795255389.102768`, and the tail's
+`fleet-legs.py --status` read `UNKNOWN`.
 
 ⚠️ **The verdict is CHECKED, not trusted — run the gate before you read a single count.**
 `agents/fleet-round.md` already says *emit the fence and NOTHING else*, and the delegates

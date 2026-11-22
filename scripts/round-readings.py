@@ -725,13 +725,13 @@ def permission_channel_sid(session_ids, projects_dir, now=None):
     last 15 minutes full of aborts keeps matching forever, and pins a healthy live row
     to `permission-channel`. Measured on this change's first review, 2026-11-09.
 
-    ⚠️ **The RULE is not restated here.** `manager-attention-watch.py` owns the
-    window, the threshold, the staleness bound and the reason string; this function
-    only supplies the wider read that rule needs and reports the id. A second copy
-    would be a second place for the window to drift — and the drift would be silent,
+    ⚠️ **The RULE is not restated here.** `permission-channel.py` owns the window,
+    the threshold, the staleness bound and the abort reader; this function only
+    supplies the wider read that rule needs and reports the id. A second copy would
+    be a second place for the window to drift — and the drift would be silent,
     because too short a window reads as "no aborts" rather than as an error.
     """
-    watch = _load("manager-attention-watch")
+    watch = _load("permission-channel")
     now = time.time() if now is None else now
     for sid in session_ids or []:
         if not sid or os.path.basename(sid) != sid:
@@ -788,7 +788,7 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
       cannot carry this class at all, so without this carrier a denied worker is
       invisible for as long as it keeps retrying.
     * **permission-channel** — the session's permission channel is aborting, read
-      from its transcript by `manager-attention-watch.channel_aborts`. The registry
+      from its transcript by `permission-channel.channel_aborts`. The registry
       reads such a worker `busy` or `waiting` and the feed calls it progressing,
       while every write it exists to make fails; measured 2026-10-28 on three
       sessions, one of them holding a live dev repair it could not run.

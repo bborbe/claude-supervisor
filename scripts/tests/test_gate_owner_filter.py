@@ -446,7 +446,7 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
     def test_an_adopted_pane_keeps_its_gate(self):
         """A goal manager that ADOPTED a spawnerless pane must still see it.
 
-        The adoption contract (`commands/steps/adopt.md`): `ownership-claim.py` records the
+        The adoption contract (`scripts/adopt-orphans.py`, run by the wrapper's adopt job): `ownership-claim.py` records the
         adoption precisely so the adopting manager keeps seeing a spawnerless pane. An
         earlier cut of this fix returned the routed drop before the claim block, which broke
         that silently — the routed drop outranked the claim.

@@ -226,7 +226,6 @@ LIVE_SKIP = ("_cluster-reachability",)
 # How many permission failures in a row mark a worker STUCK. ⚠️ Counted among
 # PERMISSION OUTCOMES, not consecutive records — see `permission_failure_run`.
 STUCK_PERM_FAILURES = 3
-PERM_FAILURE_MARK = "permission request failed"
 
 # The `permission-channel` cause — a WINDOWED reading, and deliberately not the
 # trailing run above. `trailing_failures` resets on any tool that ran, which is the
@@ -250,26 +249,21 @@ PERM_FAILURE_MARK = "permission request failed"
 # this cause exists to name. A recovered channel clears when the aborts fall out of
 # the window, which is bounded staleness rather than the unbounded one the old
 # longest-run reading was rejected for.
-PERM_CHANNEL_WINDOW_S = 15 * 60
-PERM_CHANNEL_MIN = 3
-
-# How old a transcript may be before a caller stops reading it for the channel
-# cause. ⚠️ **This guards the ROUND's carrier, not the watcher's.**
-# `round-readings.py` walks every id a row ever ran under — `claude_session_id`
-# plus each `metrics_sessions` entry — and an id from a session that died months
-# ago keeps a transcript whose last 15 minutes of life ended in aborts. Measured
-# on the first review of this change: without this bound such an id pins a healthy
-# LIVE row to `permission-channel` forever, because the window is anchored on the
-# transcript's own last stamp and a frozen transcript's window never moves.
-#
-# ⚠️ The watcher deliberately does NOT apply it. `probe()` reads the tracked task's
-# own `claude_session_id`, and a session that is genuinely gone is settled by
-# `is_gated`'s `unregistered` branch BEFORE the stuck limb — so there is no stale
-# id for this bound to filter there. Applying it would instead create a blind spot
-# on the one shape this cause exists for: a session whose channel is dead cannot
-# act, so its transcript goes quiet, and a staleness bound would un-mark it exactly
-# while it is failing.
-PERM_CHANNEL_STALE_S = 2 * PERM_CHANNEL_WINDOW_S
+# The permission-channel reading — its window, its staleness bound and its readers —
+# lives in `permission-channel.py`, because `round-readings.py` needs the same
+# reading for a different population and a second copy would let the window drift
+# silently. ⚠️ The POLICY still differs per caller: the round applies
+# `PERM_CHANNEL_STALE_S`, this watcher deliberately does not — see that constant's
+# own comment in the new module before changing either.
+_pc = _load("permission_channel", "permission-channel.py")
+PERM_CHANNEL_WINDOW_S = _pc.PERM_CHANNEL_WINDOW_S
+PERM_CHANNEL_MIN = _pc.PERM_CHANNEL_MIN
+PERM_CHANNEL_STALE_S = _pc.PERM_CHANNEL_STALE_S
+PERM_FAILURE_MARK = _pc.PERM_FAILURE_MARK
+_TS_RE = _pc._TS_RE
+read_recent_tail = _pc.read_recent_tail
+channel_aborts = _pc.channel_aborts
+_iso_epoch_any = _pc.iso_epoch_any
 
 # The state line a worker writes when it gives up. Matched as a line PREFIX, not a
 # substring: the e4fd1919 transcript also *quotes* the phrase while discussing it.
@@ -684,70 +678,6 @@ def read_tail(path, window=400_000):
         return None
 
 
-_TS_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
-
-
-def read_recent_tail(path, window_s, chunk=400_000, max_bytes=8_000_000):
-    """The transcript tail spanning at least `window_s` of its OWN record time.
-
-    ⚠️ **`read_tail`'s fixed byte window is the wrong unit for the channel read, and
-    the loss is measured.** On session `b6e447e4` (11.5 MB, measured 2026-11-09) the
-    permission-channel aborts sit at lines 2862–3287 of 6324 — roughly the middle of
-    the file — while `read_tail`'s 400 KB tail reaches only the last 28 tool results.
-    Every abort was outside it, so `permission_outcomes` counted ZERO and the session
-    read `stuck_reason=None` while its writes were aborting. A byte window is a
-    proxy for recency that fails in exactly the sessions worth watching: the long,
-    busy ones.
-
-    So this reader walks BACKWARD in chunks and stops once the collected text spans
-    `window_s` of transcript time, or the file start, or `max_bytes`. Recency is then
-    measured in the unit the question is actually about.
-
-    Returns the decoded text, or None when it cannot be read. A transcript with no
-    parseable timestamp yields whatever one chunk held — the caller's count is then
-    simply not fired, which is the fail-safe direction.
-
-    ⚠️ **Each chunk boundary splits one record in half**, because the join inserts a
-    newline where the file had none. Both halves fail to parse and are skipped, so
-    the cost is one unreadable record per chunk rather than a miscounted one — but a
-    caller must not read a boundary-adjacent record as absent. With a 400 KB chunk
-    that is at most `max_bytes / chunk` records, and only the abort records that
-    happen to straddle a boundary are lost.
-    """
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return None
-    chunks = []
-    end = size
-    try:
-        with open(path, "rb") as fh:
-            while end > 0 and (size - end) < max_bytes:
-                start = max(0, end - chunk)
-                fh.seek(start)
-                chunks.append(fh.read(end - start))
-                end = start
-                text = b"\n".join(reversed(chunks)).decode("utf-8", "replace")
-                stamps = [_iso_epoch_any(m) for m in _TS_RE.findall(text)]
-                stamps = [s for s in stamps if s is not None]
-                if stamps and max(stamps) - min(stamps) >= window_s:
-                    break
-    except OSError:
-        return None
-    return b"\n".join(reversed(chunks)).decode("utf-8", "replace")
-
-
-def _iso_epoch_any(value):
-    """An ISO-8601 timestamp as epoch seconds, or None. Local twin of
-    `round-readings._iso_epoch` — this script ships as a plugin artifact that must
-    run with no sibling on the path (see `_ENTITY`)."""
-    try:
-        return datetime.datetime.fromisoformat(
-            value.replace("Z", "+00:00")).timestamp()
-    except (AttributeError, ValueError):
-        return None
-
-
 def assistant_text_from_tail(tail):
     """Last assistant text block in a decoded tail, or None when there is none.
 
@@ -957,56 +887,6 @@ def trailing_failures(outcomes):
 def permission_failure_run(tail):
     """`trailing_failures` over a raw tail."""
     return trailing_failures(permission_outcomes(tail))
-
-
-def channel_aborts(tail, window=PERM_CHANNEL_WINDOW_S):
-    """How many `Stream closed` aborts fall inside the tail's last `window` seconds.
-
-    A WINDOWED reading, and the whole point is that it does NOT reset on a success.
-    See `PERM_CHANNEL_WINDOW_S` for the measurement and for why the anchor is the
-    transcript's own last stamp rather than wall clock.
-
-    Returns 0 when the tail carries no parseable timestamp: an undated tail cannot
-    establish recency, and firing on one would mark every transcript whose clock
-    field this reader failed to parse.
-
-    ⚠️ **The anchor is the tail's LAST record, never its last abort.** Anchoring on
-    the aborts themselves would make the window self-referential: three aborts an
-    hour ago would always sit inside "the last 15 minutes of abort time" and the
-    cause would never clear, which is the unbounded reading `trailing_failures`
-    exists to avoid. Recency is measured against the transcript's own now.
-    """
-    if not tail:
-        return 0
-    aborts, stamps = [], []
-    for line in tail.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        ts = _iso_epoch_any(rec.get("timestamp") or "")
-        if ts is None:
-            continue
-        stamps.append(ts)
-        content = (rec.get("message") or {}).get("content")
-        if not isinstance(content, list):
-            continue
-        if any(
-            isinstance(blk, dict)
-            and blk.get("type") == "tool_result"
-            and blk.get("is_error")
-            and PERM_FAILURE_MARK in str(blk.get("content") or "")
-            and "Stream closed" in str(blk.get("content") or "")
-            for blk in content
-        ):
-            aborts.append(ts)
-    if not stamps:
-        return 0
-    anchor = max(stamps)
-    return sum(1 for ts in aborts if ts >= anchor - window)
 
 
 def stuck_reason(text, tail, channel_tail=None):

@@ -48,7 +48,7 @@ Read it from `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir
 
 **The total is two populations, and the second line splits it.** *Never started* — no `claude_session_id` at all: nobody ever opened the row. *Orphaned* — a `claude_session_id` that names a session the registry does not hold live: the row was started and its worker died. Each is counted on its own predicate, never as the other's remainder, so the two sum to the total only while every row is classified — a mismatch is visible on the line rather than absorbed into a derived number (an unclassified row also renders as `unclassified` in the over-tick block); a row whose id is live counts in neither, because it is not in the total. Measured 2026-10-30: 81 of 122 rows were orphans, invisible as a class inside the single number. `--json` carries the same split as `never_started` and `orphaned`, and each row's `class`.
 
-⚠️ **`orphaned` is not `adopt-orphans.py`'s population.** That script adopts the **live** workers an exited manager left behind; an orphaned row here is the inverse — the worker is gone and the task remains.
+⚠️ **`orphaned` is not the wrapper adopt job's population.** `claude-wrapper`'s adopt tick claims the **live** workers an exited manager left behind; an orphaned row here is the inverse — the worker is gone and the task remains.
 
 ⚠️ **`unknown` is a third answer, not `0`.** If the session registry cannot be read the script prints `approved, not started: unknown` and `never started: unknown → open · orphaned: unknown → reopen`, and exits non-zero — *"no approved rows are waiting"* and *"I could not ask"* must not render the same (`docs/pane-reads.md` § The rule). Print it as it comes back; never round `unknown` down to a number.
 

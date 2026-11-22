@@ -61,7 +61,6 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 1 | Re-arm | every tick — arm `ScheduleWakeup` FIRST, before the read half | `${CLAUDE_PLUGIN_ROOT}/commands/steps/re-arm.md` |
 | 2 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/sweep.md` |
 | 3 | Confirm the digest's candidates | the hand-back reports `orphan`, `collision` or `unmanaged` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/confirm-candidates.md` |
-| 4 | Adopt | `adopt-orphans.py` printed rows or exited non-zero — run: `python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/adopt.md` |
 | 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
 | 5b | Keep alive | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/keepalive.md` |
 | 5d | Own parks | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/own-parks.md` |
@@ -83,7 +82,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 
 ⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**; a second sweep duplicates sends.
 
-**Split:** rows 0, 2–10, 12, 15, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
+**Split:** rows 0, 2–3, 5–10, 12, 15, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
 
 ## INLINE — the hard rules
 
