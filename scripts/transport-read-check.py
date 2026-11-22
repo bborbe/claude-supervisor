@@ -191,14 +191,15 @@ SITE_LIST = {
     # The split is load-bearing: `""` is what licenses `HEADLESS` and `None` is retried as
     # `tty-unreadable`, so a failed read can never excuse a missed wake as headless.
     ("manager-wake.py", "_pid_tty"),
-    # added 2026-10-22 — the manager-wake job's pane-title read, the join that
-    # gives a re-registered park card its jump target. It returns `None` for a failed
-    # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
-    # absent, and the card must degrade to "no jump target" rather than claim there is
-    # nowhere to go. Enumerated so the mechanism and this list agree; it is a READ, but
-    # deliberately not driven into the three states below — the card is posted either
-    # way, so the read's failure is a degraded affordance and not a gate of its own.
-    ("manager-attention-watch.py", "pane_for_session_name"),
+    # removed 2026-11-22 — this entry used to name a pane-title read
+    # (`pane_for_session_name`) that gave a re-registered park card its jump target. Its
+    # script is deleted and the function no longer exists anywhere live (`git grep
+    # pane_for_session_name` matches nothing but this comment and a CHANGELOG archive
+    # line). Its replacement needs no new entry here: `manager-wake.py`'s `find_pane` does
+    # the join, and its own docstring states the read is `jump.py`'s `wezterm_panes`, which
+    # this list already enumerates and drives. ⚠️ A dead entry is not harmless in this
+    # list — it claims a mechanism exists that nothing can fail, which is the "enumerated
+    # but never driven" gap the list exists to catch.
     # added 2026-10-31 — `fleet-keeper.py`'s `wezterm` helper, behind the re-arm the fleet
     # keeper sends into the pane its own resume just spawned (`get-text` for the bounded
     # readiness wait, `send-text` for the command and its separate submit). It keeps the
