@@ -52,7 +52,10 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.k = load()
         # The crash-loop card is injected, never left to post a real one to the board.
         self.cards = []
-        self.k.post_card = lambda task, spent: self.cards.append((task, spent))
+        # The stub mirrors the real guard rather than appending unconditionally: a stub that
+        # ignored `card_is_noop` would let a crash-loop test read "one card" while the
+        # production path posts nothing — the one thing these assertions exist to catch.
+        self.k.post_card = self._stub_post_card
         self.kp = self.k._keepalive()
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
@@ -66,6 +69,12 @@ class WorkerKeepAliveTest(unittest.TestCase):
         # goal happens to be armed asserts nothing about the code.
         self.kp.cadence_state_detail = lambda subject, branch="goal": ("UNARMED", "")
         self.addCleanup(self._restore)
+
+    def _stub_post_card(self, task, spent, recommend="keep stopped",
+                        current="keep stopped"):
+        if self.k.card_is_noop(recommend, current):
+            return
+        self.cards.append((task, spent))
 
     def _restore(self):
         (self.kp.session_verdict, self.kp.state_path,
@@ -349,8 +358,8 @@ class WorkerKeepAliveTest(unittest.TestCase):
 
     def test_no_progress_cycles_spaced_beyond_the_old_window_still_stop(self):
         # SC1: for a migrated store the cap is cycles since the last progress, not a time
-        # window. Three cycles ~40 min apart with no progress must still stop the loop,
-        # and exactly one card is posted.
+        # window. Three cycles ~40 min apart with no progress must still stop the loop, and
+        # no card is posted — the `crash-loop:` hand-back row is the channel.
         self.page()
         now = 1_800_000_000.0
         sig = self.k.progress_signature(TASK_PAGE.format(sid="sid-1"))
@@ -361,7 +370,7 @@ class WorkerKeepAliveTest(unittest.TestCase):
         rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
         self.assertEqual(1, rc)
         self.assertEqual("crash-loop", out[0])
-        self.assertEqual([("A Task", 3)], self.cards)
+        self.assertEqual([], self.cards)
 
     def test_a_goal_declaring_crash_loop_posts_no_operator_card(self):
         # SC2: a resolvable goal makes the row manager-owned — the `crash-loop:` hand-back
@@ -381,10 +390,13 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertIn("WORKER CRASH-LOOP", out[1])
         self.assertEqual([], self.cards)
 
-    def test_a_goal_page_that_cannot_be_opened_still_posts_one_card(self):
-        # SC3: declared but unresolvable is the operator side — `goal_owners()` skips an
-        # unopenable page, so nothing owns the row and the operator is the only decision
-        # left. The card is the channel for that case.
+    def test_a_goal_page_that_cannot_be_opened_posts_no_card(self):
+        # ⚠️ SUPERSEDES #1056 (v0.362.9), which routed this row to the operator on the
+        # reasoning that "the operator is the only decision left". The card recommends
+        # `keep stopped` and the row is already stopped, so the operator was asked to ratify
+        # the no-op the system performs on its own — 189 such cards in 24 h, none answered.
+        # The verdict stays `crash-loop`; the routing moves to the fleet leg's hand-back,
+        # which now reports every crash-loop row.
         self.page(body=TASK_PAGE.format(sid="sid-1").replace(
             "phase: execution",
             "phase: execution\ngoals:\n    - '[[A Missing Goal]]'"))
@@ -393,7 +405,7 @@ class WorkerKeepAliveTest(unittest.TestCase):
         rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
         self.assertEqual(1, rc)
         self.assertEqual("crash-loop", out[0])
-        self.assertEqual([("A Task", 3)], self.cards)
+        self.assertEqual([], self.cards)
 
     def test_a_resume_that_did_not_take_does_not_arm_the_cap(self):
         self.page()
@@ -537,11 +549,13 @@ class WorkerKeepAliveTest(unittest.TestCase):
 
 
 class CrashLoopCardPayloadTest(unittest.TestCase):
-    """SC3: the one card that survives is a question, not a notification.
+    """The guard, and the payload of the one card shape that still survives it.
 
-    The crash-loop tests above stub `post_card` out, so they prove a card is posted and
-    never what it says. A card carrying no question is exactly the unanswerable shape this
-    row exists to remove, so the payload is pinned here against the real `post_card`.
+    The crash-loop tests above stub `post_card` out, so they prove the verdict and whether a
+    card is posted, never what it says. Two things are pinned here against the real
+    `post_card`: that a no-op recommendation posts nothing, and that a card whose
+    recommendation differs from the current state still posts a real question — the control
+    without which a blanket `return` would pass every other test in this file.
     """
 
     def setUp(self):
@@ -558,8 +572,23 @@ class CrashLoopCardPayloadTest(unittest.TestCase):
     def _capture(self, argv, **kwargs):
         self.calls.append(argv)
 
-    def test_the_card_carries_a_question_naming_the_decision(self):
+    def test_a_noop_recommendation_posts_nothing(self):
+        # The defect: the crash-loop card recommends `keep stopped` for a row that is
+        # already stopped, so it asks the operator to ratify what the system does anyway.
         self.k.post_card("A Task", 3)
+        self.assertEqual([], self.calls)
+
+    def test_a_recommendation_that_differs_from_the_current_state_still_posts(self):
+        # The control that makes the guard a filter and not a blanket suppression. Nothing
+        # in this script asks a non-no-op question today, so the parameters are the only way
+        # to exercise the surviving branch.
+        self.k.post_card("A Task", 3, recommend="resume anyway", current="keep stopped")
+        self.assertEqual(1, len(self.calls))
+        argv = self.calls[0]
+        self.assertEqual("resume anyway", argv[argv.index("--recommend") + 1])
+
+    def test_the_surviving_card_carries_a_question_naming_the_decision(self):
+        self.k.post_card("A Task", 3, recommend="resume anyway", current="keep stopped")
         self.assertEqual(1, len(self.calls))
         argv = self.calls[0]
         payload = argv[argv.index("--payload") + 1]

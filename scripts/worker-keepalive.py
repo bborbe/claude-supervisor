@@ -35,13 +35,14 @@ instrument does not read `LIVE`, so a resume that never landed does not arm the 
 its own retry. Store: `~/.claude/state/manager-resumes/<vault>/worker--<slug>.json`, beside
 the manager caps and deliberately not on the task page.
 
-⚠️ **A crash loop posts an attention card only when no declared goal resolves**
-(`dedup_key` `crash-loop:<slug>`), so a re-run of the fleet leg does not post a second. A task
-with a resolvable goal page is manager-owned even when that goal's manager is dead right now —
-the fleet round restarts or resumes it — so the operator is never asked to decide a resume the
-manager tier is obliged to make. The `crash-loop:` row in this leg's hand-back is the channel
-for that case; the card exists only for a task no manager can own — no `goals:` key, or every
-declared goal page unopenable.
+⚠️ **A crash loop posts no attention card.** The card recommended `keep stopped`, and a
+crash-looping row is already stopped, so it asked the operator to ratify the no-op the system
+performs on its own — 189 cards in 24 h, none of them answered. `post_card()` refuses a card
+whose recommendation equals the row's current state, so the mint is suppressed for every row.
+**The `crash-loop:` row in this leg's hand-back is the channel**: a task with a resolvable goal
+page is manager-owned even when that goal's manager is dead right now, and a fleet-tier row is
+this leg's own. This deliberately supersedes the routing #1056 (v0.362.9) added for a task with
+no resolvable goal page — that card is a no-op whatever the row's parentage.
 """
 
 from __future__ import annotations
@@ -232,12 +233,40 @@ def made_progress(prev: dict, signature: tuple, head: str) -> bool:
     return False
 
 
-def post_card(task: str, spent: int) -> None:
+def card_is_noop(recommend: str, current: str) -> bool:
+    """Whether a card's recommended option is the state the system is already in.
+
+    One predicate, used by `post_card()` and by the tests that stub it, so the guard cannot
+    be bypassed by a stub that appends unconditionally.
+    """
+    return recommend == current
+
+
+def post_card(task: str, spent: int, recommend: str = "keep stopped",
+              current: str = "keep stopped") -> None:
     """Post ONE attention card for a crash loop (`dedup_key` `crash-loop:<slug>`).
+
+    ⚠️ **A card whose recommended option equals the row's current state is not posted.**
+    `keep stopped` is the recommendation, and a crash-looping row is already stopped, so the
+    card asked the operator to ratify the no-op the system performs on its own: 189 of them
+    in 24 h, not one answered. The routing it used to carry is the `crash-loop:` row in the
+    fleet leg's hand-back, which still fires.
+
+    ⚠️ **This supersedes #1056 (v0.362.9), deliberately.** That change routed a task with no
+    resolvable goal page to the operator, on the reasoning that "the operator is the only
+    decision left". The card is a no-op whatever the row's parentage, so the routing is
+    withdrawn for all of them; a genuinely dangling `goals:` link is its own question, not
+    this card's.
+
+    `recommend`/`current` are parameters rather than constants so the guard is a filter and
+    not a blanket suppression: a card whose recommendation differs from the current state
+    still posts, and the tests pin both directions.
 
     Best-effort: a missing `attention-ask.py` must not turn a crash-loop verdict into a
     traceback, so the failure is swallowed and the verdict still stands.
     """
+    if card_is_noop(recommend, current):
+        return
     slug = _keepalive().base_slug(task)
     script = os.path.join(HERE, "attention-ask.py")
     if not os.path.exists(script):
@@ -249,7 +278,7 @@ def post_card(task: str, spent: int) -> None:
              "--payload", (f"WORKER CRASH-LOOP: {task} — {spent} resumes with no progress. "
                            f"Resume anyway?"),
              "--option", "keep stopped", "--option", "resume anyway",
-             "--recommend", "keep stopped", "--interrupt-class", "pick"],
+             "--recommend", recommend, "--interrupt-class", "pick"],
             check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -461,10 +490,12 @@ def main(argv: list[str]) -> int:
     if spent >= RESUME_CAP:
         print("crash-loop")
         print(f"⚠️ WORKER CRASH-LOOP: {a.task} — {spent} resumes with no progress; stop resuming")
-        # A resolvable goal means a manager tier owns the row even when that goal's manager is
-        # dead right now: the fleet round restarts or resumes it, and the `crash-loop:` row in
-        # this leg's hand-back is the channel. Only a task no manager can own — no `goals:`
-        # key, or every declared goal page unopenable — earns an operator card.
+        # No card reaches the operator: `post_card()` refuses a recommendation that equals the
+        # row's current state, and a crash-looping row is already stopped. The `crash-loop:`
+        # row in this leg's hand-back is the channel — a resolvable goal means the goal tier
+        # owns the row even when that goal's manager is dead, and a goal-less row is this
+        # leg's own. The `if not owners` gate stays so that a future recommendation which is
+        # a real decision still reaches the operator for a row no manager can own.
         if not owners:
             post_card(a.task, spent)
         return 1
