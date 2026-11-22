@@ -304,6 +304,140 @@ class TestFindTask(unittest.TestCase):
         self.assertEqual(refusal[1], f"no page carries {OTHER}")
 
 
+class TestFindTasks(unittest.TestCase):
+    """The collect-all resolution the close path uses.
+
+    `find_task` returns the FIRST `claude_session_id` match, which is the defect pinned
+    here: a session bound to a finished task and a live one closed on whichever sorted
+    first. `find_tasks` collects the whole set so the gate can judge all of it, and it
+    leaves `find_task`'s contract alone for its five other importers.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.vaults = os.path.join(self.tmp, "vaults")
+        self.tasks = os.path.join(self.vaults, "somevault", "25 Tasks")
+        os.makedirs(self.tasks)
+        prior = cw._VAULT_CONFIG
+        cw._VAULT_CONFIG = {
+            os.path.realpath(os.path.join(self.vaults, "somevault")): "25 Tasks"
+        }
+        self.addCleanup(setattr, cw, "_VAULT_CONFIG", prior)
+
+    def _write(self, name, body):
+        path = os.path.join(self.tasks, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        return path
+
+    def test_collects_every_held_task(self):
+        a = self._write(
+            "a-terminal.md", f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n"
+        )
+        z = self._write(
+            "z-live.md", f"---\nclaude_session_id: {SID}\nstatus: in_progress\n---\n"
+        )
+        held, handed, error = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertIsNone(error)
+        self.assertEqual([path for path, _, _ in held], [a, z])
+        self.assertEqual(handed, [])
+
+    def test_a_body_mention_is_not_collected(self):
+        self._write("a.md", f"---\nstatus: completed\n---\n\nsee session {SID}\n")
+        held, handed, _ = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertEqual(held, [])
+        self.assertEqual(handed, [])
+
+    def test_a_handed_off_task_is_collected_separately(self):
+        path = self._write(
+            "a.md",
+            f"---\nclaude_session_id: {OTHER}\nstatus: in_progress\n"
+            f"metrics_sessions:\n    - session_id: {SID}\n"
+            f'      started_at: "2026-10-20T11:51:47+02:00"\n---\n',
+        )
+        held, handed, _ = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertEqual(held, [])
+        self.assertEqual([p for p, _, _ in handed], [path])
+        self.assertTrue(handed[0][2])
+
+    def test_an_own_anchor_beats_a_handed_off_one(self):
+        """A file whose `claude_session_id` is this session is held, never handed off."""
+        own = self._write(
+            "a.md", f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n"
+        )
+        self._write(
+            "z.md",
+            f"---\nclaude_session_id: {OTHER}\nmetrics_sessions:\n"
+            f'    - session_id: {SID}\n      started_at: "2026-10-20T11:51:47+02:00"\n---\n',
+        )
+        held, handed, _ = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertEqual([p for p, _, _ in held], [own])
+        self.assertEqual([os.path.basename(p) for p, _, _ in handed], ["z.md"])
+
+
+class TestHeldTaskGate(unittest.TestCase):
+    """The multi-task close rule: any live task refuses, whatever sorts first.
+
+    The motivating case is session `f8544288` (2026-11-09): a `completed` row and an
+    `in_progress`/`execution` row both bound to one session, and the reap closed it off
+    the completed one. `_grep_task` iterates `sorted(paths)`, so the fixture names pin the
+    order the old first-candidate return would have followed — `a-terminal` before
+    `z-live` is the exact case that wrongly closed.
+    """
+
+    def setUp(self):
+        import datetime
+        self.today = datetime.date(2026, 11, 22)
+
+    def _task(self, name, **fm):
+        return (f"/v/25 Tasks/{name}", fm, False)
+
+    def test_terminal_sorts_first_and_the_live_task_still_refuses(self):
+        """The defect: `a-terminal` sorts first, so a first-candidate return closed here."""
+        tasks = [
+            self._task("a-terminal.md", status="completed"),
+            self._task("z-live.md", status="in_progress"),
+        ]
+        refusal, detail = cw.held_task_gate(tasks, self.today)
+        self.assertEqual(refusal, "task-not-terminal")
+        self.assertIn("z-live.md", detail)
+        self.assertNotIn("a-terminal.md", detail)
+
+    def test_live_sorts_first_and_refuses(self):
+        tasks = [
+            self._task("a-live.md", status="in_progress"),
+            self._task("z-terminal.md", status="completed"),
+        ]
+        refusal, detail = cw.held_task_gate(tasks, self.today)
+        self.assertEqual(refusal, "task-not-terminal")
+        self.assertIn("a-live.md", detail)
+
+    def test_two_terminal_tasks_still_close(self):
+        """The fix must not over-refuse: two finished tasks are not a reason to hold."""
+        tasks = [
+            self._task("a.md", status="completed"),
+            self._task("b.md", status="aborted"),
+        ]
+        self.assertIsNone(cw.held_task_gate(tasks, self.today))
+
+    def test_a_single_terminal_task_still_closes(self):
+        self.assertIsNone(cw.held_task_gate([self._task("a.md", status="completed")], self.today))
+
+    def test_a_handed_off_live_task_still_closes(self):
+        """A task the session handed over is the successor's business, not this session's."""
+        handed = ("/v/25 Tasks/h.md", {"status": "in_progress"}, True)
+        self.assertIsNone(cw.held_task_gate([handed], self.today))
+
+    def test_a_live_task_behind_a_handed_off_one_still_refuses(self):
+        tasks = [
+            ("/v/25 Tasks/a-handed.md", {"status": "in_progress"}, True),
+            self._task("z-live.md", status="in_progress"),
+        ]
+        refusal, detail = cw.held_task_gate(tasks, self.today)
+        self.assertEqual(refusal, "task-not-terminal")
+        self.assertIn("z-live.md", detail)
+
+
 class _StubStore:
     """A local attention store: open list, per-item reads and delivery reports.
 
@@ -392,9 +526,9 @@ class TestCliRefusals(unittest.TestCase):
         with open(os.path.join(self.sessions, f"{rec['pid']}.json"), "w", encoding="utf-8") as handle:
             json.dump(rec, handle)
 
-    def _task(self, **fm):
+    def _task(self, name="t.md", **fm):
         lines = ["---"] + [f"{k}: {v}" for k, v in fm.items()] + ["---", ""]
-        with open(os.path.join(self.tasks, "t.md"), "w", encoding="utf-8") as handle:
+        with open(os.path.join(self.tasks, name), "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines))
 
     def _run(self, *extra, holds=None, bin_dir=None, home=None):
@@ -415,6 +549,31 @@ class TestCliRefusals(unittest.TestCase):
             [sys.executable, SCRIPT, SID, *extra],
             capture_output=True, text=True, env=env, timeout=60,
         )
+
+    def test_a_second_live_task_blocks_the_close(self):
+        """A session bound to a terminal task AND a live one refuses, naming the live one.
+
+        The motivating defect: `_grep_task` returned the first `claude_session_id` match, so
+        `a-terminal.md` sorting first closed the session while `z-live.md` was still being
+        worked. This runs the whole CLI, so reverting `main()` to `find_task` fails here even
+        though every helper-level test still passes.
+        """
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("a-terminal.md", **{"claude_session_id": SID, "status": "completed"})
+        self._task("z-live.md", **{"claude_session_id": SID, "status": "in_progress"})
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertIn("z-live.md", done.stdout)
+        self.assertNotIn("a-terminal.md", done.stdout)
+
+    def test_a_single_terminal_task_still_closes(self):
+        """The multi-task gate must not over-refuse: one finished task still closes."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("a-terminal.md", **{"claude_session_id": SID, "status": "completed"})
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("would close", done.stdout)
 
     def test_unknown_session_id(self):
         done = self._run()
@@ -779,6 +938,24 @@ class TestCliRefusals(unittest.TestCase):
                 self.assertIsNone(child.poll(), "--dry-run must not signal")
                 os.remove(path)
                 os.remove(os.path.join(self.sessions, f"{child.pid}.json"))
+
+    def test_a_goal_page_decides_when_the_task_search_failed(self):
+        """Review finding: a failed TASK lookup must not refuse a session a page resolves.
+
+        Removing the task directory makes the task grep exit 2. The goal page still holds
+        the session, so the page verdict decides — the same answer the close gave before the
+        multi-task gate existed. Reading the task error first refused the close with
+        `task-unresolved` and made a goal-only session unclosable on the no-ripgrep path.
+        """
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        path = self._page("goal", claude_session_id=SID, status="completed")
+        os.rmdir(self.tasks)
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("would close", done.stdout)
+        self.assertNotIn("task-unresolved", done.stdout)
+        self.assertIn(path, done.stdout)
 
     def test_handed_off_task_does_not_outrank_a_held_live_goal(self):
         """Review finding: a metrics-only task match is weaker than a page still held."""
