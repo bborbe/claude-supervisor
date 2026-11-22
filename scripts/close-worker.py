@@ -42,9 +42,11 @@ Eight refusals, each exit 1 with a stable reason token as the first line of outp
                       `claude_session_id` — and no goal or topic page does either (see
                       the goal/topic anchor below). Absent evidence is not evidence of a
                       finished task; fail closed.
-  task-not-terminal   the task is neither terminal (`completed`/`aborted`/`hold`) nor
-                      deferred to a future `defer_date` — or, for a goal/topic anchor,
-                      the page fails the goal/topic terminal-state rule below.
+  task-not-terminal   any task the session holds as `claude_session_id` is neither
+                      terminal (`completed`/`aborted`/`hold`) nor deferred to a future
+                      `defer_date` — one live task refuses the close even when another
+                      task bound to the same session has finished. Or, for a goal/topic
+                      anchor, the page fails the goal/topic terminal-state rule below.
 
 Goal/topic anchor. When no task resolves the session, a goal page (`24 Goals` /
 `23 Goals`) or topic page (`23 Topics`) is resolved by the same join: `claude_session_id`,
@@ -607,6 +609,81 @@ def _grep_task(session_id, dirs, timeout=15):
     return None, None, None
 
 
+def _grep_tasks(session_id, dirs, timeout=15):
+    """`(held, handed, error)` — every task in `dirs` that records this session.
+
+    The collect-all sibling of `_grep_task`. `_grep_task` returns on the FIRST
+    `claude_session_id` match, which is right for a caller that needs one anchor and wrong
+    for a close: one session can be bound to two tasks at once — a finished one and a live
+    one — and a first-candidate return then closes on the finished one while the live one
+    is still being worked. Measured 2026-11-09 on session `f8544288`, whose reap closed it
+    off a `completed` row while a second task sat at `in_progress`/`execution`.
+
+    `held` are tasks whose `claude_session_id` is this session, `handed` tasks that list it
+    only under `metrics_sessions` (a recorded handover); each entry is
+    `(path, frontmatter, handed_off)`. `error` is a string when the lookup failed, and the
+    caller must refuse on it: a failed grep is not evidence that no live task exists.
+    """
+    rg = shutil.which("rg")
+    argv = (["rg", "-l", "-F", session_id, *dirs] if rg
+            else ["grep", "-rl", "--fixed-strings", session_id, *dirs])
+    try:
+        found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        return [], [], f"task lookup failed ({exc})"
+    # ⚠️ Parse the stdout BEFORE judging the exit code — `grep -rl` can exit ≥ 2 and still
+    # have printed every match it found before the error.
+    held, handed = [], []
+    for path in sorted((found.stdout or "").splitlines()):
+        fm = frontmatter(path)
+        if (fm.get("claude_session_id") or "").strip() == session_id:
+            held.append((path, fm, False))
+        elif session_id in metrics_session_ids(path):
+            handed.append((path, fm, True))
+    # A match that was found is evidence even when the search also errored; only an empty
+    # result from a failed search is the unreadable-vs-absent collapse this module forbids.
+    if not held and not handed and found.returncode not in (0, 1):
+        return [], [], f"task lookup failed (exit {found.returncode})"
+    return held, handed, None
+
+
+def find_tasks(session_id, cwd, vault_root=None):
+    """`(held, handed, error)` — every task that records this session, across all vaults.
+
+    The collect-all sibling of `find_task`, and **close-only**. `find_task` and
+    `find_task_checked` keep their first-candidate contract: `restart-worker.py`,
+    `reap-idle-headless.py`, `close-idle-tab.py`, `park-nudge.py` and `task-standdown.py`
+    import them, so changing `_grep_task`'s return semantics in place would move the
+    resume guard and the reap decision with it.
+
+    Both passes are scanned — unlike `find_task`, which stops at the first batch that
+    answers — because a close needs the whole bound set, not one anchor. The cwd-derived
+    directories still go first, so the most relevant task is collected even if the wider
+    scan then times out; `error` is reported only alongside a set the caller can judge.
+    """
+    held, handed = [], []
+    if not session_id:
+        return held, handed, None
+    dirs = task_dirs_for(cwd, vault_root)
+    if not dirs:
+        return held, handed, None
+    local = local_task_dirs(cwd)
+    rest = [d for d in dirs if d not in local]
+    error = None
+    seen = set()
+    for batch in (local, rest):
+        if not batch:
+            continue
+        batch_held, batch_handed, err = _grep_tasks(session_id, batch)
+        if err and error is None:
+            error = err
+        for entry in batch_held + batch_handed:
+            if entry[0] not in seen:
+                seen.add(entry[0])
+                (held if not entry[2] else handed).append(entry)
+    return held, handed, error
+
+
 def is_future(value, today):
     """True when `value` names an instant after `today`.
 
@@ -678,6 +755,21 @@ def task_verdict(task, today):
         f"defer_date {defer or '(unset)'!r}; a close needs a terminal status "
         f"({'/'.join(sorted(TERMINAL))}) or a future defer_date",
     )
+
+
+def task_gate(tasks, today):
+    """The first refusal across every task the session holds, or `None` when all permit.
+
+    A session can be bound to more than one task — a finished one and a live one — so the
+    close is gated on the whole set rather than on one resolved candidate. The first
+    refusal is returned, and because a live task is the only kind that produces one, the
+    message names the live task rather than a terminal sibling.
+    """
+    for task in tasks:
+        verdict = task_verdict(task, today)
+        if verdict is not None:
+            return verdict
+    return None
 
 
 def pane_for_session(jump, session_id):
@@ -874,11 +966,22 @@ def main():
             "discards a question the operator never answered",
         )
 
-    task = find_task(sid, cwd, VAULTS_ROOT)
+    held_tasks, handed_tasks, task_error = find_tasks(sid, cwd, VAULTS_ROOT)
+    task = held_tasks[0] if held_tasks else (handed_tasks[0] if handed_tasks else None)
     pages = []
-    if task is not None and not task[2]:
-        # The session holds this task as `claude_session_id`: the task decides alone.
-        bad = task_verdict(task, defer_date.as_now())
+    if task_error:
+        # A failed lookup is not evidence that no live task holds the session, so it
+        # refuses rather than falling through to the pages with an unproven absence.
+        bad = (
+            "task-unresolved",
+            f"{task_error}; a failed lookup is not evidence that no live task holds "
+            "this session",
+        )
+    elif held_tasks:
+        # Every held task must pass. A session can be bound to a finished task and a live
+        # one at once, so a first-candidate verdict closes on whichever sorts first — the
+        # defect this gate exists to remove.
+        bad = task_gate(held_tasks, defer_date.as_now())
     else:
         # No held task. A task matched only through `metrics_sessions` (handed off) is
         # weaker evidence than a page the session still holds, so the pages are read in

@@ -304,6 +304,140 @@ class TestFindTask(unittest.TestCase):
         self.assertEqual(refusal[1], f"no page carries {OTHER}")
 
 
+class TestFindTasks(unittest.TestCase):
+    """The collect-all resolution the close path uses.
+
+    `find_task` returns the FIRST `claude_session_id` match, which is the defect pinned
+    here: a session bound to a finished task and a live one closed on whichever sorted
+    first. `find_tasks` collects the whole set so the gate can judge all of it, and it
+    leaves `find_task`'s contract alone for its five other importers.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.vaults = os.path.join(self.tmp, "vaults")
+        self.tasks = os.path.join(self.vaults, "somevault", "25 Tasks")
+        os.makedirs(self.tasks)
+        prior = cw._VAULT_CONFIG
+        cw._VAULT_CONFIG = {
+            os.path.realpath(os.path.join(self.vaults, "somevault")): "25 Tasks"
+        }
+        self.addCleanup(setattr, cw, "_VAULT_CONFIG", prior)
+
+    def _write(self, name, body):
+        path = os.path.join(self.tasks, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        return path
+
+    def test_collects_every_held_task(self):
+        a = self._write(
+            "a-terminal.md", f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n"
+        )
+        z = self._write(
+            "z-live.md", f"---\nclaude_session_id: {SID}\nstatus: in_progress\n---\n"
+        )
+        held, handed, error = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertIsNone(error)
+        self.assertEqual([path for path, _, _ in held], [a, z])
+        self.assertEqual(handed, [])
+
+    def test_a_body_mention_is_not_collected(self):
+        self._write("a.md", f"---\nstatus: completed\n---\n\nsee session {SID}\n")
+        held, handed, _ = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertEqual(held, [])
+        self.assertEqual(handed, [])
+
+    def test_a_handed_off_task_is_collected_separately(self):
+        path = self._write(
+            "a.md",
+            f"---\nclaude_session_id: {OTHER}\nstatus: in_progress\n"
+            f"metrics_sessions:\n    - session_id: {SID}\n"
+            f'      started_at: "2026-10-20T11:51:47+02:00"\n---\n',
+        )
+        held, handed, _ = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertEqual(held, [])
+        self.assertEqual([p for p, _, _ in handed], [path])
+        self.assertTrue(handed[0][2])
+
+    def test_an_own_anchor_beats_a_handed_off_one(self):
+        """A file whose `claude_session_id` is this session is held, never handed off."""
+        own = self._write(
+            "a.md", f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n"
+        )
+        self._write(
+            "z.md",
+            f"---\nclaude_session_id: {OTHER}\nmetrics_sessions:\n"
+            f'    - session_id: {SID}\n      started_at: "2026-10-20T11:51:47+02:00"\n---\n',
+        )
+        held, handed, _ = cw.find_tasks(SID, self.tmp, self.vaults)
+        self.assertEqual([p for p, _, _ in held], [own])
+        self.assertEqual([os.path.basename(p) for p, _, _ in handed], ["z.md"])
+
+
+class TestTaskGate(unittest.TestCase):
+    """The multi-task close rule: any live task refuses, whatever sorts first.
+
+    The motivating case is session `f8544288` (2026-11-09): a `completed` row and an
+    `in_progress`/`execution` row both bound to one session, and the reap closed it off
+    the completed one. `_grep_task` iterates `sorted(paths)`, so the fixture names pin the
+    order the old first-candidate return would have followed — `a-terminal` before
+    `z-live` is the exact case that wrongly closed.
+    """
+
+    def setUp(self):
+        import datetime
+        self.today = datetime.date(2026, 11, 22)
+
+    def _task(self, name, **fm):
+        return (f"/v/25 Tasks/{name}", fm, False)
+
+    def test_terminal_sorts_first_and_the_live_task_still_refuses(self):
+        """The defect: `a-terminal` sorts first, so a first-candidate return closed here."""
+        tasks = [
+            self._task("a-terminal.md", status="completed"),
+            self._task("z-live.md", status="in_progress"),
+        ]
+        refusal, detail = cw.task_gate(tasks, self.today)
+        self.assertEqual(refusal, "task-not-terminal")
+        self.assertIn("z-live.md", detail)
+        self.assertNotIn("a-terminal.md", detail)
+
+    def test_live_sorts_first_and_refuses(self):
+        tasks = [
+            self._task("a-live.md", status="in_progress"),
+            self._task("z-terminal.md", status="completed"),
+        ]
+        refusal, detail = cw.task_gate(tasks, self.today)
+        self.assertEqual(refusal, "task-not-terminal")
+        self.assertIn("a-live.md", detail)
+
+    def test_two_terminal_tasks_still_close(self):
+        """The fix must not over-refuse: two finished tasks are not a reason to hold."""
+        tasks = [
+            self._task("a.md", status="completed"),
+            self._task("b.md", status="aborted"),
+        ]
+        self.assertIsNone(cw.task_gate(tasks, self.today))
+
+    def test_a_single_terminal_task_still_closes(self):
+        self.assertIsNone(cw.task_gate([self._task("a.md", status="completed")], self.today))
+
+    def test_a_handed_off_live_task_still_closes(self):
+        """A task the session handed over is the successor's business, not this session's."""
+        handed = ("/v/25 Tasks/h.md", {"status": "in_progress"}, True)
+        self.assertIsNone(cw.task_gate([handed], self.today))
+
+    def test_a_live_task_behind_a_handed_off_one_still_refuses(self):
+        tasks = [
+            ("/v/25 Tasks/a-handed.md", {"status": "in_progress"}, True),
+            self._task("z-live.md", status="in_progress"),
+        ]
+        refusal, detail = cw.task_gate(tasks, self.today)
+        self.assertEqual(refusal, "task-not-terminal")
+        self.assertIn("z-live.md", detail)
+
+
 class _StubStore:
     """A local attention store: open list, per-item reads and delivery reports.
 
