@@ -23,7 +23,7 @@ So this script does two things and never a third:
      autonomous branch that does.
 
 ⚠️ **There is no `stuck-tab:` card to "extend"** — `CLAUDE.md:135` says a stall is a duration,
-not an event, and issues no attention card; `manager-attention-watch.py` renders `stuck-tab:`
+not an event, and issues no attention card; the manager-wake job renders `stuck-tab:`
 as a gate REASON and an incident-ledger row. This script creates the card, and its dedup key
 is scoped per session so the gate reason and the card cannot both accumulate.
 

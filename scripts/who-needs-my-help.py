@@ -31,7 +31,7 @@ here; this script adds only the gate-class axis, the pane viewport read the
 sibling does not perform, and the four-section render.
 
 TWO CHANNELS, NEVER BY POSITION. Whether a session is parked comes from the
-session registry, on the two limbs `scripts/manager-attention-watch.py` states:
+session registry, on the two limbs the manager-wake job states:
 
     gated := status == "waiting"                      # parked on a harness gate
           or (status == "idle" and non-empty closer)  # turn ended on an ask
@@ -270,7 +270,7 @@ def pane_shape(pane_id):
 
 
 def parked(rec, reg_record, resumed_ids=frozenset()):
-    """The registry's two-limb verdict — verbatim from `manager-attention-watch.py`.
+    """The registry's two-limb verdict — verbatim from the manager-wake job.
 
     Both limbs are load-bearing. The registry alone under-reports: a worker idle
     on a `👤 You:` panel reads `idle`, indistinguishable from one that finished its

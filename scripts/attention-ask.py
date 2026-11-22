@@ -323,7 +323,7 @@ def _positive_float_env(name, default):
 #
 # ⚠️ The repo therefore reads this variable with TWO defaults, and that is stated
 # rather than hidden — it is the condition the note below sets. `attention-answer.py`,
-# `pod-attention.py`, `manager-attention-watch.py`, `who-needs-me.py` and
+# `pod-attention.py`, the delivery arm, `who-needs-me.py` and
 # `notify-gate.py` still take 3 s, and unifying the policy is its own change.
 # `post` is the deliberate exception: it raises a gate the OPERATOR answers, so it
 # is the one call where paying latency beats losing the card.
@@ -595,7 +595,7 @@ def producer_kind_for(producer_id, declared):
     """The kind to post: the declared value, or the session's ledger role.
 
     ⚠️ Keyed on `producer_id` — the session the item is ABOUT — never on the
-    invoking process. `manager-attention-watch.py` posts on behalf of a parked
+    invoking process. The delivery arm posts on behalf of a parked
     worker: the caller is a manager, the `producer_id` is the worker, and the
     card must read `session`. Reading `$CLAUDE_CODE_SESSION_ID` here instead
     would relabel exactly the cards this resolver exists to get right.

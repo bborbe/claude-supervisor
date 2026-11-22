@@ -26,7 +26,7 @@ over 50,530 files — unusable on a per-post path.
 The card's `producer_id`, never the caller
 ------------------------------------------
 Resolution keys on the id the item is *about*, not on the process that invoked
-the producer. `manager-attention-watch.py` posts on behalf of a parked worker:
+the producer. The delivery arm posts on behalf of a parked worker:
 the invoking process is a manager, the `producer_id` is the worker, and the card
 must read `session`. Callers pass the same id they put in the payload's
 `producer_id`; passing `$CLAUDE_CODE_SESSION_ID` instead would relabel exactly

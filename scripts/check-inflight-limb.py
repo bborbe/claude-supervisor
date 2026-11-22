@@ -33,7 +33,7 @@ the labels a reader has to write. Both must hold on the same line.
 
 Anchored on the clause's own words, never on a line number: this file's neighbours cite
 `agents/goal-drive.md` by line number, and **four in-repo sites had drifted to `:132`
-for a sentence that sits at `:134`** — `scripts/manager-attention-watch.py` plus
+for a sentence that sits at `:134`** — the manager-wake job plus
 `agents/goal-sweep-reader.md`, `commands/goal-loop.md` and `commands/goal-status.md`.
 All four are corrected in the change that added this guard, so the drift is now historical
 rather than live — which is the point: it was found only by a reader checking a citation
