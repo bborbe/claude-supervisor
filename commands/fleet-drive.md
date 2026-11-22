@@ -47,7 +47,7 @@ Rationale: runbook § Fleet-Manager Command.
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
 goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
-⚠️ **Carve-out: 5b, 5d and 16b are acting legs.** They run here, or in a sub-agent granted
+⚠️ **Carve-out: 5d is an acting leg.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
 them.
 

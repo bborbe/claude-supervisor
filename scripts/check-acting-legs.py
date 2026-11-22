@@ -58,7 +58,7 @@ STEPS = COMMANDS / "steps"
 #: Phrase from the carve-out's own first sentence. A plain substring, so a reflow of the
 #: surrounding prose leaves it intact; rewording that sentence is a deliberate act, and the
 #: failure is the reminder that this home assertion moves with it.
-CARVEOUT = "5b, 5d and 16b are acting legs"
+CARVEOUT = "5d is an acting leg"
 CARVEOUT_HOME = COMMANDS / "fleet-drive.md"
 CARVEOUT_NEEDS = ("write tools", "read-only")
 

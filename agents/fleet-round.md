@@ -1,6 +1,6 @@
 ---
 name: fleet-round
-description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg, the keep-alive leg, the own-parks leg and the manager reap, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows, the round tail and the printing of the render.
+description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg and the own-parks leg, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows, the round tail and the printing of the render.
 model: sonnet
 tools: Read, Bash, Write, Task, Skill, SendMessage, ListAgents, mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
 allowed-tools: Bash(python3:*), Bash(date:*), Bash(vault-cli:*), Bash(ls:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(grep:*), Bash(pgrep:*), Bash(gh:*), Bash(git log:*), Bash(wezterm cli list:*), mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
@@ -19,7 +19,7 @@ file when its `When` holds and re-reading it if its text is not in your context.
 re-derive a rule from this file: where this file and a step file disagree, the step file wins
 and you report the disagreement.
 
-⚠️ **You act, and a read-only execution is not a run of you.** Rows 5, 5b, 5d, 16 and 16b
+⚠️ **You act, and a read-only execution is not a run of you.** Rows 5, 5d and 16
 write — they resume sessions, send nudges, open workers and reap managers. A run that only
 counts is the failure `commands/fleet-drive.md` § carve-out names.
 

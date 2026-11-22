@@ -26,12 +26,12 @@ KEEPALIVE = "commands/steps/keepalive.md"
 OWN_PARKS = "commands/steps/own-parks.md"
 MANAGER_REAP = "commands/steps/manager-reap.md"
 
-CARVEOUT = "5b, 5d and 16b are acting legs"
+CARVEOUT = "5d is an acting leg"
 MARKER = "a read-only execution is not a run of it"
 WHEN = "every tick"
 
 
-def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5d", OWN_PARKS), ("16b", MANAGER_REAP))) -> str:
+def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5d", OWN_PARKS),)) -> str:
     lines = [
         "# Fleet drive",
         "",
@@ -104,6 +104,22 @@ class TestGuard(Base):
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("carries the carve-out", r.stderr)
+
+    def test_own_parks_without_its_pointer_fails(self) -> None:
+        # Retargeted 2026-11-22 from the removed 16b leg: the POINTER branch still
+        # guards 5d, so it keeps a test rather than losing its only cover.
+        self.write(OWN_PARKS, step("Own parks", with_pointer=False))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not point at", r.stderr)
+
+    def test_router_row_dropped_for_the_surviving_leg_fails(self) -> None:
+        # Retargeted 2026-11-22 from the removed 5b/16b rows: a carve-out for a row the
+        # router no longer dispatches governs nothing, and 5d is now the only such row.
+        self.write(ROUTER, router(rows=()))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("row 5d does not name", r.stderr)
 
     def test_own_parks_without_its_statement_fails(self) -> None:
         # 5d shipped after the carve-out was written, so the row was never added to the list of
