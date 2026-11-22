@@ -44,7 +44,10 @@ def run_ladder(script, vault, subject, directory):
         [sys.executable or "python3", script, "--vault", vault, "--subject", subject,
          "--branch", "topic", "--dir", directory],
         stdout=subprocess.PIPE, text=True).stdout
-    return "\n".join(out.split("\n")[:2])
+    lines = out.split("\n")
+    # Byte-for-byte the shape the actor's heredoc printed: a third line, if any, leaves a
+    # trailing tab so the rendered row keeps its field count.
+    return "\n".join(lines[:2]) + ("\n" if len(lines) > 2 else "")
 
 
 def candidates(vault, directory, script, of_page=None, ladder=None):
