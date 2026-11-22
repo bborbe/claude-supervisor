@@ -378,7 +378,7 @@ nothing, and a `cannot-tell` is reported, never resumed.
 unlabelled number reads as a measurement; format: `commands/steps/output-shape.md` item 12.
 
 ⚠️ **Never state a capacity comparison this leg did not obtain from a cap instrument** — it
-computes no count of its own; `list_agents`, `live-workers.py` and the raw `~/.claude/sessions`
+computes no count of its own; `list_agents`, `live-workers.py` and the raw session-registry
 entry count are context, never a cap denominator. Quote a refused resume's refusal verbatim;
 report capacity only as `workers: <live>/<target>` (`commands/steps/output-shape.md` item 1).
 
