@@ -96,6 +96,7 @@ Full text and the `⚠️` clauses live in `steps/rules.md`.
 - **Dispatch is the manager's verb alone** — a worker routes out-of-scope work to its manager.
 - **Before spawning, check for a supervised worker** — the session registry is the guard.
 - **Never answer another manager's workers** — route to the owning manager; own-goal admits excepted.
+- **A subject with no lower-tier manager is the fleet manager's, never nobody's** — ownership falls upward (`docs/fleet-surface.md` § Which manager owns a subject).
 - **`mcp__supervisor__list_agents` lists every worker; only this session's parks are this session's to answer** — empty is not absence.
 - **An empty `mcp__supervisor__pending_permissions` is not absence of a gate** — take the worker's own reading first.
 - **`~/.claude/sessions/*.json` is the authoritative liveness store** — never stamp a session from a ledger reading.
