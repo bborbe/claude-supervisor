@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.4
 
 - fix: **a dead `SITE_LIST` entry no longer names a deleted watcher script.** `scripts/transport-read-check.py` enumerated `("manager-attention-watch.py", "pane_for_session_name")`, but that script is deleted and the function exists nowhere live — `git grep pane_for_session_name` matches only that entry and a `CHANGELOG-archive.md` line. Its replacement needs no new entry: `manager-wake.py`'s `find_pane` does the join, and its own docstring states the read is `jump.py`'s `wezterm_panes`, which the list already enumerates and drives. A dead entry is not harmless here — it claims a mechanism nothing can fail, the "enumerated but never driven" gap the list exists to catch. Change set: `scripts/transport-read-check.py`, `CHANGELOG.md`.
 
