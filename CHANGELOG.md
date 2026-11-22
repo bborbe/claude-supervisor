@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.3
 
 - docs: **the prose that still described `manager-attention-watch.py` as live now names what replaced it — the manager-wake job, or the delivery arm.** The script was deleted when its behaviour moved in-process (`v0.366.0`), but 22 mentions across 15 files still sent a reader following a comment to code that no longer exists. Each now names the replacement rather than a generic noun, and the last surviving mention of the deleted filename in a docstring is removed rather than wrapped in a parenthetical. Comments and docstrings only — no executable line changed, and `git diff --stat` is the 22/22 signature of an in-place substitution. Change set: `scripts/adopt-orphans.py`, `scripts/attention-ask.py`, `scripts/check-inflight-limb.py`, `scripts/gate-owner-filter.py`, `scripts/incident-ledger.py`, `scripts/manager-predispatch.py`, `scripts/next-focus-answer.py`, `scripts/open-items.py`, `scripts/operator-ask-card.py`, `scripts/session-role.py`, `scripts/stalled-tab-restart.py`, `scripts/tests/test_gate_owner_filter.py`, `scripts/tests/test_stuck_heal.py`, `scripts/transport-read-check.py`, `scripts/who-needs-my-help.py`, `CHANGELOG.md`.
 
