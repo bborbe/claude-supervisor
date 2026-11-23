@@ -158,7 +158,10 @@ class AnswerGateTest(unittest.TestCase):
         posted.assert_not_called()
 
     def test_permission_with_a_decision_prints_delivery_never_target(self):
-        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        # A manager-tier payload: the tier gate refuses operator-tier cards (see
+        # PermissionTierGateTest), so a card that must reach the store carries one.
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1",
+                "payload": "Bash: git status"}
         rc, out, _ = self._run(
             item, post=lambda *_: {"answered_at": "t", "answered_by": "arm"}, decision="allow"
         )
@@ -172,7 +175,8 @@ class AnswerGateTest(unittest.TestCase):
         self.assertNotIn("TARGET", out)
 
     def test_permission_deny_reaches_the_body(self):
-        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1",
+                "payload": "Bash: git status"}
         rc, _, posted = self._run(
             item, post=lambda *_: {"answered_at": "t", "answered_by": "arm"}, decision="deny"
         )
@@ -180,7 +184,8 @@ class AnswerGateTest(unittest.TestCase):
         self.assertEqual(posted.call_args.args[3], "deny")
 
     def test_lost_permission_race_never_delivers(self):
-        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1",
+                "payload": "Bash: git status"}
         err = urllib.error.HTTPError("u", 409, "conflict", {}, None)
         rc, out, _ = self._run(item, post=err, decision="allow")
         self.assertEqual(rc, 1)
@@ -267,7 +272,8 @@ class AnswerGateTest(unittest.TestCase):
         self.assertIn("LOST:", out)
 
     def test_item_closed_on_a_permission_card_never_delivers(self):
-        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1",
+                "payload": "Bash: git status"}
         rc, out, _ = self._run(item, post=_conflict("ITEM_CLOSED"), decision="allow")
         self.assertEqual(rc, 1)
         self.assertIn("ITEM_CLOSED:", out)
@@ -275,7 +281,8 @@ class AnswerGateTest(unittest.TestCase):
         self.assertNotIn("DELIVERY", out)
 
     def test_already_answered_on_a_permission_card_never_delivers(self):
-        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1",
+                "payload": "Bash: git status"}
         rc, out, _ = self._run(item, post=_conflict("ALREADY_ANSWERED"), decision="allow")
         self.assertEqual(rc, 1)
         self.assertIn("ALREADY_ANSWERED:", out)
@@ -303,6 +310,98 @@ class AnswerGateTest(unittest.TestCase):
             rc, out, _ = self._run(item, post=lambda *_: {"answered_at": "t", "answered_by": "arm"})
         self.assertEqual(rc, 0)
         self.assertIn("RESOLVED_BY: unknown", out)
+
+
+class PermissionTierGateTest(unittest.TestCase):
+    """A lower tier must not settle an operator-tier prompt — the SC3 breach.
+
+    The card's payload is classified with the SAME classifier `attention-placement.py` uses,
+    so "operator" means one thing in the gate and in the measurement. Fail closed: a payload
+    naming no tool reads as `operator`, exactly as the measurement reads it.
+    """
+
+    REG = [_session("p1", "Asker")]
+    # `kill <pid>` is an operator-only form (service-restart) — the breach the gate exists for.
+    OPERATOR_PAYLOAD = "Bash: kill 6138"
+    MANAGER_PAYLOAD = "Bash: git status"
+
+    def _run(self, payload, by="manager", decision="allow"):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1",
+                "payload": payload}
+        out = io.StringIO()
+        with mock.patch.object(aa, "fetch_item", return_value=item), \
+             mock.patch.object(aa, "post_answer",
+                               return_value={"answered_at": "t", "answered_by": by}) as posted, \
+             mock.patch.object(aa, "fetch_delivery",
+                               return_value={"status": "delivered", "carrier": "c"}), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", tempfile.mkdtemp()), \
+             mock.patch.object(aa, "_sleep", lambda _s: None):
+            rc = aa.cmd_answer("i1", by, self.REG, out=out, decision=decision)
+        return rc, out.getvalue(), posted
+
+    def test_manager_cannot_answer_an_operator_tier_card(self):
+        rc, out, posted = self._run(self.OPERATOR_PAYLOAD, by="manager")
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out)
+        self.assertIn("operator tier:", out)
+        posted.assert_not_called()
+
+    def test_supervisor_arm_cannot_answer_an_operator_tier_card(self):
+        rc, out, posted = self._run(self.OPERATOR_PAYLOAD, by="supervisor")
+        self.assertEqual(rc, 2)
+        self.assertIn("operator tier:", out)
+        posted.assert_not_called()
+
+    def test_hand_built_arm_cannot_answer_an_operator_tier_card(self):
+        rc, out, posted = self._run(self.OPERATOR_PAYLOAD, by="Every Live Session Has One Keeper")
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out)
+        posted.assert_not_called()
+
+    def test_operator_arm_may_answer_an_operator_tier_card(self):
+        rc, out, posted = self._run(self.OPERATOR_PAYLOAD, by="operator")
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED:", out)
+        posted.assert_called_once()
+
+    def test_attention_next_arm_may_answer_an_operator_tier_card(self):
+        rc, out, posted = self._run(self.OPERATOR_PAYLOAD, by="supervisor:attention-next")
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED:", out)
+        posted.assert_called_once()
+
+    def test_board_arm_may_answer_an_operator_tier_card(self):
+        rc, out, posted = self._run(self.OPERATOR_PAYLOAD, by="attention-board")
+        self.assertEqual(rc, 0)
+        posted.assert_called_once()
+
+    def test_manager_tier_card_is_still_answerable_by_a_manager(self):
+        rc, out, posted = self._run(self.MANAGER_PAYLOAD, by="manager")
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED:", out)
+        posted.assert_called_once()
+
+    def test_allowlist_tier_card_is_still_answerable(self):
+        rc, out, posted = self._run("Bash: ls", by="manager")
+        self.assertEqual(rc, 0)
+        posted.assert_called_once()
+
+    def test_payload_naming_no_tool_reads_as_operator(self):
+        rc, out, posted = self._run(None, by="manager")
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out)
+        posted.assert_not_called()
+
+    def test_unreadable_classifier_fails_closed(self):
+        with mock.patch.object(aa, "_load_permission_tier", side_effect=RuntimeError("boom")):
+            self.assertEqual(aa.permission_tier_refusal({"payload": self.MANAGER_PAYLOAD}, "manager"),
+                             "tier unreadable — an operator-tier card may not be answered by a non-operator arm")
+
+    def test_operator_arm_is_exempt_from_the_tier_read(self):
+        # The operator's own surface must answer an operator-tier card even if the classifier
+        # is unreadable — the exemption is checked before the classifier is ever loaded.
+        with mock.patch.object(aa, "_load_permission_tier", side_effect=RuntimeError("boom")):
+            self.assertEqual(aa.permission_tier_refusal({"payload": self.OPERATOR_PAYLOAD}, "operator"), "")
 
 
 class AnswerContentTest(unittest.TestCase):
@@ -545,7 +644,8 @@ class PermissionDeliveryTruthTest(unittest.TestCase):
     the worker stayed parked (`wrapper holds no question for session …`).
     """
 
-    ITEM = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+    ITEM = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1",
+            "payload": "Bash: git status"}
     POSTED = {"answered_at": "t", "answered_by": "arm"}
 
     def _run(self, reports, wait=35.0, poll=1.0):
@@ -714,7 +814,8 @@ class PermissionDeliveryTruthTest(unittest.TestCase):
             reads.append(item_id)
             return seq[0]
 
-        with mock.patch.object(aa, "fetch_item", return_value={"item_id": "i1", "answer_mechanism": "permission"}), \
+        with mock.patch.object(aa, "fetch_item", return_value={"item_id": "i1", "answer_mechanism": "permission",
+                                                               "payload": "Bash: git status"}), \
              mock.patch.object(aa, "post_answer", return_value={"answered_at": "t", "answered_by": "a"}), \
              mock.patch.object(aa, "fetch_delivery", side_effect=fetch), \
              mock.patch.object(aa, "_sleep", lambda s: clock.__setitem__(0, clock[0] + s)), \
