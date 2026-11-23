@@ -231,8 +231,9 @@ armed manager reads `"declaring topic(s) have no live armed manager"`
 
 ⚠️ **The handover no longer strands the page — the `STOPPED` rule is what keeps the chain
 open.** § 1 selects on `scripts/owner.py`'s verdict through `scripts/topic-candidates.py` and
-refuses only `loop-stopped`, so a page this leg has handed over **stays in the population** and
-a re-manageable topic gets a replacement manager. A `STOPPED` topic is still never re-opened,
+refuses only `loop-stopped`, so a page this leg has handed over **stays in the population**
+unless it still carries its `.stopped` marker, and a re-manageable topic gets a replacement
+manager. A `STOPPED` topic is still never re-opened,
 so for one of those the goals stay unkept — a round must not report them kept after a close on
 the assumption that it follows.
 

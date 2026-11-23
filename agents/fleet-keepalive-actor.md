@@ -128,7 +128,9 @@ drops the page a close just handed over and no replacement manager is ever opene
 Read the vault's topic directory, not the roster: a topic manager whose session died is
 absent from the roster, which is the row this leg exists to recover. The selection lives in
 `scripts/topic-candidates.py`, which asks `scripts/owner.py` — the one ownership definition —
-and refuses only `loop-stopped`; it also resolves the directory from the vault's own config,
+and refuses only `loop-stopped` (so a handed-over page is a candidate, while one still carrying
+its `.stopped` marker is not — clearing a stand-down is the operator's act, never this leg's); it
+also resolves the directory from the vault's own config,
 so a renamed topics directory cannot glob nothing and report a clean round.
 
 ```bash
