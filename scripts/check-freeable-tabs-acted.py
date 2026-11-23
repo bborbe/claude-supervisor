@@ -19,7 +19,12 @@ queued, which makes this a routing failure rather than a careless one.
 caller sent the reap and stopped. Prose a caller can skip is the defect, so the pass is now
 a named step with its own required line and this check is its guard.
 
-    freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M>
+    freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M> · refused: <token>=<n> · …
+
+The `refused:` tail counts the refusal tokens the round recorded, bucketed by the token's
+first word (`deferred 2026-…` as `deferred`), and prints `(none)` when it recorded none.
+It is what makes the token observable: without it the record carries the token and nothing
+reads it, so the row still cannot be routed.
 
 WHY IT IS A SCRIPT. The denominator is a parse over one payload block with a link test; the
 numerator is a read of the round's action record; the verdict is an exit code. A sentence
@@ -66,7 +71,10 @@ CHECK_NAME = "check-freeable-tabs-acted.py"
 #: The line the round step and the output shape must both carry. Anchored on all four counts
 #: together, because `freeable-tabs:` alone is satisfied by any sentence about freeable tabs.
 ROUND_LINE_MARKER = "freeable-tabs: rows <N> · closed <M> · refused <K> · skipped <J>"
-OUTPUT_SHAPE_MARKER = "freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M>"
+OUTPUT_SHAPE_MARKER = (
+    "freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M>"
+    " · refused: <token>=<n>"
+)
 
 #: Column-0 section heads. A head ends whatever block was open, so the parse cannot run past
 #: the block it is counting -- the payload carries `ESCALATION`, `CLOSERS` and `RETAINED`
@@ -192,7 +200,7 @@ def freeable_rows(text):
 
 
 def acted_names(path):
-    """Normalised names the round closed OR refused, or None when the record is unreadable.
+    """(normalised names, refusal-token counts) the round closed OR refused, or None.
 
     Both actions count. A refusal token is a legitimate outcome — the row is left for the next
     round by contract — so counting only `closed` would report a refused row as a miss on
@@ -202,22 +210,40 @@ def acted_names(path):
     A missing file is **nothing recorded, not an unknown** -- the record is per-round by
     design, so its absence is a statement about this round. `None` is reserved for a file
     that exists and cannot be read, which is a refusal rather than a clean zero.
+
+    The record carries a refusal's token as a third tab-separated field
+    (`refused<TAB><name><TAB><token>`). The join is on `fields[1]` alone: a token is never
+    part of the name, so joining on everything after the first tab would turn
+    `<name> <token>` into the key and report every refused row as missing. Tokens are
+    counted by their first word, so `deferred 2026-11-22T19:07+01:00` buckets as `deferred`
+    and `task-not-terminal (expired defer_date)` as `task-not-terminal`.
+
+    A name is assumed tab-free — the record's producer writes it verbatim — so a name
+    containing a tab would shift the token field. An empty third field counts as no token.
     """
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
-        return set()
+        return set(), {}
     except OSError:
         return None
     out = set()
+    tokens = {}
     for line in text.splitlines():
         entry = line.strip()
         if not entry or entry.startswith("#"):
             continue
-        action, tab, recipient = entry.partition("\t")
-        if tab and action.strip() in ACTED_ACTIONS:
-            out.add(_norm_name(recipient.strip()))
-    return out
+        fields = entry.split("\t")
+        action = fields[0].strip()
+        if len(fields) < 2 or action not in ACTED_ACTIONS:
+            continue
+        out.add(_norm_name(fields[1].strip()))
+        if action == "refused" and len(fields) > 2:
+            token = fields[2].strip()
+            if token:
+                bucket = token.split()[0]
+                tokens[bucket] = tokens.get(bucket, 0) + 1
+    return out, tokens
 
 
 def record_path_for(drive_path):
@@ -278,9 +304,10 @@ def artifact_failures(drive_path, sent_path):
         return ["payload unreadable: %s" % exc], "", True
 
     rows = freeable_rows(text)
-    acted = acted_names(sent_path)
-    if acted is None:
+    acted_record = acted_names(sent_path)
+    if acted_record is None:
         return ["action record unreadable: %s" % sent_path], "", True
+    acted, tokens = acted_record
 
     # `long-wait <age>` rows are excluded by the close contract: they hold a live wait and
     # closing one destroys it. A resolved link on such a row is a correct non-close, so
@@ -296,11 +323,22 @@ def artifact_failures(drive_path, sent_path):
     # the linkable population explicitly rather than implying `rows - acted`. `rows` counts the
     # whole block (a quiet round still proves the block was read) and `linkable` is the subset
     # the close contract can act on.
-    line = "freeable-tabs: rows %d · linkable %d · acted %d · missing %d" % (
-        len(rows),
-        len(actionable),
-        len(actionable) - len(missing),
-        len(missing),
+    # The refusal tally prints unconditionally, including `(none)` on a round with no
+    # refusals. A tally printed only when something was acted would let a `linkable 0`
+    # round skip it silently, and the token would go back to being unobservable.
+    tally = " · ".join(
+        "%s=%d" % (bucket, count)
+        for bucket, count in sorted(tokens.items(), key=lambda item: (-item[1], item[0]))
+    ) or "(none)"
+    line = (
+        "freeable-tabs: rows %d · linkable %d · acted %d · missing %d · refused: %s"
+        % (
+            len(rows),
+            len(actionable),
+            len(actionable) - len(missing),
+            len(missing),
+            tally,
+        )
     )
     if missing:
         return (
