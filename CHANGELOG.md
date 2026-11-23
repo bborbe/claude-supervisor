@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.11
 
 - fix: **the fleet round records the refusal token it already holds, and the freeable-tabs check reports it.** `commands/steps/drive.md` step 3b-iii now writes `refused<TAB><name><TAB><token>`, keeping `closed<TAB><name>` at two fields. `scripts/check-freeable-tabs-acted.py` `acted_names()` splits on every tab and joins on `fields[1]` alone, so a three-field line no longer collapses to `<name> <token>` through `_norm_name`'s whitespace fold and report `missing`; measured 2026-11-22 on a copy of a real record, the pre-change parse read `acted 1 · missing 1` on a three-field refusal against `acted 2 · missing 0` on the identical two-field control, and 40 such entries exist on disk. The check's line gains a `refused: <token>=<n>` tally bucketed by the token's first word and printed unconditionally (`(none)` when empty), so the token is observable rather than parsed and discarded, and `commands/steps/output-shape.md` carries the new shape, with `OUTPUT_SHAPE_MARKER` widened to the new tail so a doc that drops it fails the static contract. Change set: `commands/steps/drive.md`, `commands/steps/output-shape.md`, `scripts/check-freeable-tabs-acted.py`, `scripts/tests/test_check_freeable_tabs_acted.py`, `CHANGELOG.md`.
 
