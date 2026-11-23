@@ -58,7 +58,7 @@ STEPS = COMMANDS / "steps"
 #: Phrase from the carve-out's own first sentence. A plain substring, so a reflow of the
 #: surrounding prose leaves it intact; rewording that sentence is a deliberate act, and the
 #: failure is the reminder that this home assertion moves with it.
-CARVEOUT = "5b, 5d and 16b are acting legs"
+CARVEOUT = "5d is an acting leg"
 CARVEOUT_HOME = COMMANDS / "fleet-drive.md"
 CARVEOUT_NEEDS = ("write tools", "read-only")
 
@@ -67,12 +67,10 @@ CARVEOUT_NEEDS = ("write tools", "read-only")
 STEP_MARKER = "a read-only execution is not a run of it"
 POINTER = "commands/fleet-drive.md"
 LEGS = {
-    "5b": STEPS / "keepalive.md",
     "5d": STEPS / "own-parks.md",
-    # 16b joined on 2026-11-09 with the manager-subject reap: it posts the reap card and
-    # hands every reap line to the caller to send, so it is delegated by the same rule and
-    # needs the same two guarantees.
-    "16b": STEPS / "manager-reap.md",
+    # 5b and 16b were removed 2026-11-22: both legs now run in the claude-wrapper
+    # keepalive tick, so the router no longer dispatches them and a carve-out for a row
+    # the router does not carry would govern nothing.
 }
 HEADER = ("#", "Step", "When", "File")
 
