@@ -57,10 +57,12 @@ class WorkerKeepAliveTest(unittest.TestCase):
         # production path posts nothing — the one thing these assertions exist to catch.
         self.k.post_card = self._stub_post_card
         self.kp = self.k._keepalive()
+        self.op = self.k._owner()
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
         self._orig = (self.kp.session_verdict, self.kp.state_path,
-                      self.kp.cadence_state_detail)
+                      self.kp.cadence_state_detail, self.op.session_verdict,
+                      self.op.loop_state)
         self.kp.state_path = lambda vault, subject, branch="goal": str(
             self.state / f"{branch}--{self.kp.base_slug(subject)}.json"
         )
@@ -68,6 +70,13 @@ class WorkerKeepAliveTest(unittest.TestCase):
         # `~/.claude/state/sweep-gate` tree: a test whose verdict depends on whether a real
         # goal happens to be armed asserts nothing about the code.
         self.kp.cadence_state_detail = lambda subject, branch="goal": ("UNARMED", "")
+        # ⚠️ TWO probes, not one: `main()` reads the keep-alive module's, while `of_subject()`
+        # — now behind `goal_owners()` — reads `owner.py`'s own. Routing owner's through the
+        # keep-alive seams keeps every per-test patch reaching both; a stub on one alone leaves
+        # the other hitting this machine's real registry and cadence tree.
+        self.op.session_verdict = lambda sid: self.kp.session_verdict(sid)
+        self.op.loop_state = lambda subject, branch="goal", vault="": \
+            self.kp.cadence_state_detail(subject, branch)
         self.addCleanup(self._restore)
 
     def _stub_post_card(self, task, spent, recommend="keep stopped",
@@ -78,7 +87,8 @@ class WorkerKeepAliveTest(unittest.TestCase):
 
     def _restore(self):
         (self.kp.session_verdict, self.kp.state_path,
-         self.kp.cadence_state_detail) = self._orig
+         self.kp.cadence_state_detail, self.op.session_verdict,
+         self.op.loop_state) = self._orig
 
     def goal_loop(self, state):
         """Give every goal page this test reads one loop state."""
@@ -313,6 +323,83 @@ class WorkerKeepAliveTest(unittest.TestCase):
             rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
         self.assertEqual(0, rc)
         self.assertEqual("resume", out.getvalue().splitlines()[0])
+
+    # --- a dangling `goals:` link is reported, not dropped ----------------------
+
+    def test_a_dangling_goals_link_is_reported_and_still_resumes(self):
+        """A declared parent whose page does not exist must not vanish from the owners list.
+
+        `goal_owners()` used to `continue` past the unopenable page, so the list came back
+        empty and the leg resumed the row with nothing said. The action is unchanged —
+        `not-owner` is exactly what licenses the resume — but the reason must reach the
+        output, or a broken link is indistinguishable from a row that declares no goal.
+
+        ⚠️ **`out[:2]`, not `out`.** `agents/fleet-keepalive-actor.md` slices `lines[:2]` into
+        one TSV row, so a note printed on line 3 is discarded before the operator sees it —
+        the first draft of this change passed a whole-output assertion while being invisible
+        in the leg's own report. Asserting the two-line shape is what pins the fix.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[No Such Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+        self.assertEqual(
+            2, len(out),
+            f"the report must stay two lines — the consumer keeps only lines[:2]: {out!r}")
+        self.assertIn(
+            "No Such Goal", out[1],
+            f"the dangling link is not named on the reason line: {out!r}")
+        self.assertIn(
+            "not-owner", out[1],
+            f"the dangling link's verdict is not reported on the reason line: {out!r}")
+
+    def test_a_task_with_no_goals_key_reports_no_goal_verdict(self):
+        """The control: a fleet-tier row stays quiet.
+
+        A row with no `goals:` key returns `[]` and this leg resumes it by design. If the
+        dangling-link note fired here too, the two shapes would be indistinguishable — which
+        is the defect this task exists to remove.
+        """
+        self.page()
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+        self.assertFalse(
+            any("not-owner" in line for line in out),
+            f"a goal-less row must not report a goal verdict: {out!r}")
+
+    def test_goal_owners_and_of_subject_agree_on_a_dangling_link(self):
+        """The reconciliation: one doctrine, not two.
+
+        `goal_owners()` must answer exactly what `of_subject()` answers for the same page, or
+        the module's known-absence rule holds for only one of its two entry points.
+        """
+        fm = TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[No Such Goal]]'")
+        (self.vault / "24 Goals").mkdir(parents=True)
+        owners = self.k.goal_owners(fm, str(self.vault), "24 Goals")
+        direct = self.k._owner().of_subject(
+            str(self.vault), "No Such Goal", "goal", "24 Goals")
+        self.assertEqual(1, len(owners), owners)
+        self.assertEqual(direct.verdict, owners[0].verdict)
+        self.assertEqual(direct.reason, owners[0].reason)
+
+    def test_an_unopenable_goal_page_is_cannot_tell_and_never_resumes(self):
+        """The side effect the delegation buys: an unreadable page is not an absent one.
+
+        A page that exists but cannot be read may record a live manager; resuming on it is
+        the second writer `owner.py` exists to withhold. It used to be `continue`d into `[]`.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        # A DIRECTORY named `<subject>.md`: `locate()` matches the entry, the read fails.
+        (self.vault / "24 Goals" / "A Goal.md").mkdir()
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(1, rc)
+        self.assertEqual("cannot-tell", out[0])
 
     def test_a_wikilink_outside_goals_does_not_skip_the_worker(self):
         # A `themes:` link to a page with a live manager must not be read as ownership —

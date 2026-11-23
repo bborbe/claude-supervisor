@@ -315,8 +315,16 @@ def goal_owners(fm: str, vault: str, goals_dir: str) -> list:
     Returns every goal's answer rather than the first: `main()` needs to see an owner anywhere
     in the list before it may defer, and a cannot-tell anywhere in it before it may hand the
     worker to the fleet leg.
+
+    ⚠️ **Every declared goal gets an entry — a page that cannot be read is NOT skipped.** This
+    function used to `continue` past an unopenable page, so a declared link whose page is
+    missing vanished from the list: the row then looked goal-less and `main()` resumed it with
+    nothing said. Delegating to `of_subject()` keeps ONE doctrine for both entry points —
+    `owner.py` already rules that an established absence is `not-owner` (`test_owner.py`:
+    *"absence that was ESTABLISHED stays not-owner"*) and that an unreadable page is
+    `cannot-tell` — and it upgrades the unreadable case, which used to be dropped into `[]`
+    and so let this leg resume a worker whose goal manager was merely unmeasurable.
     """
-    k = _keepalive()
     o = _owner()
     # `goals:` is a YAML list, so `scalar` cannot read it. Scope the scan to that key's own
     # block: a wikilink in ANY other frontmatter field (a `themes:` or a stray `related:`)
@@ -324,23 +332,32 @@ def goal_owners(fm: str, vault: str, goals_dir: str) -> list:
     block = re.search(r"^goals:[ \t]*(.*(?:\n[ \t-].*)*)", fm, re.MULTILINE)
     if not block:
         return []
-    found = []
-    for name in re.findall(r"\[\[([^\]|]+)", block.group(1)):
-        subject = name.strip()
-        page = os.path.join(vault, goals_dir, subject + ".md")
-        try:
-            with open(page, encoding="utf-8") as fh:
-                gfm = k.frontmatter(fh.read())
-        except OSError:
+    return [o.of_subject(vault, name.strip(), "goal", goals_dir)
+            for name in re.findall(r"\[\[([^\]|]+)", block.group(1))]
+
+
+def _no_owner_note(owners: list) -> str:
+    """`"; declared goal … → not-owner (…)"` for every goal that resolved no owner, or `""`.
+
+    ⚠️ **It is appended to the reason line, never printed as its own line** — callers take
+    `lines[:2]`, so a third line never reaches the operator (`agents/fleet-keepalive-actor.md`).
+    A declared `goals:` link whose page is missing resolves `not-owner` and would otherwise be
+    invisible: the row looks goal-less and this leg resumes it with nothing said. `detail`
+    names the subject (`no page for <subject> under <branch>` from `owner.py`), so a dangling
+    link stays distinguishable from a stood-down manager (`no-session` with a live registry
+    read).
+    """
+    parts = []
+    for own in owners:
+        if own.is_owner or own.is_cannot_tell:
             continue
-        # `claude_session_id` is the only field a goal page records its manager in; the
-        # retired-key fallback was removed once both vaults were migrated.
-        sid = k.session_id(gfm)
-        loop, detail = k.cadence_state_detail(subject, "goal")
-        live = k.session_verdict(sid) if sid else o.NONE
-        verdict, reason = o.verdict_of(live, loop)
-        found.append(o.Ownership(verdict, reason, live, loop, sid, detail))
-    return found
+        parts.append(f"goal manager {own.session_id or '(none recorded)'} → "
+                     f"{own.verdict} ({own.reason}: {own.describe()})"
+                     + (f"; {own.detail}" if own.detail else ""))
+    if not parts:
+        return ""
+    return ("; declared goal with no owner: " + " / ".join(parts)
+            + " — no goal manager owns this row, so this leg keeps it")
 
 
 def main(argv: list[str]) -> int:
@@ -435,14 +452,29 @@ def main(argv: list[str]) -> int:
         return 0
 
     owners = goal_owners(fm, vault, a.goals_dir)
+
+    def say(word: str, why: str) -> None:
+        """The verdict on line 1; its reason — with any `not-owner` goal answers appended — on
+        line 2.
+
+        ⚠️ **Exactly TWO lines, never a third.** Callers read line 1 as the action and line 2 as
+        the reason, and `agents/fleet-keepalive-actor.md` slices `lines[:2]` into one TSV row —
+        a third line is discarded before the operator ever sees it. So a `not-owner` answer (a
+        declared `goals:` link whose page is missing, otherwise invisible: the row looks
+        goal-less and is resumed with nothing said about the broken link) rides on line 2
+        rather than below it. The detail names the page, so a dangling link and a stood-down
+        manager stay distinguishable.
+        """
+        print(word)
+        print(why + _no_owner_note(owners))
+
     # An OWNER anywhere in the task's goals defers the row: that goal's manager runs the round
     # that resumes it. Checked before the cannot-tell pass, so one resolvable owner is not
     # masked by another goal whose probe failed.
     for own in owners:
         if own.is_owner:
-            print("jump")
-            print(f"goal manager {own.session_id} is an owner ({own.describe()}); "
-                  f"the goal tier resumes it")
+            say("jump", f"goal manager {own.session_id} is an owner ({own.describe()}); "
+                        f"the goal tier resumes it")
             return 0
     # ⚠️ A goal whose ownership could not be decided is NOT "no owner". `not-owner` is what
     # licenses this leg to resume; answering it on a read that failed is the second writer the
@@ -450,26 +482,23 @@ def main(argv: list[str]) -> int:
     # is merely unmeasurable.
     for own in owners:
         if own.is_cannot_tell:
-            print("cannot-tell")
-            print(f"goal manager {own.session_id or '(none recorded)'} → {own.verdict} "
-                  f"({own.reason}: {own.describe()}); an undecidable owner read never hands the "
-                  f"worker to the fleet leg")
+            say("cannot-tell",
+                f"goal manager {own.session_id or '(none recorded)'} → {own.verdict} "
+                f"({own.reason}: {own.describe()}); an undecidable owner read never hands the "
+                f"worker to the fleet leg")
             return 1
 
     sid = k.session_id(fm)
     if not sid:
-        print("cannot-tell")
-        print("no claude_session_id recorded — nothing to resume; report the row")
+        say("cannot-tell", "no claude_session_id recorded — nothing to resume; report the row")
         return 1
 
     live = k.session_verdict(sid)
     if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
-        print("cannot-tell")
-        print(f"session {sid} → {live}; an undecidable probe is never death")
+        say("cannot-tell", f"session {sid} → {live}; an undecidable probe is never death")
         return 1
     if live == "LIVE":
-        print("jump")
-        print(f"session {sid} is live")
+        say("jump", f"session {sid} is live")
         return 0
 
     # ABSENT — the only verdict that licenses a resume. The count is the close→resume cycles
@@ -488,20 +517,23 @@ def main(argv: list[str]) -> int:
     else:
         spent = len(state["resumes"])
     if spent >= RESUME_CAP:
-        print("crash-loop")
-        print(f"⚠️ WORKER CRASH-LOOP: {a.task} — {spent} resumes with no progress; stop resuming")
+        say("crash-loop",
+            f"⚠️ WORKER CRASH-LOOP: {a.task} — {spent} resumes with no progress; stop resuming")
         # No card reaches the operator: `post_card()` refuses a recommendation that equals the
         # row's current state, and a crash-looping row is already stopped. The `crash-loop:`
         # row in this leg's hand-back is the channel — a resolvable goal means the goal tier
         # owns the row even when that goal's manager is dead, and a goal-less row is this
-        # leg's own. The `if not owners` gate stays so that a future recommendation which is
-        # a real decision still reaches the operator for a row no manager can own.
-        if not owners:
+        # leg's own. The gate stays so that a future recommendation which is a real decision
+        # still reaches the operator for a row no manager can own.
+        #
+        # ⚠️ The question is "did any goal resolve an OWNER", not "is the list empty". Once a
+        # dangling link produces a `not-owner` entry, `not owners` would suppress the card for
+        # a row whose only declared goal has no page — exactly the row no manager can own.
+        if not any(own.is_owner for own in owners):
             post_card(a.task, spent)
         return 1
-    print("resume")
-    print(f'session {sid} is ABSENT; resume with /supervisor:open --task "{a.task}" '
-          f'— attempt {spent + 1} of {RESUME_CAP}')
+    say("resume", f'session {sid} is ABSENT; resume with /supervisor:open --task "{a.task}" '
+                  f'— attempt {spent + 1} of {RESUME_CAP}')
     return 0
 
 
