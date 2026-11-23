@@ -1,5 +1,5 @@
 ---
-description: Start ONE goal manager for a goal this topic declares — the topic tier's only spawn verb. Refuses with a named token: goal-not-in-scope, goal-not-startable, goal-terminal, goal-unflagged, manager-cap, or the worker refusal. Holds no spawn tool; delegates to /supervisor:open --goal.
+description: Start ONE goal manager for a goal this topic declares — the topic tier's only spawn verb. Refuses with a named token: goal-not-in-scope, goal-not-startable, goal-terminal, goal-unflagged, manager-cap, or the worker refusal. Holds no spawn tool; delegates to /supervisor:open --goal. The `--topic-open` leg opens the topic's own manager instead (tokens: topic-unflagged, manager-cap, topic-not-found).
 argument-hint: "<goal> [--rank] (the topic is resolved from the session)"
 allowed-tools:
   - Read
@@ -20,7 +20,7 @@ this verb's**: it goes through `/supervisor:open --task`, the same path a goal m
 `/supervisor:open --goal "<goal>"`, whose resume and spawn branches already carry the hold
 check, the `session-liveness.py` guard and the spawn-recipe rules. A second, hand-rolled
 spawn route in the topic tier would be a session created outside every one of those gates —
-the failure `commands/open.md` § Step 2C exists to prevent.
+the failure the wrapper's open endpoint exists to prevent.
 
 ⚠️ **A topic-tier verb — never run it from a worker session.** A worker carries a task; it
 never starts a session (`docs/session-tiers.md` § The worker boundary).
@@ -97,24 +97,28 @@ round prints it and does not rank on it.
 ## Opening a topic's manager — `--topic-open`
 
 The topic tier opens its manager with the same script, on the `--topic-open` branch. The
-caller is the wrapper's open endpoint (`claude-wrapper`, `pkg/open_tab.go`), which passes
-`--topic-open --hand-run`; no file inside this plugin invokes the flag.
+caller is the wrapper's open endpoint — `bborbe/claude-wrapper` `pkg/open_tab.go:292-297`
+(`runTopicCeiling`), which passes `--topic-open --hand-run`. It runs on a topic **create**
+only; `runTopicCeiling` returns early on a resume (`:287-289`). No file inside this plugin
+invokes the flag.
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/topic-spawn.py \
-  --vault "<vault-root>" --topic "<topic>" --topic-open
+  --vault "<vault-root>" --topic "<topic>" --topic-open --hand-run
 ```
 
 The first line of stdout is the verdict: `open-ok: <topic>` on success, or a refusal token
-(`manager-cap`, `topic-not-in-scope`, …) with a non-zero exit.
+(`topic-unflagged`, `manager-cap`, `topic-not-found`, …) with a non-zero exit. ⚠️ **The
+`--hand-run` flag matters**: without it the flag gate at `scripts/topic-spawn.py:543` applies
+and the call refuses `topic-unflagged` for exactly the unflagged case this section describes.
 
-⚠️ **Set the Bash call's timeout to at least 300 s.** `commands/open.md:243-246` states why: a
-short call is killed by the harness before the script answers, and an in-script `timeout=`
-cannot rescue it. The gate shells `fleet-board.py --json` and has been measured at tens of
-seconds.
+⚠️ **Set the Bash call's timeout to at least 300 s.** `commands/open.md:243-246` states the
+rule: a short call is killed by the harness before the script answers, and an in-script
+`timeout=` cannot rescue it. The gate fans out over the topic's goal pages, so its runtime
+grows with the topic and is not bounded by the script.
 
 ⚠️ **`commands/open.md` no longer documents this invocation.** Commit `dcd2d991` made it a
 thin caller of the wrapper's open endpoint, and `scripts/check-open-hand-run.py` now forbids
 `topic-spawn.py` there — so this block is the invocation's only written home in the plugin.
-Elsewhere the flag appears only at `docs/session-tiers.md:70`, `docs/session-tiers.md:85` and
-`docs/fleet-surface.md:1235`.
+Elsewhere in the docs the flag appears at `docs/session-tiers.md:70`, `docs/session-tiers.md:85`
+and `docs/fleet-surface.md:1235`.
