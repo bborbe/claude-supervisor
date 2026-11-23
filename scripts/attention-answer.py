@@ -118,6 +118,15 @@ ANSWERER_KINDS = ("manager", "operator", "other")
 # value reaches a filesystem path — see `write_answer_marker`.
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
+# The arms that speak for the operator, mirroring `attention-placement.py`'s `answer_tier`.
+# An operator-tier card may be answered ONLY by one of these: a lower tier settling a prompt
+# the classifier rates `operator` is the SC3 breach, whichever arm carries it — the board, the
+# operator's own `--by operator`, or `/supervisor:attention-next`. Every other arm (a manager,
+# the supervisor, a watcher, a hand-built name) is a lower tier and is refused on such a card.
+OPERATOR_ARM_EXACT = ("operator",)
+OPERATOR_ARM_SUBSTR = ("attention-board",)
+OPERATOR_ARM_PREFIX = ("supervisor:attention-next",)
+
 
 def write_answer_marker(producer_id, answerer_session, answerer_kind):
     """Record who answered `producer_id`'s item, for its own hook to stamp on close.
@@ -636,6 +645,52 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
     return 0
 
 
+def _load_permission_tier():
+    """`permission-tier.py` beside this script — the same classifier the placement rate uses."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "permission-tier.py")
+    spec = importlib.util.spec_from_file_location("permission_tier_for_answer", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def is_operator_arm(answered_by):
+    """True when `answered_by` names the operator's own answer surface.
+
+    Mirrors `attention-placement.py`'s `answer_tier`, so the gate and the measurement agree on
+    who counts as the operator. Everything else — a manager, the supervisor, a watcher, a
+    hand-built arm string — is a lower tier.
+    """
+    by = str(answered_by or "")
+    return (by in OPERATOR_ARM_EXACT
+            or any(s in by for s in OPERATOR_ARM_SUBSTR)
+            or by.startswith(OPERATOR_ARM_PREFIX))
+
+
+def permission_tier_refusal(item, answered_by):
+    """Why this arm must not answer this permission card, or "" when it may.
+
+    The card's payload is classified with the SAME classifier the placement measurement uses,
+    so "operator" means one thing in both: an operator-tier prompt settled by a lower tier is
+    the breach the control counts. Fail closed — an unreadable classifier or a payload naming
+    no tool reads as `operator`, which is how the measurement reads it too.
+    """
+    if is_operator_arm(answered_by):
+        return ""
+    try:
+        mod = _load_permission_tier()
+        reading = mod.tier_for_payload(item.get("payload") or "", mod.load_allowlist())
+        tier = reading.get("tier")
+    except Exception:
+        return "tier unreadable — an operator-tier card may not be answered by a non-operator arm"
+    if tier == "operator":
+        return "operator tier: %s" % (reading.get("reason") or "operator-only")
+    if tier not in ("allowlist", "manager"):
+        return "unknown tier %r reads as operator" % (tier,)
+    return ""
+
+
 def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdout):
     """Answer a permission-class item with a verdict, and report whether it landed.
 
@@ -662,6 +717,16 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
         print(
             f"REFUSED: {item_id} is permission-class and needs --decision {choices}; "
             f"got {given!r}. Neither default is safe, so this arm has none.",
+            file=out,
+        )
+        return 2
+    # The tier gate, after the decision gate: an operator-tier prompt is the operator's, and a
+    # lower tier settling it is the SC3 breach — refused before the store is written at all.
+    refusal = permission_tier_refusal(item, answered_by)
+    if refusal:
+        print(
+            f"REFUSED: {item_id}: {refusal} — an operator-tier gate is the operator's; "
+            "answer it on the board or with /supervisor:attention-next",
             file=out,
         )
         return 2
