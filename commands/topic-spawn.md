@@ -93,3 +93,28 @@ is an open, so it waits on a `flag: true` the operator set — never on a slot. 
 
 ⚠️ **The binding stage is an annotation, not a key.** No goal→stage mapping exists, so the
 round prints it and does not rank on it.
+
+## Opening a topic's manager — `--topic-open`
+
+The topic tier opens its manager with the same script, on the `--topic-open` branch. The
+caller is the wrapper's open endpoint (`claude-wrapper`, `pkg/open_tab.go`), which passes
+`--topic-open --hand-run`; no file inside this plugin invokes the flag.
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/topic-spawn.py \
+  --vault "<vault-root>" --topic "<topic>" --topic-open
+```
+
+The first line of stdout is the verdict: `open-ok: <topic>` on success, or a refusal token
+(`manager-cap`, `topic-not-in-scope`, …) with a non-zero exit.
+
+⚠️ **Set the Bash call's timeout to at least 300 s.** `commands/open.md:243-246` states why: a
+short call is killed by the harness before the script answers, and an in-script `timeout=`
+cannot rescue it. The gate shells `fleet-board.py --json` and has been measured at tens of
+seconds.
+
+⚠️ **`commands/open.md` no longer documents this invocation.** Commit `dcd2d991` made it a
+thin caller of the wrapper's open endpoint, and `scripts/check-open-hand-run.py` now forbids
+`topic-spawn.py` there — so this block is the invocation's only written home in the plugin.
+Elsewhere the flag appears only at `docs/session-tiers.md:70`, `docs/session-tiers.md:85` and
+`docs/fleet-surface.md:1235`.
