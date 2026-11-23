@@ -71,7 +71,10 @@ CHECK_NAME = "check-freeable-tabs-acted.py"
 #: The line the round step and the output shape must both carry. Anchored on all four counts
 #: together, because `freeable-tabs:` alone is satisfied by any sentence about freeable tabs.
 ROUND_LINE_MARKER = "freeable-tabs: rows <N> · closed <M> · refused <K> · skipped <J>"
-OUTPUT_SHAPE_MARKER = "freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M>"
+OUTPUT_SHAPE_MARKER = (
+    "freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M>"
+    " · refused: <token>=<n>"
+)
 
 #: Column-0 section heads. A head ends whatever block was open, so the parse cannot run past
 #: the block it is counting -- the payload carries `ESCALATION`, `CLOSERS` and `RETAINED`
