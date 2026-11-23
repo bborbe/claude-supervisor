@@ -471,6 +471,53 @@ class AnsweredFreshRestartTest(KeeperBase):
         self.assertEqual([], self.restarts)
 
 
+class AbsentAfterFreshRestartTest(KeeperBase):
+    """A death the keeper caused by its own `restart fresh` is never handed back as a card."""
+
+    def setUp(self):
+        super().setUp()
+        saved = {k: getattr(fk, k) for k in ("answer_of", "restart_fresh_session")}
+        self.addCleanup(lambda: [setattr(fk, k, v) for k, v in saved.items()])
+        self.answer = fk.FRESH_OPTION
+        fk.answer_of = lambda item: (self.answer, None)
+        self.restarts = []
+        fk.restart_fresh_session = lambda sid: (self.restarts.append(sid) or (True, "pane 9"))
+        self.live = "LIVE"
+
+    def restart_fresh(self):
+        """Drive the lapse card to its answered fresh restart, then report the old session ABSENT.
+
+        This is the measured 2026-11-16 shape: the keeper stops `sid`, starts a new session,
+        and `fleet_session()` still names `sid` until the replacement registers.
+        """
+        self.stale_run(T0, 45)
+        self.assertEqual([SID], self.restarts, "fixture: the restart must actually have run")
+        self.cards.clear()
+        self.live = "ABSENT"
+
+    def test_our_own_fresh_restart_is_not_carded_as_absent(self):
+        self.restart_fresh()
+        rc, out = self.tick(T0 + 46 * MIN)
+        self.assertEqual("pending", out[0])
+        self.assertFalse(any(k.startswith("fleet-keeper-absent-") for k in self.cards),
+                         "a death the keeper caused must not be handed back to the operator")
+        self.assertEqual(0, rc)
+
+    def test_a_genuine_death_still_cards(self):
+        # No fresh restart ever ran — the guard must not widen into a blanket suppression.
+        self.live = "ABSENT"
+        rc, out = self.tick(T0)
+        self.assertEqual("dead", out[0])
+        self.assertTrue(any(k.startswith("fleet-keeper-absent-") for k in self.cards))
+
+    def test_the_suppression_expires(self):
+        self.restart_fresh()
+        rc, out = self.tick(T0 + 45 * MIN + fk.RESUME_DEFER_MAX + 60)
+        self.assertEqual("dead", out[0])
+        self.assertTrue(any(k.startswith("fleet-keeper-absent-") for k in self.cards),
+                        "the suppression must be bounded, or a later real death is lost")
+
+
 class AnsweredResumeTest(KeeperBase):
     """The resume runs ONLY on the operator's `resume it` answer to a `dead` card.
 
