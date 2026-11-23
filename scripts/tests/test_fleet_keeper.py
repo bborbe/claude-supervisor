@@ -517,6 +517,36 @@ class AbsentAfterFreshRestartTest(KeeperBase):
         self.assertTrue(any(k.startswith("fleet-keeper-absent-") for k in self.cards),
                         "the suppression must be bounded, or a later real death is lost")
 
+    def register_replacement(self):
+        """A NEW manager registering after the restart, so `fleet_session()` names it."""
+        path = self.register / "b09c3235-0000-4000-8000-000000000001.json"
+        path.write_text(json.dumps({"subject": "Fleet Manager", "branch": "fleet", "vault": "v"}),
+                        encoding="utf-8")
+        os.utime(path, (T0 + 10 ** 6, T0 + 10 ** 6))   # newer than the fixture's registration
+
+    def test_the_replacement_dying_is_still_carded(self):
+        # The guard must match the session the keeper STOPPED. Once the replacement registers,
+        # `sid` is the new session and its death is the unsupervised-fleet condition the keeper
+        # exists to report — a session-agnostic guard would swallow it for the whole window.
+        self.restart_fresh()
+        self.register_replacement()
+        rc, out = self.tick(T0 + 46 * MIN)
+        self.assertEqual("dead", out[0])
+        self.assertTrue(any(k.startswith("fleet-keeper-absent-") for k in self.cards))
+
+    def test_a_failed_restart_does_not_arm_the_guard(self):
+        # `fresh_sid` is set only on a successful restart, so a refusal or a spawn error must
+        # leave the ABSENT branch carding exactly as it did before this change.
+        fk.restart_fresh_session = lambda sid: (self.restarts.append(sid)
+                                                or (False, "exit 1: role-undetermined"))
+        self.stale_run(T0, 45)
+        self.assertEqual([SID], self.restarts, "fixture: the attempt must have run")
+        self.cards.clear()
+        self.live = "ABSENT"
+        rc, out = self.tick(T0 + 46 * MIN)
+        self.assertEqual("dead", out[0])
+        self.assertTrue(any(k.startswith("fleet-keeper-absent-") for k in self.cards))
+
 
 class AnsweredResumeTest(KeeperBase):
     """The resume runs ONLY on the operator's `resume it` answer to a `dead` card.
