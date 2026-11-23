@@ -122,43 +122,25 @@ The topic tier has no keep-alive of its own, so a lapsed topic manager stayed la
 leg is the missing rung: **restart is not open**, so resuming one that already
 owns its subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 
-**Population — every topic page carrying a session id.** Read the vault's topic directory, not
-the roster: a topic manager whose session died is absent from the roster, which is the row this
-leg exists to recover. ⚠️ **Resolve the directory from the vault's own config, never
-assume `23 Topics`** — a renamed directory would glob nothing and the leg would report a clean
-round, the exact silent failure it exists to remove:
+**Population — every topic page whose verdict is not `loop-stopped`.** ⚠️ **Never select on
+`claude_session_id`.** That is the field the stood-down handover clears, so filtering on it
+drops the page a close just handed over and no replacement manager is ever opened for it.
+Read the vault's topic directory, not the roster: a topic manager whose session died is
+absent from the roster, which is the row this leg exists to recover. The selection lives in
+`scripts/topic-candidates.py`, which asks `scripts/owner.py` — the one ownership definition —
+and refuses only `loop-stopped` (a page still carrying its `.stopped` marker is refused); it also
+resolves the directory from the vault's own config,
+so a renamed topics directory cannot glob nothing and report a clean round.
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-F=$(python3 "$P/resolve-folders.py" --vault "<vault>" --require topics_dir)
-python3 -c '
-import pathlib, re, subprocess, sys
-vault, f, script = sys.argv[1:4]
-if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
-topics = f.split("|")[0]
-for f in sorted((pathlib.Path(vault) / topics).glob("*.md")):
-    if f.name.startswith("."):
-        continue                       # bash `*.md` never matches a dotfile
-    try:
-        text = f.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        continue                       # an unreadable file fails `grep -q` too
-    if not re.search(r"^claude_session_id: *[^ \n]", text, re.M):
-        continue
-    out = subprocess.run(
-        [sys.executable or "python3", script, "--vault", vault, "--subject", f.stem,
-         "--branch", "topic", "--dir", topics],
-        stdout=subprocess.PIPE, text=True).stdout
-    lines = out.split("\n")
-    head = "\n".join(lines[:2]) + ("\n" if len(lines) > 2 else "")
-    print(f.stem + "\t" + head.replace("\n", "\t"), end="\n")
-' "<vault>" "$F" "$P/topic-keepalive.py"
+python3 "$P/topic-candidates.py" --vault "<vault>"
 ```
 
 ⚠️ **One `python3` call, never a shell `for`.** `allowed-tools` grants fixed command **prefixes**,
 and a `for … do … done` matches none of them, so a shell loop escalates a permission prompt every
-round and the leg stops running unattended. The snippet prints one line per page — `name<TAB>`,
-then the script's first two lines each tab-terminated.
+round and the leg stops running unattended. The script prints one line per candidate —
+`name<TAB>`, then the ladder's first two lines each tab-terminated.
 
 ⚠️ **Step 0's read first, on the topic page's session id** — a held topic manager is **neither
 restarted nor resumed**, whatever the verdict says: a hold is operator policy about a session, so
@@ -167,11 +149,18 @@ it outranks a lapse. `jump` and `leave` take no act and need no read.
 **Act on the verdict.** `restart` → run the printed
 `/supervisor:restart <session-id>`, then record the resume **once `session-liveness.py --check`
 shows the id live** (`topic-keepalive.py --vault "<vault>" --subject "<name>" --branch topic
---record-resume <id>` — `--subject` is `required=True`, and omitting it makes argparse exit 2 so
-the cap silently never arms); `resume` → the session is `ABSENT`, so open it with
-`/supervisor:open --topic "<name>"` and record the resume the same way; `jump` → hand the
-operator the pane; `leave` → a deliberate stand-down, do nothing; `cannot-tell` → report it and
-never act.
+--record-resume <id>` — `--subject` is required, and omitting it makes argparse exit 2 so the cap
+never arms); `resume` → the session is `ABSENT`; `open` → no id, but the page carries the
+operator's flag — both start one with `/supervisor:open --topic "<name>"` and record the resume
+the same way; `open-unflagged` → rule 4 forbids opening an unflagged manager, so report it and
+never act; `jump` → hand the operator the pane; `leave` → a deliberate stand-down, do nothing;
+`cannot-tell` → report it and never act.
+
+⚠️ **The act's line carries the id it opened** — `<name>\t<verdict>\topened=<full session id>`,
+the id taken from `/supervisor:restart`'s or `/supervisor:open`'s own verdict in this round,
+**never** read off the page on a later run. It is the one artifact that separates the leg's own
+act from a hand-arm, so a row acted on without it is reported, not claimed. `jump`, `leave`,
+`open-unflagged` and `cannot-tell` print `opened=none — <reason>`.
 
 ⚠️ **The cap counts only resumes that took.** `--record-resume` refuses an id the instrument does
 not read `LIVE`, so a resume that never landed does not arm the cap against its own retry. The
@@ -297,11 +286,10 @@ of them** — item 12's block is the digest's `LEGS` section, which admits exact
 
 ## 4. Resume a worker whose session died
 
-⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note made
-a dead worker the operator's problem every round; rule 1 says a crashed or lapsed worker is
-restarted automatically, and a worker that already owns its task decides nothing new by being
-resumed. Escalation stays only for one that **cannot** be resumed (no id, a spent cap, an
-undecidable probe).
+⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** A crashed or
+lapsed worker is restarted automatically; one that already owns its task decides nothing new by
+being resumed. Escalate only one that **cannot** be resumed (no id, a spent cap, an undecidable
+probe).
 
 **Population — every task page carrying a non-empty `claude_session_id`.** The script narrows
 it: a terminal status, a parked one (`hold`/`blocked`, or `human_review`/`todo`/`done` phase), a
@@ -356,31 +344,32 @@ that task and escalate once with the `⚠️ WORKER CRASH-LOOP` line; `cannot-te
 never act.
 
 ⚠️ **A task with no `claude_session_id` prints `cannot-tell` and is reported** — opening it is
-rule 3's approved-work path, not this leg's. Both resume paths continue the **recorded id** and
-neither opens a second worker (constraints, first bullet).
+rule 3's approved-work path, not this leg's.
 
 ⚠️ **Four worker mechanisms, four populations — never merge.**
 `scripts/restart-worker.py` restarts a **live, idle** session on stale code (refuses
-`busy-target` and `headless-target`); `scripts/stuck-heal.py` heals a **stuck** headless worker
-whose channel died while it lives; this leg resumes one whose session is **gone**;
-**run `<plugin root>/commands/steps/keepalive-stalled-tabs.md`** (absolute) for a **stalled
-tab**: it reports the refusal and hands the restart over — a stall is `busy`, so the lift is
-the operator's alone.
+`busy-target`, `headless-target`); `scripts/stuck-heal.py` heals a **stuck** headless worker
+whose channel died while it lives; this leg resumes one whose session is **gone**; for a
+**stalled tab** run `<plugin root>/commands/steps/keepalive-stalled-tabs.md` (absolute) — a
+stall is `busy`, so the lift is the operator's alone.
 
 ⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population; `worker-keepalive.py`
 enforces the exclusion.** Both legs record only **after** the instrument reads `LIVE`, so a
 check-then-act race lets two resumes land before either cap arms — the goal tier's
-`last_auto_resume` and this leg's `worker--<slug>`. `scripts/owner.py` answers for each declared goal — the ONE ownership
-definition (`docs/session-tiers.md` § Keep-alive) — so only an **owner** (session `LIVE`
-**and** loop `OK`/`STALE`) returns `jump`; a stood-down manager holds nothing, and a
-`cannot-tell` is reported, never resumed.
+`last_auto_resume` and this leg's `worker--<slug>`. `scripts/owner.py` answers for each declared
+goal — the ONE ownership definition (`docs/session-tiers.md` § Keep-alive) — so only an
+**owner** (session `LIVE` **and** loop `OK`/`STALE`) returns `jump`; a stood-down manager holds
+nothing, and a `cannot-tell` is reported, never resumed.
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`.
-`--floor` renders `(lower bound, scan incomplete)`; `--exact` asserts completion.
-⚠️ **A bare `dead-workers` count is refused** — one of the two is mandatory: an unlabelled
-number reads as a measurement. Both flags are refused on any other key; format and
-rationale: `commands/steps/output-shape.md` item 12.
+⚠️ **A bare `dead-workers` count is refused** — `--floor` or `--exact` is mandatory, since an
+unlabelled number reads as a measurement; format: `commands/steps/output-shape.md` item 12.
+
+⚠️ **Never state a capacity comparison this leg did not obtain from a cap instrument** — it
+computes no count of its own; `list_agents`, `live-workers.py` and the raw session-registry
+entry count are context, never a cap denominator. Quote a refused resume's refusal verbatim;
+report capacity only as `workers: <live>/<target>` (`commands/steps/output-shape.md` item 1).
 
 ## 4b. Stood-down close
 
