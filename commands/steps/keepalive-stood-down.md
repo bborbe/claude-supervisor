@@ -80,10 +80,12 @@ that way.
 topic declares still reads `unkept` — `"declaring topic(s) have no live armed manager"`. The
 close is the *first* step of a chain, not a single-step fix.
 
-⚠️ **And this procedure does not close that chain, so do not report it as closed.** The
-handover clears the page's `claude_session_id`, and § 1's population is *every topic page
-carrying a session id* (`agents/fleet-keepalive-actor.md:149`) — so the page just handed over
-is no longer in § 1's population, and § 1 will not open a replacement manager for it.
-Re-opening is a **separate gap**, not a consequence of the close. Report the close, the topic's
-keeper move and the goals still unkept; a round that renders them kept has reported something
-the census does not say.
+⚠️ **The population gap is fixed; the chain still does not close for a `STOPPED` topic.**
+§ 1 no longer selects on `claude_session_id` — it asks `scripts/owner.py` through
+`scripts/topic-candidates.py` and refuses only `loop-stopped` — so a handed-over page with **no**
+stand-down marker is a candidate. ⚠️ **This procedure's own pages are not that case:** it selects
+on `<slug>.stopped` (§ 1), the close clears no marker, so the page it hands over still reads
+`loop-stopped` and is still refused. The fix reaches that topic only once the operator clears the
+stand-down, and this procedure still does not make its goals kept. Report the close, the topic's keeper
+move and the goals still unkept; a round that renders them kept has reported something the
+census does not say.
