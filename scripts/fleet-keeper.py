@@ -252,7 +252,15 @@ def fleet_session():
 
 
 def load_lapse():
-    """`{"since": epoch, "reported": item_id-or-None}` for the lapse in progress, or `None`."""
+    """The lapse in progress, or `None`.
+
+    `{"since": epoch, "reported": item_id-or-None}`, plus three keys the fresh restart owns:
+    `fresh_consumed` (the card item whose `restart fresh` answer has been spent),
+    `fresh_first_try` (the epoch of the first attempt, which also bounds how long the ABSENT
+    branch suppresses the card for a death the keeper itself caused), and `fresh_sid` (the
+    session that restart actually stopped — set only on success, and matched by the ABSENT
+    branch so a death of the REPLACEMENT manager is never suppressed).
+    """
     try:
         with open(LAPSE, encoding="utf-8") as fh:
             rec = json.load(fh)
@@ -654,11 +662,22 @@ def act_on_fresh_answer(sid, lapse, now):
     if option != FRESH_OPTION:
         return None
     lapse["fresh_consumed"] = item
+    # `fresh_first_try` is written in the SAME record: the ABSENT branch runs in a later
+    # process and needs it to bound how long a restart of its own may suppress the death
+    # card (see `main`). A value that lived only in this process would make every restart
+    # look unbounded to that branch, which is the opposite of the narrow guard.
+    first = lapse.setdefault("fresh_first_try", now)
+    # `fresh_sid` is the session this restart actually stopped, and it stays unset until the
+    # restart SUCCEEDS. The ABSENT guard matches on it, so a failed restart — or one whose
+    # process died before the spawn — can never arm a suppression it did not earn.
+    lapse["fresh_sid"] = None
     if not save_lapse(lapse):
         log(f"cannot persist the fresh-restart marker for {sid[:8]}; refusing to restart", now)
         return None
     done, detail = restart_fresh_session(sid)
-    first = lapse.setdefault("fresh_first_try", now)
+    if done:
+        lapse["fresh_sid"] = sid
+        save_lapse(lapse)
     if not done and "busy-target" in detail and now - first < RESUME_DEFER_MAX:
         # A mid-turn manager is refused, never killed. Re-arm the SAME answer for the next tick
         # rather than spend it, bounded like the resume's wait so it can never fire hours later.
@@ -791,6 +810,28 @@ def main(argv):
             f"{sid[:8]}) answers {live}, so the keeper cannot tell whether the session is alive.", now, detail)
         log(f"liveness {live} for {sid[:8]} — carded; lapse timing continues", now)
     if live == "ABSENT":
+        # A fresh restart retires `sid` and starts a NEW session, and the replacement's
+        # registration lands a moment later — so `fleet_session()` still names the session
+        # the keeper itself just stopped. Carding here asks the operator to act on a death
+        # they authorised: measured 2026-11-16, the ABSENT card was minted 18 s after a
+        # SIGTERM the keeper issued on the answered `restart fresh`. The suppression is
+        # bounded by `RESUME_DEFER_MAX` and keyed on the keeper's own record, so a death
+        # the keeper did NOT cause is untouched and still cards.
+        fresh_lapse = load_lapse() or {}
+        fresh_at = fresh_lapse.get("fresh_first_try")
+        if (fresh_lapse.get("fresh_consumed")
+                # ⚠️ The session must be the one the keeper stopped. `fleet_session()` returns
+                # the NEWEST registration, so once the replacement registers, `sid` is the new
+                # session — and its death is exactly what this keeper exists to report. A
+                # session-agnostic guard would swallow that death for the whole window.
+                and fresh_lapse.get("fresh_sid") == sid
+                and isinstance(fresh_at, (int, float))
+                and 0 <= now - fresh_at < RESUME_DEFER_MAX):
+            report("pending",
+                   f"fleet manager was restarted fresh {int(now - fresh_at)}s ago on the "
+                   f"operator's answer; session {sid[:8]} is the one the keeper stopped, so its "
+                   f"ABSENT reading is not carded", now)
+            return 0
         condition = f"absent-{sid[:8]}"
         # This card carries an action, so an unreadable stop state is said ON it: a manager
         # stood down on purpose and then closed is ABSENT too, and must not be resumed blind.
