@@ -154,6 +154,12 @@ the cap silently never arms); `resume` → the session is `ABSENT`, so open it w
 operator the pane; `leave` → a deliberate stand-down, do nothing; `cannot-tell` → report it and
 never act.
 
+⚠️ **The act's line carries the id it opened** — `<name>\t<verdict>\topened=<full session id>`,
+the id taken from `/supervisor:restart`'s or `/supervisor:open`'s own verdict in this round,
+**never** read off the page on a later run. It is the one artifact that separates the leg's own
+act from a hand-arm, so a row acted on without it is reported, not claimed. `jump`, `leave` and
+`cannot-tell` print `opened=none — <reason>`.
+
 ⚠️ **The cap counts only resumes that took.** `--record-resume` refuses an id the instrument does
 not read `LIVE`, so a resume that never landed does not arm the cap against its own retry. The
 fourth resume inside 30 minutes prints `⚠️ MANAGER CRASH-LOOP: <topic>` — stop restarting that
