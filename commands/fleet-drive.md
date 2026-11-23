@@ -47,7 +47,7 @@ Rationale: runbook § Fleet-Manager Command.
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
 goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
-⚠️ **Carve-out: 5b, 5d and 16b are acting legs.** They run here, or in a sub-agent granted
+⚠️ **Carve-out: 5d is an acting leg.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
 them.
 
@@ -62,9 +62,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 2 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/sweep.md` |
 | 3 | Confirm the digest's candidates | the hand-back reports `orphan`, `collision` or `unmanaged` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/confirm-candidates.md` |
 | 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
-| 5b | Keep alive | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/keepalive.md` |
 | 5d | Own parks | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/own-parks.md` |
-| 6 | Reap contract | the drive leg runs | `${CLAUDE_PLUGIN_ROOT}/commands/steps/reap.md` |
 | 7 | Answer a parked or exited worker | a worker is parked on a question or has exited | `${CLAUDE_PLUGIN_ROOT}/commands/steps/worker-channels.md` |
 | 8 | Act on the open-items ledger | the ledger holds ≥1 open entry | `${CLAUDE_PLUGIN_ROOT}/commands/steps/act.md` · `${CLAUDE_PLUGIN_ROOT}/commands/steps/open-items.md` |
 | 9 | Verify a named cause | about to name a cause in the round's report | `${CLAUDE_PLUGIN_ROOT}/commands/steps/cause-verify.md` |
@@ -74,7 +72,6 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 13 | Attention watchers | every tick — no `Monitor` to arm: the wake arrives as an `attention gate: <item-id>` line typed into this pane by `attention-controller`'s wake job; dispatch the gate answerer on it | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Readings | every tick — take all seven readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
-| 16b | Manager reap | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 18 | Persist | this round's `.digest` marker is missing — run: `python3 $P/fleet-snapshot.py --digest-path <this round's payload path>` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
@@ -82,7 +79,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 
 ⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**; a second sweep duplicates sends.
 
-**Split:** rows 0, 2–3, 5–10, 12, 15, 16b, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
+**Split:** rows 0, 2–3, 5, 7–10, 12, 15, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
 
 ## INLINE — the hard rules
 

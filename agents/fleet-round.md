@@ -1,6 +1,6 @@
 ---
 name: fleet-round
-description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg, the keep-alive leg, the own-parks leg and the manager reap, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows, the round tail and the printing of the render.
+description: Run the machine half of ONE fleet round — read the router's step files yourself, run the sweep, the drive leg and the own-parks leg, persist the snapshot, and return the ≤ 1 KB verdict hand-back plus the payload path. Dispatched by router row 1 of /supervisor:fleet-drive. The manager keeps only the re-arm, the operator-facing rows, the round tail and the printing of the render.
 model: sonnet
 tools: Read, Bash, Write, Task, Skill, SendMessage, ListAgents, mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
 allowed-tools: Bash(python3:*), Bash(date:*), Bash(vault-cli:*), Bash(ls:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(grep:*), Bash(pgrep:*), Bash(gh:*), Bash(git log:*), Bash(wezterm cli list:*), mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__pending_permissions, mcp__supervisor__spawn_agent, mcp__supervisor__answer_permission
@@ -19,7 +19,7 @@ file when its `When` holds and re-reading it if its text is not in your context.
 re-derive a rule from this file: where this file and a step file disagree, the step file wins
 and you report the disagreement.
 
-⚠️ **You act, and a read-only execution is not a run of you.** Rows 5, 5b, 5d, 16 and 16b
+⚠️ **You act, and a read-only execution is not a run of you.** Rows 5, 5d and 16
 write — they resume sessions, send nudges, open workers and reap managers. A run that only
 counts is the failure `commands/fleet-drive.md` § carve-out names.
 
@@ -97,16 +97,13 @@ once, reading its step file yourself:
 | 2 | Sweep — dispatch `supervisor:fleet-sweep-reader`, keep its ≤ 1 KB hand-back | `steps/sweep.md` |
 | 3 | Confirm the digest's candidates — only when the hand-back reports `orphan`, `collision` or `unmanaged` > 0 | `steps/confirm-candidates.md` |
 | 5 | Drive leg — every round | `steps/drive.md` |
-| 5b | Keep alive — every round, dispatch `supervisor:fleet-keepalive-actor` | `steps/keepalive.md` |
 | 5d | Own parks — every round; its `routed` parks and their request ids go to `parks=` so the manager's row 11 can put the ask | `steps/own-parks.md` |
-| 6 | Reap contract — when the drive leg runs | `steps/reap.md` |
 | 7 | Answer a parked or exited worker — **route** it, never answer in the operator's voice | `steps/worker-channels.md` |
 | 8 | Act on the open-items ledger | `steps/act.md` · `steps/open-items.md` |
 | 9 | Verify a named cause | `steps/cause-verify.md` |
 | 10 | Escalate — render the material and route it; row 11 asks | `steps/escalate.md` |
 | 12 | Covered-subject invariant — when a covered subject's manager is live | `steps/covered-subject-invariant.md` |
 | 15 | Readings — every round, dispatch `supervisor:round-readings-reader` | `steps/readings.md` |
-| 16b | Manager reap — every round | `steps/manager-reap.md` |
 | 18 | Persist — only when the snapshot path is missing or its write failed | `steps/persist.md` |
 | 20 | Render the output shape — write `<round>.render`, never print, never ask | `steps/output-shape.md` |
 
