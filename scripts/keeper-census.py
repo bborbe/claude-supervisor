@@ -50,6 +50,12 @@ OWNER = _load("owner", "owner.py")
 #: "this worker has no goal", which the census reports green.
 GOALS = _load("goals_declaration", "goals-declaration.py")
 
+#: `scripts/declaring-topics.py` is the one home for a goal's declaring topics — the union of
+#: its own `topics:` and every topic's `## Goals`, minus terminal topic pages. Both keeper
+#: readers call it (`crashed-managers.py` too), so the census and the keep-alive leg cannot
+#: disagree about who keeps a goal.
+DECLARING = _load("declaring_topics", "declaring-topics.py")
+
 SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
@@ -73,6 +79,12 @@ GOAL_DIRS = ("24 Goals", "23 Goals")
 TASK_DIRS = ("25 Tasks", "24 Tasks")
 
 TERMINAL = {"completed", "aborted"}
+
+#: The `cadence` label for a page that exists on disk but was skipped as terminal. Distinct
+#: from `NO-PAGE` (no such page at all) so a reader can tell an archived topic from a deleted
+#: one. It stays `cannot-tell` like `NO-PAGE` did — the split changes the label, never a
+#: verdict, so a worker under an archived goal is not flipped into a false fleet-kept green.
+ARCHIVED = "ARCHIVED"
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("KEEPER_CENSUS_DIR") or "~/.claude/state/keeper-census"
@@ -123,16 +135,6 @@ def links(fm, key):
     return re.findall(r"\[\[([^\]|#]+)", m.group(1)) if m else []
 
 
-def section_links(text, heading):
-    """The wikilinks of a `## <heading>` bullet list — the topic page's declared goals.
-
-    The section ends at the next H1 **or H2**, or at EOF: a topic page carries `# Split`
-    sections after `## Goals`, and a `## Goals` that ends the file still declares.
-    """
-    m = re.search(rf"^## {re.escape(heading)}$(.*?)(?=^#{{1,2}} |\Z)", text, re.M | re.S)
-    return re.findall(r"^[ \t]*[-*][ \t]+\[\[([^\]|#]+)", m.group(1), re.M) if m else []
-
-
 def page_dirs(vault):
     """The page directories that exist under `vault` — the census's own layout probe."""
     return [os.path.join(vault, name)
@@ -171,12 +173,13 @@ def session_ids(fm):
 def scan(vault):
     """Every non-terminal page, its session ids, and the topic→goal edges.
 
-    Returns `(pages, by_session, by_name, goal_topics)`. `by_name` indexes **every**
-    non-terminal page ("no such page" must not read like "a page with no session id");
-    `by_session` indexes only pages that record one.
+    Returns `(pages, by_session, by_name, goal_topics, goal_archived)`. `by_name` indexes
+    **every** non-terminal page ("no such page" must not read like "a page with no session
+    id"); `by_session` indexes only pages that record one. `goal_archived` names the terminal
+    topic pages a goal declares, for the census row's note — never a keeper input.
     """
     pages, by_session, by_name = [], {}, {}
-    goal_topics = {}
+    topic_pages = {}   # every topic page's (text, fm), terminal included — the rule's input
 
     for kind, dirnames in (("topic", TOPIC_DIRS), ("goal", GOAL_DIRS), ("task", TASK_DIRS)):
         for dirname in dirnames:
@@ -188,6 +191,8 @@ def scan(vault):
                     continue
                 text = _read(os.path.join(directory, filename))
                 fm = frontmatter(text)
+                if kind == "topic":
+                    topic_pages[filename[:-3]] = (text, fm)
                 if scalar(fm, "status") in TERMINAL:
                     continue
                 ids = session_ids(fm)
@@ -205,20 +210,20 @@ def scan(vault):
                 by_name.setdefault((kind, page["name"]), page)
                 for sid in ids:
                     by_session.setdefault(sid, []).append(page)
-                if kind == "topic":
-                    for goal in section_links(text, "Goals"):
-                        goal_topics.setdefault(goal, []).append(page["name"])
 
-    # A goal's `topics:` frontmatter is the declaring side that survives its topic page being
-    # archived, so it is unioned with the topic's own `## Goals` list rather than replacing it.
+    # A goal's declaring topics are the union of its own `topics:` and every topic's
+    # `## Goals`, minus terminal topic pages — `scripts/declaring-topics.py` decides it, the
+    # same call the keep-alive leg makes, so the two readers cannot disagree.
+    goal_topics, goal_archived = {}, {}
     for page in pages:
         if page["kind"] != "goal":
             continue
-        for topic in page["topics"]:
-            if topic not in goal_topics.setdefault(page["name"], []):
-                goal_topics[page["name"]].append(topic)
+        live, archived = DECLARING.resolve(vault, page["name"], topic_pages=topic_pages,
+                                           goal_fm=page["fm"])
+        goal_topics[page["name"]] = live
+        goal_archived[page["name"]] = archived
 
-    return pages, by_session, by_name, goal_topics
+    return pages, by_session, by_name, goal_topics, goal_archived
 
 
 # probes — the seams every test patches
@@ -313,9 +318,26 @@ def owner(kind, name, world):
     return cache[(kind, name)]
 
 
+def _page_on_disk(kind, name, vault):
+    """Does a page file for `(kind, name)` exist on disk, terminal or not?
+
+    `by_name` holds only non-terminal pages, so a miss there is either an absent page or a page
+    skipped as terminal. This tells the two apart for the `ARCHIVED` / `NO-PAGE` label.
+    """
+    dirs = {"topic": TOPIC_DIRS, "goal": GOAL_DIRS, "task": TASK_DIRS}.get(kind, ())
+    return any(os.path.isfile(os.path.join(vault, d, name + ".md")) for d in dirs)
+
+
 def _owner(kind, name, world):
     page = world["by_name"].get((kind, name))
     if page is None:
+        if _page_on_disk(kind, name, world["vault"]):
+            # The page exists but `scan()` skipped it as terminal: archived, not absent — a
+            # distinct label. `cannot` stays True: an archived declaring page yields no keeper
+            # answer (a worker under it is neither a definite fleet keeper nor red), exactly as
+            # the old `NO-PAGE` did, so this split changes the label only, never a verdict.
+            return {"live": None, "cadence": ARCHIVED, "owns": False, "cannot": True,
+                    "why": f"{kind} page {name} is terminal (status completed/aborted)"}
         # Not an ownership question the resolver can answer: there is no page to resolve.
         return {"live": None, "cadence": "NO-PAGE", "owns": False, "cannot": True,
                 "why": f"no {kind} page named {name}"}
@@ -359,39 +381,47 @@ def _page_for(sid, by_session):
 
 
 def keepers_of(page, world):
-    """`(keepers, why, cannot)` — who keeps this page's session alive, and whether the answer
-    is a definite one. `cannot` means a keeper read failed: report it, never count it red."""
+    """`(keepers, why, cannot, note)` — who keeps this page's session alive, whether the answer
+    is a definite one, and an informational `note` rendered after the keeper cell (an archived
+    declaring topic on a fleet-kept goal). `cannot` means a keeper read failed: report it,
+    never count it red."""
     kind = page["kind"]
 
     if kind == "topic":
         if world["legs"]["topic"]:
-            return ["fleet round"], "", False
-        return [], "the fleet round has no topic keep-alive leg", False
+            return ["fleet round"], "", False, ""
+        return [], "the fleet round has no topic keep-alive leg", False, ""
 
     if kind == "goal":
         verdicts = [(topic, owner("topic", topic, world))
                     for topic in world["goal_topics"].get(page["name"], [])]
         claimants = [f"topic mgr: {topic}" for topic, v in verdicts if v["owns"]]
         if claimants:
-            return claimants, "", False
-        # ⚠️ The fleet goal leg covers goals in NO topic, and only those
-        # (`keepalive-topicless-goals.md`) — a declared goal whose topic manager is stood
-        # down is kept by nobody, and calling it fleet-kept is the false green this exists
-        # to remove.
+            return claimants, "", False, ""
         if not verdicts:
+            # A declaring topic that is terminal contributes nothing (the rule excludes it),
+            # so the goal is treated as topic-less — but the row names the archived topic
+            # rather than hiding it behind `NO-PAGE`.
+            archived = world.get("goal_archived", {}).get(page["name"], [])
+            note = ("archived declaring topic(s) contribute nothing: "
+                    + ", ".join(f"{t} [{ARCHIVED}]" for t in archived)) if archived else ""
+            # ⚠️ The fleet goal leg covers goals in NO topic, and only those
+            # (`keepalive-topicless-goals.md`) — a declared goal whose topic manager is stood
+            # down is kept by nobody, and calling it fleet-kept is the false green this exists
+            # to remove.
             if not world["legs"]["goal"]:
                 return [], ("goal is in no topic and the fleet round has no goal keep-alive "
-                            "leg"), False
+                            "leg"), False, note
             # The leg's population gate (`crashed-managers.fleet_keeps`): `in_progress` /
             # `execution` only, so any other row is a green with no keeper.
             if page["status"] != "in_progress" or page["phase"] != "execution":
                 return ([], "goal is in no topic and outside the fleet leg's population "
                         f"(status {page['status'] or '—'}, phase {page['phase'] or '—'})",
-                        False)
-            return ["fleet round"], "", False
+                        False, note)
+            return ["fleet round"], "", False, note
         states = ", ".join(f"{t} [{v['cadence']}]" for t, v in verdicts)
         return ([], f"declaring topic(s) have no live armed manager: {states}",
-                any(v["cannot"] for _, v in verdicts))
+                any(v["cannot"] for _, v in verdicts), "")
 
     if kind == "task":
         claimants, deferred = [], []
@@ -405,23 +435,23 @@ def keepers_of(page, world):
                 # `docs/session-tiers.md` § Keep-alive names that as the standing gap.
                 deferred.append(f"{goal} [{verdict['cadence']}]")
         if claimants:
-            return claimants, "", False
+            return claimants, "", False, ""
         # A goal name that resolves to no page is a page-record defect, and the answer it
         # leaves behind is cannot-tell — not "kept by the fleet round".
         unresolved = any(owner("goal", g, world)["cannot"] for g in page["goals"])
         if deferred:
             return ([], "goal manager session LIVE but its loop is not running: "
-                    + ", ".join(deferred), unresolved)
+                    + ", ".join(deferred), unresolved, "")
         if world["legs"]["worker"]:
-            return (["fleet round"], "", unresolved)
+            return (["fleet round"], "", unresolved, "")
         if not page["goals"]:
-            return [], "task has no goal and the fleet round has no worker keep-alive leg", False
+            return [], "task has no goal and the fleet round has no worker keep-alive leg", False, ""
         states = ", ".join(f"{g} [{owner('goal', g, world)['cadence']}]"
                            for g in page["goals"])
         return ([], "goal manager(s) absent and the fleet round has no worker keep-alive "
-                f"leg: {states}", unresolved)
+                f"leg: {states}", unresolved, "")
 
-    return [], f"unhandled page kind {kind}", False
+    return [], f"unhandled page kind {kind}", False, ""
 
 
 def _red(keepers):
@@ -484,11 +514,14 @@ def census(world):
                          "why": "no topic, goal or task page records this session"})
             mismatches.append(f"live session {sid} ({name}) — no page records it")
             continue
-        keepers, why, cannot = keepers_of(page, world)
-        rows.append({"state": "cannot-tell" if cannot else "live",
-                     "tier": TIER_BY_KIND[page["kind"]],
-                     "name": page["name"], "sid": sid, "keepers": keepers,
-                     "red": None if cannot else _red(keepers), "why": why})
+        keepers, why, cannot, note = keepers_of(page, world)
+        row = {"state": "cannot-tell" if cannot else "live",
+               "tier": TIER_BY_KIND[page["kind"]],
+               "name": page["name"], "sid": sid, "keepers": keepers,
+               "red": None if cannot else _red(keepers), "why": why}
+        if note:
+            row["note"] = note
+        rows.append(row)
 
     for sid, pages in world["by_session"].items():
         if sid in world["live"]:
@@ -557,7 +590,11 @@ def render(rows, mismatches, live_count, leg_state, vault, card=None):
             if dead_printed > NOT_LIVE_LIMIT:
                 dead_hidden += 1
                 continue
-        detail = (f" · {row['why']}" if row["state"] == "cannot-tell" else "")
+        detail = ""
+        if row["state"] == "cannot-tell":
+            detail = f" · {row['why']}"
+        elif row.get("note"):
+            detail = f" · {row['note']}"
         out.append(f"      {row['state']:<12} "
                    f"{row['tier']:<10} {row['name'][:56]:<56} keeper: "
                    f"{', '.join(row['keepers']) or '—'}{detail}")
@@ -684,13 +721,14 @@ def _main(argv=None):
               file=sys.stderr)
         return 2
 
-    _, by_session, by_name, goal_topics = scan(args.vault)
+    _, by_session, by_name, goal_topics, goal_archived = scan(args.vault)
     world = {
         "vault": args.vault,
         "live": live,
         "by_session": by_session,
         "by_name": by_name,
         "goal_topics": goal_topics,
+        "goal_archived": goal_archived,
         "legs": legs(args.leg_file),
         "cadence": cadence,
         "fleet": fleet_session(),

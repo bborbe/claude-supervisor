@@ -114,6 +114,37 @@ class EvaluateTest(unittest.TestCase):
         self.assertFalse(cm.fleet_keeps(self.vault, "Declared"))
         self.assertFalse(cm.fleet_keeps(self.vault, "Missing Page"))
 
+    def goal_with_topics(self, name, topics,
+                         sid="aaaa1111-0000-0000-0000-000000000000",
+                         status="in_progress", phase="execution"):
+        body = "".join(f"    - '[[{t}]]'\n" for t in topics)
+        write(os.path.join(self.goals, f"{name}.md"),
+              f"---\nclaude_session_id: {sid}\npage_type: goal\nstatus: {status}\n"
+              f"phase: {phase}\ntopics:\n{body}---\n\n# Impact\n")
+
+    def test_declaring_topics_unions_the_goals_own_topics_frontmatter(self):
+        """The union rule: a goal's own `topics:` declares a topic whose `## Goals` does not."""
+        self.goal_with_topics("G", ["T"])
+        self.topic("T", [], sid="t-sid")
+        self.assertEqual(["T"], cm.declaring_topics(self.vault, "G"))
+
+    def test_declaring_topics_excludes_a_terminal_topic_page(self):
+        """An archived topic page runs no manager and contributes nothing."""
+        self.goal_with_topics("G", ["T"])
+        write(os.path.join(self.topics, "T.md"),
+              "---\nclaude_session_id: t-sid\npage_type: topic\nstatus: completed\n---\n\n"
+              "## Goals\n\n- [ ] [[G]]\n")
+        self.assertEqual([], cm.declaring_topics(self.vault, "G"))
+
+    def test_fleet_keeps_a_goal_whose_only_declaring_topic_is_archived(self):
+        """The live instance's shape: the only declaring topic is terminal, so the goal is
+        topic-less and the fleet leg keeps it."""
+        self.goal_with_topics("G", ["T"])
+        write(os.path.join(self.topics, "T.md"),
+              "---\nclaude_session_id: t-sid\npage_type: topic\nstatus: completed\n---\n\n"
+              "## Goals\n\n- [ ] [[G]]\n")
+        self.assertTrue(cm.fleet_keeps(self.vault, "G"))
+
     def test_live_but_lapsed_and_uncovered_cards(self):
         self.goal("Lonely Goal")
         self.stub("STALE", "LIVE")

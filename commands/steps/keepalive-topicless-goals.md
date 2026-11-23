@@ -17,9 +17,10 @@ the actor's step 1, one tier down. **Restart is not open.**
 
 **Population: `scripts/topicless-goal-keepalive.py` selects it and decides each verdict.** It
 takes every goal page at `status: in_progress` + `phase: execution` that carries a
-`claude_session_id` and that either no topic page's `## Goals` list names, or only topics whose
-own manager reads `resume` (dead) or `cannot-tell` (`crashed-managers.py` `fleet_keeps`, one
-home). For each one it asks `topic-keepalive.py --branch goal`. It never acts and never writes
+`claude_session_id` and that either no topic declares — the union of the goal's own `topics:`
+and every topic page's `## Goals`, minus terminal topic pages (`scripts/declaring-topics.py`,
+one home, shared with the census) — or only topics whose own manager reads `resume` (dead) or
+`cannot-tell` (`crashed-managers.py` `fleet_keeps`, one home). For each one it asks `topic-keepalive.py --branch goal`. It never acts and never writes
 the cap. It resolves the vault's goals and topics folders itself, by the vault's path
 (`resolve-folders.py --vault`), never from the first config entry.
 - ⚠️ **The phase filter is not optional.** `topic-keepalive.py` reads liveness and cadence only,

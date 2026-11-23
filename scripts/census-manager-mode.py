@@ -148,7 +148,7 @@ def main(argv=None):
         )
         return 2
 
-    _, by_session, _, _ = CENSUS.scan(args.vault)
+    _, by_session, _, _, _ = CENSUS.scan(args.vault)
 
     rows = defects(live, entrypoint_by_session, by_session)
     for sid, subject in rows:

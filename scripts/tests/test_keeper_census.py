@@ -405,6 +405,63 @@ class CensusTest(unittest.TestCase):
         self.assertNotIn("Done", text)
         self.assertIn("sessions=0", text)
 
+    def test_a_goal_declaring_only_an_archived_topic_is_fleet_kept_and_named(self):
+        """The live instance's shape: the goal's only declaring topic is `status: completed`,
+        so it contributes nothing — the goal is fleet-kept and the row names the archived
+        topic instead of reading `NO-PAGE`."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "Archived Topic", status="completed")
+        self.write("goal", "G", sid="g-sid", topics=["Archived Topic"])
+        self.alive("g-sid")
+        self.states[("goal", "G")] = "OK"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertIn("keeper: fleet round", text)
+        self.assertIn("Archived Topic [ARCHIVED]", text)
+        self.assertNotIn("NO-PAGE", text)
+
+    def test_archived_and_absent_and_no_session_are_three_distinct_labels(self):
+        """SC2 — `NO-PAGE` must not stand in for an archived page, and `no-session` (a page
+        present with no id) is a third, separate state decided by `owner.py`."""
+        self.write("topic", "Archived", status="completed")
+        self.write("topic", "Open", sid="")
+        world = {
+            "by_name": {("topic", "Open"): {"fm": "page_type: topic\nstatus: in_progress\n"}},
+            "vault": str(self.vault),
+            "live": {},
+            "cadence": lambda subject, branch, vault: "UNARMED",
+        }
+        archived = self.k._owner("topic", "Archived", world)
+        absent = self.k._owner("topic", "Absent", world)
+        open_ = self.k._owner("topic", "Open", world)
+        self.assertEqual("ARCHIVED", archived["cadence"])
+        self.assertTrue(archived["cannot"])   # the label is distinct; the verdict stays conservative
+        self.assertEqual("NO-PAGE", absent["cadence"])
+        self.assertTrue(absent["cannot"])
+        self.assertIn("no-session", open_["why"])
+
+    def test_census_and_leg_agree_on_a_goal_whose_only_declaring_topic_is_archived(self):
+        """DoD2 — before the fix the census read `keeper: —` (`[NO-PAGE]`) while
+        `fleet_keeps()` returned True. Both must now agree: census `keeper: fleet round`,
+        leg True."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "crashed_managers", str(_HERE.parent / "crashed-managers.py"))
+        cm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cm)
+
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "Archived Topic", status="completed")
+        self.write("goal", "G", sid="g-sid", topics=["Archived Topic"])
+        self.alive("g-sid")
+        self.states[("goal", "G")] = "OK"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertIn("keeper: fleet round", text)
+        self.assertTrue(cm.fleet_keeps(str(self.vault), "G"))
+
 
 if __name__ == "__main__":
     unittest.main()

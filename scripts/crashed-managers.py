@@ -177,6 +177,29 @@ def helpers():
     return _KA
 
 
+_DT = None
+
+
+def declaring():
+    """`scripts/declaring-topics.py` loaded as a module — the one rule for a goal's declaring
+    topics. Lazy and guarded for the same reason `helpers()` is: a broken install must be a
+    refusal (exit 2), never read as "no declaring topics" — which selects every goal."""
+    global _DT
+    if _DT is None:
+        path = os.path.join(REPO, "scripts", "declaring-topics.py")
+        try:
+            spec = importlib.util.spec_from_file_location("declaring_topics", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as exc:  # noqa: BLE001 — any load failure is a refusal, never a crash
+            raise Refused(f"cannot load {path}: {exc}") from exc
+        if not hasattr(module, "declaring_topics"):
+            raise Refused(f"{path} is missing declaring_topics — a broken install, "
+                          "not an empty fleet")
+        _DT = module
+    return _DT
+
+
 #: The `--state-dir` this run was given, forwarded to the child probe. Without it a caller
 #: running `--state-dir X` enumerated X and then classified each subject from the DEFAULT
 #: store — two different readings in one run, silently.
@@ -319,14 +342,13 @@ def declares(text: str, goal: str) -> bool:
     return False
 
 
-def declaring_topics(vault: str, goal_name: str, topics_dir: str | None = None) -> list[str]:
-    """The topic page names that declare this goal in their `## Goals` section, sorted."""
-    directory = os.path.join(vault, topics_dir or TOPICS_DIR)
-    out = []
-    for entry in _listdir(directory):
-        if entry.endswith(".md") and declares(_read_page(os.path.join(directory, entry)), goal_name):
-            out.append(entry[: -len(".md")])
-    return sorted(out)
+def declaring_topics(vault: str, goal_name: str, topics_dir: str | None = None,
+                     goals_dir: str | None = None) -> list[str]:
+    """The topic page names that declare this goal, sorted — the union of the goal's own
+    `topics:` and every topic's `## Goals`, minus terminal topic pages. The rule lives in
+    `scripts/declaring-topics.py`, the same module the census reads, so the two readers cannot
+    disagree about who keeps a goal."""
+    return declaring().declaring_topics(vault, goal_name, topics_dir, goals_dir)
 
 
 def topic_declares(vault: str, goal_name: str, topics_dir: str | None = None) -> bool:
@@ -419,7 +441,7 @@ def fleet_keeps(vault: str, goal_name: str, goals_dir: str | None = None,
         return False
     if not _page_session_id(front):
         return False
-    declared = declaring_topics(vault, goal_name, topics_dir)
+    declared = declaring_topics(vault, goal_name, topics_dir, goals_dir)
     if not declared:
         return True
     return all(t in (unkept_topics or set()) for t in declared)
