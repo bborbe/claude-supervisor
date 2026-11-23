@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **`--topic-open` now has a written invocation home.** The flag is invoked by the wrapper's open endpoint (`bborbe/claude-wrapper` `pkg/open_tab.go:292-297`, `--topic-open --hand-run`), but `commands/open.md` stopped carrying it in `dcd2d991` — that commit made `open.md` a thin caller of the wrapper endpoint, and `scripts/check-open-hand-run.py` now forbids `topic-spawn.py` there — so the only reference to the *invocation* was a grep-negative. `commands/topic-spawn.md` gains a `## Opening a topic's manager — --topic-open` section: the invocation (with `--hand-run`), the `open-ok: <topic>` / refusal-token verdict, and the ≥300 s Bash-call timeout `commands/open.md:243-246` already mandates. Change set: `commands/topic-spawn.md`, `CHANGELOG.md`.
+
 ## v0.366.8
 
 - docs: **the keep-alive leg may no longer state a capacity comparison it did not obtain from a cap instrument.** Measured 2026-11-09: the leg reported `52 live workers against a hard cap of 50` and skipped all 57 dead-worker resumes, while the cap denominator that round read **31** — and at 31 the wrapper's own refusal already named the soft cap correctly. The 52 was the leg's own count, drawn from a wider population (`list_agents`, `live-workers.py`, the raw registry entry count), none of which is the cap denominator. `agents/fleet-keepalive-actor.md` §4 now licenses exactly two forms, both **read rather than composed**: a refused resume quotes the wrapper's refusal verbatim, and a reported capacity is `workers: <live>/<target>` from `worker-sessions.py --count` + `worker-target.py`, whose single home stays `commands/steps/output-shape.md` item 1. Change set: `agents/fleet-keepalive-actor.md`, `CHANGELOG.md`.
