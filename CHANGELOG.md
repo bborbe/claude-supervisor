@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.13
 
 - fix: **a dangling `goals:` link is reported instead of dropped.** `goal_owners()` used to `continue` past an unopenable page, so a declared link whose page was missing left the owners list empty — the row then looked goal-less and the fleet leg resumed it with nothing said, indistinguishable from a task that declares no goal at all. It now delegates to `owner.py`'s `of_subject()`, the module that already rules an established absence `not-owner` (`test_owner.py` *"absence that was ESTABLISHED stays not-owner"*) and an unreadable page `cannot-tell`, and `main()` appends every `not-owner` answer to the reason line — line 2, not a third line, because `agents/fleet-keepalive-actor.md` slices `lines[:2]` into its TSV row and would have discarded a note printed below it — so the broken link is visible in the leg's own output. The unreadable case is upgraded as a side effect: it was dropped into `[]` — a fleet resume of a worker whose goal manager was merely unmeasurable, the double-writer the module exists to withhold — and is now `cannot-tell`. The crash-loop card gate now asks "did any goal resolve an OWNER" rather than "is the list empty", which a `not-owner` entry would otherwise have inverted for exactly the row no manager can own. Change set: `scripts/worker-keepalive.py`, `scripts/tests/test_worker_keepalive.py`, `CHANGELOG.md`.
 
