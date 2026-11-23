@@ -336,6 +336,30 @@ def goal_owners(fm: str, vault: str, goals_dir: str) -> list:
             for name in re.findall(r"\[\[([^\]|]+)", block.group(1))]
 
 
+def _no_owner_note(owners: list) -> str:
+    """`"; declared goal … → not-owner (…)"` for every goal that resolved no owner, or `""`.
+
+    ⚠️ **It is appended to the reason line, never printed as its own line** — callers take
+    `lines[:2]`, so a third line never reaches the operator (`agents/fleet-keepalive-actor.md`).
+    A declared `goals:` link whose page is missing resolves `not-owner` and would otherwise be
+    invisible: the row looks goal-less and this leg resumes it with nothing said. `detail`
+    names the subject (`no page for <subject> under <branch>` from `owner.py`), so a dangling
+    link stays distinguishable from a stood-down manager (`no-session` with a live registry
+    read).
+    """
+    parts = []
+    for own in owners:
+        if own.is_owner or own.is_cannot_tell:
+            continue
+        parts.append(f"goal manager {own.session_id or '(none recorded)'} → "
+                     f"{own.verdict} ({own.reason}: {own.describe()})"
+                     + (f"; {own.detail}" if own.detail else ""))
+    if not parts:
+        return ""
+    return ("; declared goal with no owner: " + " / ".join(parts)
+            + " — no goal manager owns this row, so this leg keeps it")
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
@@ -430,23 +454,19 @@ def main(argv: list[str]) -> int:
     owners = goal_owners(fm, vault, a.goals_dir)
 
     def say(word: str, why: str) -> None:
-        """Verdict, its reason, then every `not-owner` goal answer.
+        """The verdict on line 1; its reason — with any `not-owner` goal answers appended — on
+        line 2.
 
-        ⚠️ **The verdict must stay the FIRST line** — callers read `stdout`'s first line as the
-        action — and the reason stays with it on line 2, because that pair is what a round log
-        greps. The `not-owner` answers follow as supplementary context: a declared `goals:`
-        link whose page is missing resolves `not-owner` and is otherwise invisible, so the row
-        looks goal-less and is resumed with nothing said about the broken link. The detail
-        names the page, so a dangling link and a stood-down manager stay distinguishable.
+        ⚠️ **Exactly TWO lines, never a third.** Callers read line 1 as the action and line 2 as
+        the reason, and `agents/fleet-keepalive-actor.md` slices `lines[:2]` into one TSV row —
+        a third line is discarded before the operator ever sees it. So a `not-owner` answer (a
+        declared `goals:` link whose page is missing, otherwise invisible: the row looks
+        goal-less and is resumed with nothing said about the broken link) rides on line 2
+        rather than below it. The detail names the page, so a dangling link and a stood-down
+        manager stay distinguishable.
         """
         print(word)
-        print(why)
-        for own in owners:
-            if not own.is_owner and not own.is_cannot_tell:
-                print(f"goal manager {own.session_id or '(none recorded)'} → "
-                      f"{own.verdict} ({own.reason}: {own.describe()})"
-                      + (f"; {own.detail}" if own.detail else "")
-                      + "; no goal owner, so this leg keeps the row")
+        print(why + _no_owner_note(owners))
 
     # An OWNER anywhere in the task's goals defers the row: that goal's manager runs the round
     # that resumes it. Checked before the cannot-tell pass, so one resolvable owner is not

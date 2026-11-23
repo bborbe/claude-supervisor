@@ -333,6 +333,11 @@ class WorkerKeepAliveTest(unittest.TestCase):
         empty and the leg resumed the row with nothing said. The action is unchanged —
         `not-owner` is exactly what licenses the resume — but the reason must reach the
         output, or a broken link is indistinguishable from a row that declares no goal.
+
+        ⚠️ **`out[:2]`, not `out`.** `agents/fleet-keepalive-actor.md` slices `lines[:2]` into
+        one TSV row, so a note printed on line 3 is discarded before the operator sees it —
+        the first draft of this change passed a whole-output assertion while being invisible
+        in the leg's own report. Asserting the two-line shape is what pins the fix.
         """
         self.page(body=TASK_PAGE.format(sid="sid-1").replace(
             "phase: execution", "phase: execution\ngoals:\n    - '[[No Such Goal]]'"))
@@ -340,12 +345,15 @@ class WorkerKeepAliveTest(unittest.TestCase):
         rc, out = self.run_it(live="ABSENT")
         self.assertEqual(0, rc)
         self.assertEqual("resume", out[0])
-        self.assertTrue(
-            any("No Such Goal" in line for line in out),
-            f"the dangling link is not named in the output: {out!r}")
-        self.assertTrue(
-            any("not-owner" in line for line in out),
-            f"the dangling link's verdict is not reported: {out!r}")
+        self.assertEqual(
+            2, len(out),
+            f"the report must stay two lines — the consumer keeps only lines[:2]: {out!r}")
+        self.assertIn(
+            "No Such Goal", out[1],
+            f"the dangling link is not named on the reason line: {out!r}")
+        self.assertIn(
+            "not-owner", out[1],
+            f"the dangling link's verdict is not reported on the reason line: {out!r}")
 
     def test_a_task_with_no_goals_key_reports_no_goal_verdict(self):
         """The control: a fleet-tier row stays quiet.
