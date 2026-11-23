@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.9
 
 - docs: **`--topic-open` now has a written invocation home.** The flag is invoked by the wrapper's open endpoint (`bborbe/claude-wrapper` `pkg/open_tab.go:292-297`, `--topic-open --hand-run`), but `commands/open.md` stopped carrying it in `dcd2d991` — that commit made `open.md` a thin caller of the wrapper endpoint, and `scripts/check-open-hand-run.py` now forbids `topic-spawn.py` there — so the only reference to the *invocation* was a grep-negative. `commands/topic-spawn.md` gains a `## Opening a topic's manager — --topic-open` section: the invocation (with `--hand-run`), the `open-ok: <topic>` / refusal-token verdict, and the ≥300 s Bash-call timeout `commands/open.md:243-246` already mandates. Change set: `commands/topic-spawn.md`, `CHANGELOG.md`.
 
