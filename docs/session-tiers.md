@@ -160,7 +160,7 @@ subject — two sessions on one subject are a double writer.
 | Level | Opened by | Kept alive by | Mechanism | Guard |
 |---|---|---|---|---|
 | **Fleet manager** | the operator | **the operator** | `scripts/fleet-keepalive.py` reads the digest, never the heartbeat; `scripts/fleet-keeper.py` posts one card after 40 min `stale`, and resumes only on the operator's `resume it` answer | report-only — rule 1's one exception (§ The four tiers) |
-| **Topic manager** | the fleet manager, on the operator's initiative | the **fleet round** | `commands/steps/keepalive.md` § Restart a lapsed topic manager → `scripts/topic-keepalive.py --branch topic`, for every topic page carrying a `claude_session_id` | 3 resumes in 30 min → `crash-loop`, escalate once |
+| **Topic manager** | the fleet manager, on the operator's initiative | the **fleet round** | `commands/steps/keepalive.md` § Restart a lapsed topic manager → `scripts/topic-keepalive.py --branch topic`, for every topic page `scripts/topic-candidates.py` selects — every verdict but `loop-stopped`, never filtered on `claude_session_id` | 3 resumes in 30 min → `crash-loop`, escalate once |
 | **Goal manager** — goal declared by a topic | its topic manager, only when the goal is flagged | its **topic manager's round** | `agents/topic-drive.md` step 1 → `scripts/topic-keepalive.py --branch goal`, one call per declared goal per tick | same cap; `STOPPED` and `SLEEPING` are left alone — but a stand-down whose own `defer_date` has **passed** no longer reads `STOPPED`, so the goal is resumed on its due date instead of being held down past it (see `docs/subject-resolution.md` § the stand-down is time-boxed by its date gate); `UNARMED` reads `jump` |
 | **Goal manager** — goal in no topic | the fleet manager, only when the goal is flagged | the **fleet round** | `commands/steps/keepalive-topicless-goals.md` (the actor's § 1b) → `scripts/topicless-goal-keepalive.py`, which asks `scripts/topic-keepalive.py --branch goal` for every `in_progress` + `execution` goal with a `claude_session_id` that no topic declares **or that only an unkept topic declares** | same cap; a goal under a live, armed topic is never selected — its topic round owns it. ⚠️ **One exception, ruled 2026-11-18:** a goal whose declaring topic manager reads dead or `cannot-tell` IS selected, because no round restarts that manager and its whole subtree would otherwise be nobody's population. The race the exception opens is closed by `scripts/topic-keepalive.py`'s `O_EXCL` claim, taken by **every** acting leg — this one and the topic round's `agents/topic-drive.md` — before it resumes: `--claim-resume <id>` first, and a second writer reads `claimed` and skips. A claim taken by only one leg refuses only that leg's second attempt, so both must take it. `--record-resume` releases it, `CLAIM_TTL` expires it |
 | **Worker** — task with a goal | its goal manager, or the fleet manager when no manager owns the goal | its **goal manager's round** while that manager is an owner (below); otherwise the **fleet round** | `agents/goal-drive.md` auto-resume gate; the fallback is `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `last_auto_resume` cap on the goal tier, `worker--<slug>` cap on the fleet tier; `worker-keepalive.py` returns `jump` for a row the goal tier owns, so the two never resume one row |
@@ -229,12 +229,13 @@ manager is the first step of a chain, not a single-step fix**: the topic page be
 armed manager reads `"declaring topic(s) have no live armed manager"`
 (`scripts/keeper-census.py:396-397`).
 
-⚠️ **And the chain does not close by itself.** The handover clears the page's
-`claude_session_id`, and the keep-alive leg's § 1 population is *every topic page carrying a
-session id* (`agents/fleet-keepalive-actor.md:149`) — so a page this leg has handed over drops
-out of that population and § 1 will not open a replacement manager for it. Re-opening is a
-**separate gap, not a consequence of this close**, and a round must not report the goals kept
-after a close on the assumption that it follows.
+⚠️ **The handover no longer strands the page — the `STOPPED` rule is what keeps the chain
+open.** § 1 selects on `scripts/owner.py`'s verdict through `scripts/topic-candidates.py` and
+refuses only `loop-stopped`, so a page this leg has handed over **stays in the population**
+unless it still carries its `.stopped` marker, and a re-manageable topic gets a replacement
+manager. A `STOPPED` topic is still never re-opened,
+so for one of those the goals stay unkept — a round must not report them kept after a close on
+the assumption that it follows.
 
 ### Three invariants
 
