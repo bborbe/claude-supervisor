@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.366.12
 
 - fix: **a manager can no longer settle an operator-tier permission gate through `attention-answer.py`.** `cmd_answer_permission` posted every verdict with no tier read at all, so a hand-built `attention-answer.py answer <id> --decision allow --by manager` released a prompt the classifier rates `operator`. Measured 2026-11-23 06:37:51Z on item `aecf9478…`: `answered_by: manager`, `resolved_by 070129ad…`, a `Bash: … git -C $R show … | nl | sed` payload the classifier rates `operator` (form `secret`). `gate-answer-check.py` had read the tier since 2026-11-18, but this row never went through it — it reached `attention-answer.py` directly. The branch now classifies the card payload with the same `permission-tier.py` the placement measurement uses and refuses a non-operator arm on an operator-tier card with a named reason, before the store is written; only the operator's own surfaces (`--by operator`, `attention-board`, `supervisor:attention-next`) may answer one, and an unreadable classifier or a payload naming no tool fails closed to `operator`. Change set: `scripts/attention-answer.py`, `scripts/tests/test_attention_answer.py`, `CHANGELOG.md`.
 
