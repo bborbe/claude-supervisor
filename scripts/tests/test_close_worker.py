@@ -1069,6 +1069,24 @@ class TestCliRefusals(unittest.TestCase):
         self.assertEqual(idle.returncode, 0, idle.stdout + idle.stderr)
         self.assertIn("would close", idle.stdout)
 
+    def test_a_task_in_an_unconfigured_vault_still_anchors(self):
+        """A page outside `vault-cli` config must anchor, not be declared absent.
+
+        `find_pages` already probed the goal/topic names root-wide while `find_tasks` read
+        only the configured set, so a live task here resolved to nothing — and a proof
+        taken over the wider directory list called that a proven absence, which would have
+        closed a live anchored session.
+        """
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        other = os.path.join(self.vaults, "other", "25 Tasks")
+        os.makedirs(other)
+        with open(os.path.join(other, "live.md"), "w", encoding="utf-8") as handle:
+            handle.write(f"---\nclaude_session_id: {SID}\nstatus: in_progress\n---\n")
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertNotIn("unanchored-closed", done.stdout)
+
     def test_a_live_anchored_task_still_refuses(self):
         """SC4: the new branch is reached only when resolution fails."""
         self._registry(pid=999999, entrypoint="sdk-cli")
@@ -1120,13 +1138,15 @@ class TestUnanchoredVerdict(unittest.TestCase):
         token, _detail = cw.unanchored_verdict(SID, self.tmp, empty_root)
         self.assertEqual(token, "task-unresolved")
 
-    def test_a_present_page_is_never_unanchored(self):
-        """A page that carries the id means the caller should have resolved it first."""
+    def test_a_different_sessions_page_does_not_anchor_this_one(self):
+        """A page carrying ANOTHER id is not an anchor for this session.
+
+        `unanchored_verdict` reports on the search alone, so it must not read a neighbour's
+        stamp as this session's — the id it is asked about is the one that decides.
+        """
         path = os.path.join(self.tasks, "t.md")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n")
-        # `unanchored_verdict` is only consulted when nothing resolved, so it reports on
-        # the search alone — this asserts it does not invent a close for a *different* id.
         token, _detail = cw.unanchored_verdict(OTHER, self.tasks, self.vaults)
         self.assertEqual(token, "unanchored-closed")
 

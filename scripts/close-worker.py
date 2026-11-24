@@ -365,6 +365,16 @@ def task_dirs_for(cwd, vault_root=None, names=None):
 #: sweep searches, not only the configured ones.
 FLEET_PROBE_DIRS = ("25 Tasks", "24 Tasks", "24 Goals", "23 Goals", "tasks")
 
+#: The TASK-named subset of `FLEET_PROBE_DIRS`, searched root-wide by `find_tasks`.
+#:
+#: The goal names are deliberately absent: collecting from them would read a goal page as a
+#: task and take the task branch for a goal-only session, bypassing `find_pages` and its
+#: different terminal rule. Task and page lookups together must cover the same population,
+#: or an absence proof taken over the union declares an unsearched task dir empty — the
+#: unreadable-vs-absent collapse this module forbids everywhere else.
+TASK_PROBE_DIRS = ("25 Tasks", "24 Tasks", "tasks")
+
+
 
 def fleet_task_dirs(cwd, vault_root=None):
     """Every task directory the FLEET resolves anchors in — the union, never a subset.
@@ -377,6 +387,26 @@ def fleet_task_dirs(cwd, vault_root=None):
     configured scan, which also reaches a configured vault living outside the root.
     """
     dirs = list(task_dirs_for(cwd, vault_root, FLEET_PROBE_DIRS))
+    for d in task_dirs_for(cwd, vault_root):
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def task_search_dirs(cwd, vault_root=None):
+    """Every directory a TASK page can live in — the root-wide task probe plus config.
+
+    The population `find_tasks` searches, and therefore the ONLY set an absence of a task
+    page may be proven over. `find_pages` covers the goal/topic half root-wide, so the two
+    lookups together span the same population `fleet_task_dirs` names.
+
+    ⚠️ **A proof narrower than this is a live-close hazard, and a proof wider than the
+    search is the same hazard from the other side.** `find_tasks` once used the configured
+    set alone while `unanchored_verdict` proved absence over `fleet_task_dirs`: a task page
+    in a vault `vault-cli` config does not name was never read, yet the wider list made the
+    absence look proven, so a live anchored session could be closed. The two must agree.
+    """
+    dirs = list(task_dirs_for(cwd, vault_root, TASK_PROBE_DIRS))
     for d in task_dirs_for(cwd, vault_root):
         if d not in dirs:
             dirs.append(d)
@@ -398,6 +428,19 @@ def _vault_for_cwd(cwd):
         cur = parent
 
 
+def own_vault_unsearched(cwd, dirs):
+    """True when the session's own configured vault contributed none of `dirs`.
+
+    The structural half of `resolution_refusal`'s two causes, factored out so a caller can
+    branch on it without matching the refusal's prose — a substring test on the detail text
+    silently inverts the close decision the day someone rewords the message.
+    """
+    own_vault = _vault_for_cwd(cwd)
+    return bool(own_vault) and not any(
+        d == own_vault or d.startswith(own_vault + os.sep) for d in dirs
+    )
+
+
 def resolution_refusal(session_id, cwd, vault_root=None):
     """`(refusal, detail)` for a session that resolved to no task — naming the cause.
 
@@ -407,18 +450,15 @@ def resolution_refusal(session_id, cwd, vault_root=None):
     nothing). The first sends the reader to the page; the second sends them to the config.
     """
     dirs = task_dirs_for(cwd, vault_root)
-    own_vault = _vault_for_cwd(cwd)
-    if own_vault and not any(
-        d == own_vault or d.startswith(own_vault + os.sep) for d in dirs
-    ):
+    if own_vault_unsearched(cwd, dirs):
         return (
             "task-unresolved",
-            f"searched {', '.join(dirs)}; {own_vault} not among them",
+            f"searched {', '.join(dirs)}; {_vault_for_cwd(cwd)} not among them",
         )
     return ("task-unresolved", f"no page carries {session_id}")
 
 
-def unanchored_verdict(session_id, cwd, vault_root=None):
+def unanchored_verdict(session_id, cwd, vault_root=None, searched=None):
     """`(token, detail)` for a session no page carries — `task-unresolved` or `unanchored-closed`.
 
     `resolution_refusal` names *why* nothing matched; this decides whether the absence is
@@ -427,7 +467,7 @@ def unanchored_verdict(session_id, cwd, vault_root=None):
     - the search was **incomplete** — the session's own vault contributed no `tasks_dir`,
       or no directory was searched at all — so the anchor may live where this process
       cannot read. That is `task-unresolved`, and it keeps refusing.
-    - the search was **complete** — every configured vault's `tasks_dir` was walked and
+    - the search was **complete** — every directory a task page can live in was walked and
       none carries the id. Nothing owns the session and nothing can resume it for, so a
       finished one may be closed.
 
@@ -435,21 +475,22 @@ def unanchored_verdict(session_id, cwd, vault_root=None):
     `vault-cli` config would read every session as unanchored and close the whole fleet in
     one tick.
 
-    ⚠️ **`fleet_task_dirs`, not `task_dirs_for`.** The proof must be as wide as the
-    population it quantifies over: a vault missing from `vault-cli` config contributes no
-    `tasks_dir`, so an absence proven over the configured set alone would declare a
-    session in an unconfigured vault unanchored — the unreadable-vs-absent collapse this
-    module forbids everywhere else.
+    ⚠️ **`searched` must be the directory list the CALLER's lookup actually covered — no
+    wider, no narrower.** Passing a wider list proves absences the search never tested;
+    passing a narrower one proves absences over a subset. `close-worker.py` searches
+    `task_search_dirs` (its `find_tasks`/`find_pages` pair) and takes the default;
+    `close-idle-tab.py` searches `fleet_task_dirs` and passes that explicitly.
 
-    Shared with `close-idle-tab.py`, and the same predicate `reap-idle-headless.py`
-    applies inline.
+    ⚠️ **The caller's own lookup must also have SUCCEEDED.** A failed grep is not an
+    absent anchor; every caller refuses on a lookup error before reaching here.
     """
-    _refusal, detail = resolution_refusal(session_id, cwd, vault_root)
-    if "not among them" in detail or not fleet_task_dirs(cwd, vault_root):
+    dirs = task_search_dirs(cwd, vault_root) if searched is None else list(searched)
+    if not dirs or own_vault_unsearched(cwd, dirs):
+        _refusal, detail = resolution_refusal(session_id, cwd, vault_root)
         return ("task-unresolved", detail)
     return (
         "unanchored-closed",
-        f"no page among every configured vault carries {session_id}; nothing owns it, "
+        f"no page among every directory searched carries {session_id}; nothing owns it, "
         "so nothing can resume it for",
     )
 
@@ -712,12 +753,20 @@ def find_tasks(session_id, cwd, vault_root=None):
     import them, so changing `_grep_task`'s return semantics in place would move the
     resume guard and the reap decision with it.
 
-    ⚠️ **`task_dirs_for`, not `fleet_task_dirs`.** The fleet set is the *anchor* population
-    — it includes `24 Goals` and `23 Goals` (`FLEET_PROBE_DIRS`) because an absence proof
-    must cover every page a session can be anchored by. Collecting from it here would read
-    a goal page as a task and take the task branch for a session that holds only a goal,
-    bypassing `find_pages`/`page_verdict` and their different terminal rule. Goals and
-    topics keep their own path below; this function is tasks only.
+    ⚠️ **`task_dirs_for` for the configured set, PLUS `TASK_PROBE_DIRS` root-wide — never
+    `fleet_task_dirs`.** The fleet set adds the goal directories (`24 Goals`, `23 Goals`),
+    and collecting from those would read a goal page as a task and take the task branch for
+    a session that holds only a goal, bypassing `find_pages`/`page_verdict` and their
+    different terminal rule. Goals and topics keep their own path below; this function is
+    tasks only.
+
+    ⚠️ **The root-wide probe is load-bearing, and its absence was a live defect.** The
+    configured set alone misses a task page in a vault that `vault-cli` config does not
+    name, while `find_pages` already probes the goal/topic names root-wide — so a
+    close could resolve nothing, conclude "proven absence" from the wider directory list,
+    and shut a live anchored session. Both lookups must cover the same population. The
+    union also keeps a configured vault whose `tasks_dir` uses a non-standard name
+    reachable.
 
     Both passes are scanned — unlike `find_task`, which stops at the first batch that
     answers — because a close needs the whole bound set, not one anchor. The cwd-derived
@@ -733,7 +782,7 @@ def find_tasks(session_id, cwd, vault_root=None):
     held, handed = [], []
     if not session_id:
         return held, handed, None
-    dirs = task_dirs_for(cwd, vault_root)
+    dirs = task_search_dirs(cwd, vault_root)
     if not dirs:
         return held, handed, None
     local = local_task_dirs(cwd)

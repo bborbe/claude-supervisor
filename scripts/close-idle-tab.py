@@ -176,7 +176,11 @@ def task_gate(task, today, session_id=None, cwd=None, lookup_error=None):
                 "no task page carries this session id as claude_session_id; absent "
                 "evidence is not evidence of a parked task",
             )
-        token, detail = close_worker.unanchored_verdict(session_id, cwd)
+        # `find_task_checked` searched `fleet_task_dirs`, so that is the population the
+        # absence may be proven over — pass it, never the narrower default.
+        token, detail = close_worker.unanchored_verdict(
+            session_id, cwd, searched=close_worker.fleet_task_dirs(cwd)
+        )
         if token == "task-unresolved":
             return (
                 "task-unresolved",
