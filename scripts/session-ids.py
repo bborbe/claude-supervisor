@@ -47,9 +47,27 @@ the two would drift silently in the direction that admits a phantom.
 Usage:
   session-ids.py --task <task-file>     # the id set, one per line, in frontmatter order
   session-ids.py --frontmatter <file>   # the same, for any file carrying frontmatter
+  session-ids.py --task <file> --owns <session-id>   # does this page OWN that session?
   session-ids.py --shape <anything>     # refused, exit 1
 
-Exit: 0 ok · 1 REJECTED · 2 unreadable/usage
+**`--owns` is the reap join's guard, and it exists because that join was performed in
+prose.** A fleet round resolved a live manager session to a COMPLETED task page and
+drafted a reap for it, because the page's BODY carried a sentence naming the manager's id
+— ``claude_session_id: c49298a8-…`` written as a routing instruction in `# Tasks`, 18 050
+bytes into the file. A stamp is a FRONTMATTER field; a body mention of the same shape is
+prose, and reading the two alike is the prose-extraction defect this script's id set
+already exists to remove. Measured 2026-11-23, round `1795464184.784114`:
+`A Worker That Dies Mid-Turn Becomes Unresumable.md` is `completed · done · 0 open` and
+stamps `7daf8265…` in frontmatter, while the reap was drafted for `c49298a8…` — a healthy
+goal manager at 2/3 SC, told it was finished and pointed at `/exit`.
+
+So the reap decision asks this script, per row: the page the sweep joined must itself
+carry the session in its **frontmatter** id set. A page whose frontmatter names a
+different session does not own the one being reaped, whatever its body says, and the row
+is `unverifiable` rather than `finished`. Pass the FULL id — a prefix matches nothing and
+therefore fails closed, which is the correct direction for a guard that gates a reap.
+
+Exit: 0 ok / OWNS · 1 REJECTED · 2 unreadable/usage · 3 NOT-OWNS
 """
 import argparse
 import importlib.util
@@ -70,6 +88,7 @@ PHANTOM_FIELDS = ("task_identifier",)
 
 EXIT_REJECTED = 1
 EXIT_UNREADABLE = 2
+EXIT_NOT_OWNS = 3
 
 
 def _load_sibling(name: str):
@@ -160,6 +179,15 @@ def main(argv=None) -> int:
         metavar="ANY",
         help="REFUSED — the prohibited mode; see the module docstring",
     )
+    ap.add_argument(
+        "--owns",
+        metavar="SESSION_ID",
+        help=(
+            "with --task: answer whether that page's FRONTMATTER id set names this "
+            "session. Prints OWNS (exit 0) or NOT-OWNS (exit 3). Full id only — a "
+            "prefix matches nothing and fails closed."
+        ),
+    )
     a = ap.parse_args(argv)
 
     if a.shape is not None:
@@ -192,6 +220,30 @@ def main(argv=None) -> int:
     if refuse:
         print(refuse, file=sys.stderr)
         return EXIT_REJECTED
+
+    if a.owns is not None:
+        # The reap join's guard. `--frontmatter` is refused here rather than silently
+        # accepted: the guard's question is whether the PAGE owns the session, and a
+        # file carrying no task identity is not that page.
+        if a.task is None:
+            print(
+                "UNREADABLE: --owns needs --task <file> — the guard asks whether a TASK "
+                "PAGE owns a session, so the page must be named as a task.",
+                file=sys.stderr,
+            )
+            return EXIT_UNREADABLE
+        want = a.owns.strip().strip("'\"").lower()
+        have = [i.strip().strip("'\"").lower() for i in ids]
+        if want in have:
+            print("OWNS")
+            return 0
+        print(
+            "NOT-OWNS page-stamp="
+            + (" ".join(ids) if ids else "(none)")
+            + f" session={a.owns.strip()}"
+        )
+        return EXIT_NOT_OWNS
+
     for i in ids:
         print(i)
     return 0
