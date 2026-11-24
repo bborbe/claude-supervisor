@@ -704,6 +704,19 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("owner", o.verdict)
         self.assertEqual("tm-1", o.session_id)
 
+    def test_an_unreadable_topic_page_is_cannot_tell_not_not_owner(self):
+        """A goal whose declaring-topic page cannot be read is unmeasurable, never `not-owner`.
+
+        The topic page may record a live manager; a read failure must not license a second
+        keeper. A broken symlink is used because the failure is real under root too — the
+        repo's documented test environment — where `chmod 000` does not deny root.
+        """
+        link = self.vault / "23 Topics" / "A Topic.md"
+        os.symlink(str(self.vault / "23 Topics" / "missing.md"), str(link))
+        o = self.o.of_subject(str(self.vault), "A Goal")
+        self.assertEqual("cannot-tell", o.verdict)
+        self.assertEqual("topic-unreadable", o.reason)
+
     def test_of_subject_on_a_missing_page_is_not_an_owner(self):
         o = self.o.of_subject(str(self.vault), "No Such Goal")
         self.assertEqual("not-owner", o.verdict)

@@ -572,6 +572,16 @@ def declares(text: str, goal: str) -> bool:
     return _crashed().declares(text, goal)
 
 
+class Unreadable(Exception):
+    """A topic folder or page could not be read while resolving a goal's declaring topic.
+
+    ⚠️ **Never answered as `not-owner`.** `not-owner` licenses a caller to hand the subject to
+    another keeper; answering it because a folder would not open is exactly the second writer
+    over a possibly live manager that this module exists to withhold. `crashed-managers.py`
+    raises the same way (`Refused`), so the census and the ownership verdict agree.
+    """
+
+
 def declaring_topic(vault: str, goal: str) -> str:
     """The name of the topic whose `## Goals` lists `goal`, or `""` when none does.
 
@@ -581,21 +591,28 @@ def declaring_topic(vault: str, goal: str) -> str:
 
     ⚠️ **Sorted, so the answer is deterministic** — `os.listdir` order is filesystem-dependent,
     and a goal declared by two topics would otherwise resolve to a different one per machine.
+
+    ⚠️ **Raises `Unreadable` on an unreadable folder or page**, rather than answering "no topic
+    declares it". A fail-open here would make `of_subject` resolve the goal against its own
+    (possibly absent) page and answer `not-owner`, which licenses a second keeper.
     """
     for root in SUBJECT_DIRS["topic"]:
         base = os.path.join(vault, root)
         try:
             entries = os.listdir(base)
-        except OSError:
-            continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # a genuinely absent topics folder declares nothing — a known absence
+        except OSError as err:
+            raise Unreadable(f"cannot list {base}: {err}") from err
         for entry in sorted(entries):
             if not entry.endswith(".md"):
                 continue
+            path = os.path.join(base, entry)
             try:
-                with open(os.path.join(base, entry), encoding="utf-8") as fh:
+                with open(path, encoding="utf-8") as fh:
                     text = fh.read()
-            except (OSError, UnicodeDecodeError):
-                continue
+            except (OSError, UnicodeDecodeError) as err:
+                raise Unreadable(f"cannot read {path}: {err}") from err
             if declares(text, goal):
                 return entry[: -len(".md")]
     return ""
@@ -615,7 +632,11 @@ def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = 
     # Resolve the declaring topic and answer as that topic; a goal in no topic keeps its own
     # resolution below, so this is backward-compatible when no topic declares it.
     if branch == "goal":
-        topic = declaring_topic(vault, subject)
+        try:
+            topic = declaring_topic(vault, subject)
+        except Unreadable as err:
+            loop, detail = loop_state(subject, branch, vault)
+            return Ownership(CANNOT_TELL, "topic-unreadable", NONE, loop, "", str(err))
         if topic:
             return of_subject(vault, topic, "topic")
     path, why = locate(vault, subject, branch, directory)

@@ -43,10 +43,20 @@ a sub-agent. A topic manager that takes that work into its own session stops swe
 goals, and the same starvation that stalled the fleet round for 2h30m on 2026-10-30 applies one
 tier down. The sweep is the product; everything else is delegated.
 
-1. **Drive each declared goal's rows.** For every declared goal, dispatch the **goal-drive act
-   leg** — `agents/goal-drive.md` — over that goal's task rows. It reaps a finished worker,
-   nudges a stuck one, and resumes a dead one under its own reaping/nudging rules; you dispatch
-   it per goal and carry its one-line verdict.
+1. **Run the goal round's sweep → drive for each declared goal.** There is no goal-manager
+   session, so this agent runs the goal round's two legs per goal:
+   - **Sweep** — dispatch `supervisor:goal-sweep-reader` for the goal: tracked-set path, the
+     topic's member goals, the `ListAgents` roster verbatim, vault root, mode `tick`, timestamp,
+     `today` (ISO `YYYY-MM-DD`), the four verdict families, the park threshold and the
+     prior-snapshot path. It writes the rendered payload (`--write-payload`) and the per-bucket
+     classification (`--write-buckets`) to the gate's own paths.
+   - **Save** — `manager-predispatch.py --vault "<vault-root>" --subject "<goal>" --save`
+     (exit **10** is success; never feed it a table on stdin).
+   - **Drive** — dispatch the **goal-drive act leg** (`agents/goal-drive.md`) with that
+     tracked-set path and classification. It reaps a finished worker, nudges a stuck one, and
+     resumes a dead one under its own reaping/nudging rules; carry its one-line verdict.
+   ⚠️ **The sweep is not optional** — a goal-drive leg dispatched without the tracked-set path
+   and classification has no population and drives nothing (the round-6 finding).
 
    ⚠️ **`topic-keepalive.py --branch goal` is retired.** It answers `goal-branch-retired`; do
    not call it, and do not keep a goal manager alive — there is none. The goal's rows are

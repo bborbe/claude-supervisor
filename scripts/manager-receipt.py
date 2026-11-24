@@ -149,18 +149,16 @@ STEPS = ("needs-you", "sweep", "readings", "drive")
 # The steps a TOPIC round owes, and the reason this tuple exists at all.
 #
 # `steps_for()` used to return `STEPS` for every non-fleet round, so one list judged a
-# goal round and a topic round alike. The two are not alike: a topic round has no drive
-# row at all (`commands/topic-drive.md` row 5 is *Keep alive*), so adding `drive` to
-# `STEPS` alone would print `skipped: drive` on every topic round forever — a permanent
-# false red, the same failure mode the `FLEET_STEPS` comment below names for the fleet
-# tier.
+# goal round and a topic round alike. The two are not alike — the fleet tier's own comment
+# below names the same failure mode — but since 2026-11-24 the topic round DOES owe a
+# `drive` leg: its row 5 dispatches `agents/topic-drive.md`, which drives each declared
+# goal's rows through `agents/goal-drive.md`. A topic round that skips that dispatch renders
+# a complete-looking table while driving nothing, so `drive` is a member here; dropping it
+# would be exactly the permanent-false-green this check exists to prevent.
 #
-# `sweep` stays IN this tuple even though the topic sweep leg records nothing yet. The
-# topic round does sweep every tick (`commands/topic-drive.md` row 3), so dropping the
-# step would let a round that skips its sweep report complete — this check's own defect,
-# one tier over. The missing record call is the topic sweep's to add, not this tuple's
-# to excuse.
-TOPIC_STEPS = ("needs-you", "readings", "sweep")
+# `sweep` stays IN this tuple. The topic round sweeps every tick (`commands/topic-drive.md`
+# row 3), so dropping the step would let a round that skips its sweep report complete.
+TOPIC_STEPS = ("needs-you", "readings", "sweep", "drive")
 
 # The fleet round's own two load-bearing steps, in their own tuple rather than appended
 # to STEPS. A goal or topic round owes no digest, so a shared tuple would make every such

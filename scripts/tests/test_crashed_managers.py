@@ -601,13 +601,11 @@ class CoverageTest(unittest.TestCase):
 
     def test_an_unreadable_topic_page_refuses_rather_than_cards(self):
         """On the live topic branch the page IS the subject: an unreadable page must refuse,
-        never read as "no page" and produce a card."""
-        topic_page = os.path.join(self.topics, "A Topic.md")
-        write(topic_page,
-              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n# Goals\n")
-        os.chmod(topic_page, 0o000)
-        self.addCleanup(os.chmod, topic_page, 0o644)
-        # `chmod 000` does not deny root, so in a root container the page IS readable.
+        never read as "no page" and produce a card. A broken symlink is used because the
+        failure is real under root too (the repo's documented test environment), where
+        `chmod 000` does not deny root."""
+        os.symlink(os.path.join(self.topics, "missing.md"),
+                   os.path.join(self.topics, "A Topic.md"))
         cm.cadence_state = lambda n, b: "STALE"
         cm.session_state = lambda s: "LIVE"
         try:

@@ -14,6 +14,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
 _CMD = os.path.join(_ROOT, "commands", "topic-drive.md")
 _STEP = os.path.join(_ROOT, "commands", "steps", "topic-drive-act.md")
+_AGENT = os.path.join(_ROOT, "agents", "topic-drive.md")
 
 
 def read(path):
@@ -31,6 +32,22 @@ class TopicRoundDispatchesItsActLeg(unittest.TestCase):
     def test_the_drive_step_dispatches_the_topic_drive_agent(self):
         text = read(_STEP)
         self.assertIn('subagent_type: "supervisor:topic-drive"', text)
+
+    def test_the_agent_produces_the_legs_inputs(self):
+        """The round-6 finding: the leg needs a tracked-set path and bucket classification,
+        and nothing in the topic tier produced them. The agent must run the goal sweep first."""
+        text = read(_AGENT)
+        self.assertIn("supervisor:goal-sweep-reader", text,
+                      "the act leg gets no sweep — it has no population to drive")
+        self.assertIn("--save", text)
+        self.assertIn("--write-payload", text)
+        self.assertIn("--write-buckets", text)
+        self.assertIn("goal-drive", text)
+
+    def test_the_drive_step_records_on_the_topic_tier(self):
+        text = read(_STEP)
+        self.assertIn("--tier topic", text)
+        self.assertIn("--step drive", text)
 
     def test_the_router_no_longer_runs_a_goal_keep_alive(self):
         text = read(_CMD)
