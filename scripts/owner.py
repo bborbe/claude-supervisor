@@ -551,17 +551,6 @@ def _crashed():
     return _CRASHED
 
 
-def goals_section(text: str) -> list:
-    """The lines under a page's `## Goals` heading, up to the next heading (any level).
-
-    Only this region declares membership — the same narrowness `crashed-managers.py` uses, so a
-    `# Progress` entry or a prose mention that merely names the goal is not read as a declaration.
-    ⚠️ **Delegated, not re-implemented** — `crashed-managers.py` owns the parser, and a second
-    copy would let the ownership verdict and the crash card disagree about membership.
-    """
-    return _crashed().goals_section(text)
-
-
 def declares(text: str, goal: str) -> bool:
     """Does this topic page list `[[<goal>]]` as a bullet in its `## Goals` section?
 

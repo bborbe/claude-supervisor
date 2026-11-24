@@ -93,34 +93,34 @@ file reaches you, it is a caller bug — say so and render no row for it.
    - **`⏸️ deferred`** — a `defer_date` still in the future. An overlay, not a bucket: it
      changes the cell and the offer, never the classification.
    - **`⏸️ blocked/hold`** — `status: hold` or `backlog`.
-   - **`🔄 progressing`** — a manager is live (`LIVE`).
-   - **`🚀 ready-to-start`** — startable (`phase` `planning`/`execution`), no live manager,
-     and not already filling one of the N slots.
-   - **`⚠️ problem`** — startable, no live manager, and no `claude_session_id` ever
-     recorded while the goal reads `in_progress` **at `phase: execution`** — the goal-tier
-     orphan shape, one level up.
+   - **`🔄 progressing`** — the topic manager is live, so it is driving this goal's rows.
+   - **`🚀 ready-to-start`** — startable (`phase` `planning`/`execution`) and the topic manager
+     is not live.
+   - **`⚠️ problem`** — startable, the topic manager is not live, and the topic page records no
+     `claude_session_id` while the goal reads `in_progress` **at `phase: execution`**.
    - **`UNVERIFIED`** — the liveness or cadence verdict was missing or `UNKNOWN`. ⚠️ **Never
      resolve an undecidable probe either way.**
 
-4. **Count the slots.** `n` goals with a live manager, against **N = 3**. Print
-   `<n>/3 slots` in the marker. ⚠️ **N is an inner bound; the fleet ceiling is the outer one
-   and is the caller's read** — you report the per-topic count and never the ceiling.
+4. **Count the goals.** There is no per-goal manager and no N cap: the topic manager drives
+   every goal it declares, so print `<n> goals` and, once, whether the manager is live.
+   ⚠️ **N = 3 was the goal-manager slot cap and retired with the tier** — do not print it.
 
 5. **Render the table** with `python3 .../scripts/box-table.py`, whose stdin contract is
    `${CLAUDE_PLUGIN_ROOT}/docs/sweep-output.md` — **that file is the single source for the
    frame, columns, widths and icons.** Never hand-draw the box.
 
-   **Manager cell** — the delimiter is the liveness verdict: `[<sid8>]` live, `(<sid8>)` not
-   live, `—` no id recorded, `UNVERIFIED` when the probe could not decide. The word after it
-   is the cadence (`OK` / `WORKING` / `LAPSED` / `IDLE` / `STALE` / `STOPPED` / `SLEEPING` / `INVALID`). `WORKING` is
-   a live manager mid-turn with no round inside the limit, never folded into `OK`. `IDLE` is
-   the work-signal verdict — armed and gate-watched, no round and no work — and it is
-   rendered as its own word, never folded into `OK`.
+   **Manager cell** — the **topic manager**, the same on every row (there is no per-goal
+   manager). The delimiter is the liveness verdict: `[<sid8>]` live, `(<sid8>)` not live, `—`
+   no id recorded, `UNVERIFIED` when the probe could not decide. The word after it is the
+   topic's cadence (`OK` / `WORKING` / `LAPSED` / `IDLE` / `STALE` / `STOPPED` / `SLEEPING` /
+   `INVALID`). `WORKING` is a live manager mid-turn with no round inside the limit, never
+   folded into `OK`. `IDLE` is the work-signal verdict — armed and gate-watched, no round and
+   no work — and it is rendered as its own word, never folded into `OK`.
 
-6. **Return one compact report** — the bucket counts, the goals with no manager (named, with
-   their rank position), any `UNVERIFIED` row with the missing input named, and the payload
-   path. ⚠️ **The rendered table does not ride the report** — it goes to the payload path;
-   the report carries the verdict about it. `≤ 1 KB`.
+6. **Return one compact report** — the bucket counts, the goals with no manager (named), any
+   `UNVERIFIED` row with the missing input named, and the payload path. ⚠️ **The rendered table
+   does not ride the report** — it goes to the payload path; the report carries the verdict
+   about it. `≤ 1 KB`.
 
 </process>
 
@@ -139,14 +139,13 @@ file reaches you, it is a caller bug — say so and render no row for it.
 `mode: tick` — marker first, box indented two spaces under it:
 
 ```text
-14:30 ✓ <Topic> — 6 goals · 2/3 slots · 2 🔄 · 1 ⌛ · 3 ✅ · no change
+14:30 ✓ <Topic> — 6 goals · manager live · 2 🔄 · 1 ⌛ · 3 ✅ · no change
   ┌──────────────────────────────┬─────────────┬──────────┬─────────┬──────────────┐
   │ Goal                         │ Status      │ Phase    │ Met     │ Manager      │
   ├──────────────────────────────┼─────────────┼──────────┼─────────┼──────────────┤
   │ <goal>                       │ 🔄 progress │ execution│ SC 2/4  │ [<sid8>] OK  │
   └──────────────────────────────┴─────────────┴──────────┴─────────┴──────────────┘
 
-Slots: 2/3 filled · held: <goal> (rank 4), <goal> (rank 5)
 Unmanaged: <goal> — startable, no manager recorded
 Unverified: <goal> — missing input: cadence verdict
 ```

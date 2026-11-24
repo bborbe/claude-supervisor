@@ -194,9 +194,10 @@ BRANCHES = ("", "fleet")
 def steps_for(branch: str, tier: str = "goal") -> tuple:
     """The steps a round of `branch`/`tier` owes.
 
-    No branch is the goal/topic tier, and `tier` separates those two: a goal round owes
-    `STEPS` (which carries `drive`), a topic round owes `TOPIC_STEPS` (which does not).
-    `tier` is deliberately NOT a `branch` value — see `TIERS`.
+    No branch is the goal/topic tier, and `tier` separates those two: both tuples carry
+    `drive` since 2026-11-24 (the topic round dispatches the act leg), and the tuples stay
+    separate so a future divergence has one home. `tier` is deliberately NOT a `branch` value
+    — see `TIERS`.
     """
     if branch == "fleet":
         return FLEET_STEPS
