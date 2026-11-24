@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.367.6
 
 - fix: **the drive leg no longer routes an orphan row to the removed `keepalive.md` row 5b.** `agents/fleet-drive.md:48` read *"cause `orphan` — **resume it** (`keepalive.md` 5b)"* — a live instruction to the driving model to resume through a step file the round no longer dispatches, in an agent the round runs **every** round. Found 2026-11-24 by a closure probe that was itself too narrow: the probe covered `commands/fleet-drive.md` and `agents/fleet-round.md` and printed nothing, because `agents/fleet-drive.md` was outside its file list and the reference is the bare `` `keepalive.md` `` form rather than `commands/steps/keepalive.md`. The disposition now says the resume belongs to the wrapper's keep-alive tick, which owns the leg end to end, and that a round resuming it would be the second writer the tick's claim guard exists to defend against. Change set: `agents/fleet-drive.md`, `CHANGELOG.md`.
 
