@@ -673,6 +673,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--branch", choices=BRANCHES, default="goal")
     ap.add_argument("--vault", help="the vault ROOT path, to read the subject's page")
     ap.add_argument("--dir", help="override the subject directory")
+    ap.add_argument("--topics-dir", help="override the topics directory (goal→declaring-topic resolution)")
     a = ap.parse_args(argv)
 
     # ⚠️ **Dispatch on PRESENCE, never on truthiness.** `--session ""` is what a spawned child
@@ -688,7 +689,7 @@ def main(argv: list[str]) -> int:
             return 2
         o = of_caller(a.session, a.vault, a.subject, a.branch, a.dir or "")
     elif a.subject and a.vault:
-        o = of_subject(a.vault, a.subject, a.branch, a.dir or "")
+        o = of_subject(a.vault, a.subject, a.branch, a.dir or "", a.topics_dir or "")
     elif a.session:
         o = of_session(a.session, a.subject or "", a.branch)
     else:

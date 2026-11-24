@@ -96,12 +96,34 @@ tier down. The sweep is the product; everything else is delegated.
 </error_handling>
 
 <output_format>
+Emit **every header, every round**, with `none` under an empty one. The topic receipt's
+`drive_shape` requires at least one of these headers, so a quiet round that omitted them
+would record a `drive` artifact the tail reads as `skipped: drive` — a healthy round reported
+red. `Reaped` is the header for a close; `To resume` / `To open` carry the lines the caller
+executes.
+
 ```text
-Goals: <n> declared
-Live: <goal> — driven, <k> rows OK
-Reaped: <goal> — <worker> finished, closed
-To resume: <goal> — <worker> — /supervisor:open --task "<task>"
-Unverified: <goal> — <reason>
+Reaped
+  <goal> — <worker> finished, closed
+  none
+To resume
+  <goal> — <worker> — /supervisor:open --task "<task>"
+  none
+To open
+  <goal> — <task> — /supervisor:open --task "<task>"
+  none
+Not resumed
+  <goal> — <worker> — <why>
+  none
+Escalated
+  <goal> — <why>
+  none
+Nudged
+  <goal> — <worker>
+  none
+Unverified
+  <goal> — <reason>
+  none
 ```
 </output_format>
 

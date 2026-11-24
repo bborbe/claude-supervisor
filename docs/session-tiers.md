@@ -90,7 +90,7 @@ a grep, plus a positive control that fires on `restart-worker.py` itself. It rea
 that reads it as *"parked / waiting-on-human"* and excludes it inverts the operator's mark; the
 parked class needs its own marker, never this field.
 
-⚠️ **The `-spawn` verbs are narrower than their tier, and that is not a contradiction.** `goal-spawn` starts a **worker**; `topic-spawn` no longer starts a goal manager (there is none) — its job is to keep a topic's declared goals driven, and a worker it opens goes through `/supervisor:open --task`. There is no `fleet-spawn` — a topic manager is opened on the **operator's initiative** and the fleet manager performs the open — and no `worker-spawn` at all.
+⚠️ **The `-spawn` verbs are narrower than their tier, and that is not a contradiction.** `goal-spawn` starts a **worker**; `topic-spawn` no longer starts a goal manager or a worker (there is none) — it is the topic manager ceiling check (`--topic-open`) only. There is no `fleet-spawn` — a topic manager is opened on the **operator's initiative** and the fleet manager performs the open — and no `worker-spawn` at all.
 
 | Tier | Manages | May start | Done condition |
 |---|---|---|---|
