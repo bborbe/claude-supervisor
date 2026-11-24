@@ -1664,21 +1664,26 @@ class KeepAliveVerdicts(unittest.TestCase):
     # --- the probe's own CLI, end to end in-process ----------------------------------
 
     def probe(self, liveness, loop, stamps=0, sid="sid-9"):
-        """Run `topic-keepalive.py main(... --receipt)` against a one-goal vault."""
+        """Run `topic-keepalive.py main(... --receipt)` against a one-topic vault.
+
+        The receipt is the TOPIC round's own: with the goal-manager tier retired there is no
+        goal manager to owe an outcome for, so the probe's subject is the topic itself.
+        """
         k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
         vault = os.path.join(self.arts.name, "vault")
-        os.makedirs(os.path.join(vault, "24 Goals"), exist_ok=True)
-        with open(os.path.join(vault, "24 Goals", f"{self.GOAL}.md"), "w", encoding="utf-8") as fh:
+        os.makedirs(os.path.join(vault, "23 Topics"), exist_ok=True)
+        with open(os.path.join(vault, "23 Topics", f"{self.topic}.md"), "w", encoding="utf-8") as fh:
             fh.write(f"---\nclaude_session_id: {sid}\n---\nbody\n")
         if stamps:
-            p = k.state_path(vault, self.GOAL)
+            p = k.state_path(vault, self.topic, "topic")
             with open(p, "w", encoding="utf-8") as fh:
                 json.dump({"resumes": [time.time() - 60] * stamps}, fh)
         k.session_verdict = lambda _sid: liveness
         k.cadence_state_detail = lambda _subject, _branch="goal", _vault="": (loop, "")
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = k.main(["--vault", vault, "--goal", self.GOAL, "--receipt", self.topic])
+            rc = k.main(["--vault", vault, "--subject", self.topic, "--branch", "topic",
+                         "--receipt", self.topic])
         return rc, out.getvalue().splitlines()
 
     def owed(self):

@@ -449,6 +449,22 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("goal-branch-retired", out.getvalue().splitlines()[0])
 
+    def test_a_bare_call_defaults_to_the_topic_branch_and_does_not_retire(self):
+        """The default branch is `topic`: a caller that omits `--branch` — the CI
+        KeepAliveVerdicts suite, `commands/topic-drive.md` — must get a verdict, never the
+        retirement. A default of `goal` made every such caller exit 1."""
+        self.page()
+        self.k.session_verdict = lambda sid: "LIVE"
+        self.k.cadence = lambda subject, branch="goal", vault="": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("OK", "")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic"])
+        lines = out.getvalue().splitlines()
+        self.assertEqual(0, rc)
+        self.assertNotEqual("goal-branch-retired", lines[0])
+        self.assertEqual("jump", lines[0])
+
 
 if __name__ == "__main__":
     unittest.main()

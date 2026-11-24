@@ -44,6 +44,7 @@ CALLERS = (
     ("flagged_rows", "flagged-rows.py"),
     ("open_queue", "open-queue.py"),
     ("topic_keepalive", "topic-keepalive.py"),
+    ("topic_spawn", "topic-spawn.py"),
 )
 
 #: The pages a path is asked about. `task` is strict, `goal`/`topic` tolerant, so each
@@ -81,6 +82,7 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
         rows = _load("flagged_rows", "flagged-rows.py")
         queue = _load("open_queue", "open-queue.py")
         keepalive = _load("topic_keepalive", "topic-keepalive.py")
+        spawn = _load("topic_spawn", "topic-spawn.py")
         shared = _load("flag_provenance", "flag_provenance.py")
 
         for kind in ("task", "goal", "topic"):
@@ -96,6 +98,8 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
                     if kind in ("goal", "topic"):
                         self.assertEqual(keepalive.flagged(block, kind), want,
                                          "topic-keepalive disagreed on %r" % block)
+                        self.assertEqual(spawn.flagged(block, kind), want,
+                                         "topic-spawn disagreed on %r" % block)
 
     def test_the_control_rows_are_not_vacuous(self):
         """Guard against a table where every row refuses — that would pass the loop above

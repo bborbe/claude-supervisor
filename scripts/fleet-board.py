@@ -292,11 +292,17 @@ class VaultIndex:
         return self.task_managed_by.get((task_title or "").lower())
 
     def topics_of(self, goal_title):
-        """The topics whose `## Goals` lists this goal, in order."""
-        return self.goal_topics.get((goal_title or "").lower(), [])
+        """The topics whose `## Goals` lists this goal, alphabetically.
+
+        ⚠️ **Sorted — one rule with `owner.declaring_topic`.** The ownership resolver takes the
+        first declaring topic; this board takes the first declaring topic that has a live
+        manager. An unsorted list (filesystem order) made both answers machine-dependent, so a
+        goal declared by two topics could parent differently on two hosts.
+        """
+        return sorted(self.goal_topics.get((goal_title or "").lower(), []))
 
     def topics_of_task(self, task_title):
-        """The topics whose `## Goals` lists this TASK directly, in order.
+        """The topics whose `## Goals` lists this TASK directly, alphabetically.
 
         The design's "a task whose task has no goal is managed by the nearest
         existing ancestor — its topic's manager if the task sits directly under a
@@ -304,7 +310,7 @@ class VaultIndex:
         entries that resolve to a goal page, so a task entry was dropped and the
         task fell through to the fleet manager.
         """
-        return self.task_topics.get((task_title or "").lower(), [])
+        return sorted(self.task_topics.get((task_title or "").lower(), []))
 
     def _normalized_titles(self):
         """`{normalized title: title}`, built once — the index is read-only.

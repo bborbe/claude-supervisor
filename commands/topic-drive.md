@@ -79,35 +79,14 @@ arm or the step file — do not act from memory of a previous round.
 
 ⚠️ **Row 0a — this topic manager's own liveness record — runs here each round, before the per-goal loop.** It records the **topic's** cadence, not a goal's; a loop-sourced subject would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`.
 
-⚠️ **First, drop every goal whose page reads a terminal `status`.** Row 4c may have just closed
-one, and `topic-keepalive.py` reads `claude_session_id` liveness and the armed-loop state, never
-`status` — so an `ABSENT` manager of a finished goal would reach `resume`, and
-`/supervisor:open --goal` would re-open it. Skip the row here; the probe cannot see it.
+⚠️ **The per-goal keep-alive is retired (2026-11-24).** There is no goal-manager session to
+keep alive or resume: the topic manager drives each declared goal's rows directly through the
+goal-drive act leg (`agents/topic-drive.md`, `agents/goal-drive.md`). `topic-keepalive.py
+--branch goal` answers `goal-branch-retired`; never call it, and never record a goal manager's
+verdict.
 
-For **each remaining goal this topic declares**, one call decides:
-
-```bash
-python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/topic-keepalive.py \
-  --vault "<vault-root>" --goal "<goal>" --receipt "<topic>"
-```
-
-Record each outcome per `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-keepalive-outcome.md`.
-N gates a start, never a resume.
-
-The **first line is the verdict**:
-
-| verdict | meaning | what this round does |
-|---|---|---|
-| `jump` | live session, loop `OK`/`WORKING`/`LAPSED`/`IDLE`/`UNARMED`| render the row. ⚠️ `UNARMED` = never armed, not lost; lever is `/supervisor:goal-loop`, never `restart`. ⚠️ `WORKING`/`LAPSED`/`IDLE`: render, never restart |
-| `open` | no recorded id, **and the goal carries an operator-set flag** | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
-| `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a round may not create one |
-| `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
-| `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
-| `leave` | `STOPPED`, `SLEEPING` (date-gated), or `stand-down` (flag cleared) | nothing, except `stand-down`: run the printed `--stop` |
-| `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |
-| `crash-loop` | 3 resumes in 30 min already spent | print `⚠️ MANAGER CRASH-LOOP: <goal>` and escalate **once** to the operator |
-
-⚠️ **Never a fresh spawn while a recorded id exists** — a second manager is the double-writer failure `commands/open.md` § Step 2C prevents. ⚠️ **`UNKNOWN`/`AMBIGUOUS`/`MALFORMED` are cannot-tell, never death** — an undecidable probe read as death hands a working session a second writer.
+⚠️ **Drop every goal whose page reads a terminal `status` before driving it** — the goal-drive
+act leg reaps a finished worker; it never re-opens a closed goal.
 
 ## Start — retired with the goal-manager tier
 

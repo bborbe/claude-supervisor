@@ -10,16 +10,12 @@ When: every tick
 
 Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure for this half.
 
-1. **Take the readings first — before the dispatch, never batched with it.** For every goal
-   the topic declares, read its page's `claude_session_id` and probe it:
-
-   ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py --check <id>
-   ```
-
-   Record `<goal> → LIVE | ABSENT | UNKNOWN`. ⚠️ **`UNKNOWN` is not `ABSENT`** — an
-   unreadable source cannot prove a session dead, so it stays `UNKNOWN` and the row renders
-   `UNVERIFIED`.
+1. **Take the readings first — before the dispatch, never batched with it.** ⚠️ **The
+   goal-manager tier is retired** — there is no per-goal manager session, so a goal page's
+   `claude_session_id` is **not** probed. Read each declared goal's `status`, `phase` and
+   `# Success Criteria` tally from its page, and the topic manager's own session from the
+   topic page. (A goal page that still carries a `claude_session_id` carries a retired
+   record; ignore it.)
 
 2. **Take the cadence verdicts the same way, and before the dispatch for the same reason.**
 

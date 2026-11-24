@@ -416,8 +416,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
     ap.add_argument("--subject", "--goal", dest="subject", required=True,
                     help="the goal or topic name; --goal is kept as an alias")
-    ap.add_argument("--branch", choices=("goal", "topic"), default="goal",
-                    help="which tier's subject page and cadence to read (default: goal)")
+    ap.add_argument("--branch", choices=("goal", "topic"), default="topic",
+                    help="which tier's subject page and cadence to read (default: topic — "
+                         "the goal branch is retired, so an omitted flag must not retire)")
     ap.add_argument("--dir", help="override the subject directory (a vault may rename "
                                   "`24 Goals` / `23 Topics`; read it from `vault-cli config list`)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
@@ -441,9 +442,6 @@ def main(argv: list[str]) -> int:
         print("the goal-manager tier is merged into the topic tier; drive the goal's rows "
               "with agents/goal-drive.md — this keeper serves --branch topic only.")
         return 1
-    if a.receipt and a.branch != "goal":
-        ap.error("--receipt records a goal manager's verdict; it needs --branch goal")
-
     now = a.now if a.now is not None else time.time()
     vault = os.path.abspath(os.path.expanduser(a.vault))
     opener = "--topic" if a.branch == "topic" else "--goal"

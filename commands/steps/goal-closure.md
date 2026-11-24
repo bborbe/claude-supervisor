@@ -203,7 +203,7 @@ Once every page in the set has been examined, and **only** if the SUBJECT itself
 exited 0 on it):
 
 - **Goal branch** — report the verdict, record the stand-down with
-  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --stop --subject "<subject>" --branch topic`,
+  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --stop --subject "<subject>" --branch goal`,
   and end the tick without re-arming. A loop that keeps arming on a completed subject reports
   work where there is none.
 - **Topic branch** — report the verdict and **hand off to the tail**: do not stop here, because

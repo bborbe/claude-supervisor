@@ -312,12 +312,12 @@ output — the fleet table.
 ## The manager boundary
 
 - **A manager is never started in a worker session.** ⚠️ **Starting a *topic* manager is the
-  operator's decision — the fleet manager performs the open. A *goal* manager is started by
-  its topic manager, or by the fleet manager when no topic manager is live** —
+  operator's decision — the fleet manager performs the open. There is no goal-manager session
+  to start: the tier is merged into the topic tier (2026-11-24)** —
   `docs/fleet-surface.md` § Session roles is the canonical statement.
 - **A manager does not execute a worker's task.** It spawns, drives, answers and reaps
   workers; the task's work happens in the worker's own session.
-- **A goal manager starts or resumes a worker on a vault task with `/supervisor:open --task`** —
+- **The goal scope (the topic manager's goal round) starts or resumes a worker on a vault task with `/supervisor:open --task`** —
   the path that reads the task's recorded session and writes it back. Reach for a bare
   goal-spawn (a direct `spawn_agent` call) **only** when the brief has no task file;
   `commands/goal-spawn.md` is the canonical statement of that split. ⚠️ **This is a rule
@@ -330,7 +330,7 @@ output — the fleet table.
   dispatch. ⚠️ And it is a **policy, not a gate** — the same caveat `docs/fleet-surface.md`
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
-- **A goal manager files the task an undriven SC/DoD box needs, and routes it by its door** —
+- **The goal round files the task an undriven SC/DoD box needs, and routes it by its door** —
   goal-round row 4d (`commands/steps/goal-plan-undriven.md`, decision in
   `scripts/undriven-plan.py`). At most one file per goal per tick. A two-way row it filed
   is approved `--by manager` and opens through the ordinary `To open` path; a one-way row

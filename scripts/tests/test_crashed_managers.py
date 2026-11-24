@@ -215,6 +215,65 @@ class EvaluateTest(unittest.TestCase):
         self.assertTrue(row["card"], row["reason"])
 
 
+class RetainedPredicateTest(unittest.TestCase):
+    """The two goal-coverage predicates survive (the keeper census and the ownership resolver
+    use the declaring-topic map); `evaluate` no longer consults them, so they are pinned here
+    directly rather than through a card that can no longer fire."""
+
+    def setUp(self):
+        cm._MEMO.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = os.path.join(self.tmp.name, "vault")
+        self.goals = os.path.join(self.vault, "24 Goals")
+        self.topics = os.path.join(self.vault, "23 Topics")
+        os.makedirs(self.goals)
+        os.makedirs(self.topics)
+        self._cadence = cm.cadence_state
+        self._verdict = cm.session_state
+        self.addCleanup(lambda: (setattr(cm, "cadence_state", self._cadence),
+                                 setattr(cm, "session_state", self._verdict)))
+
+    def topic(self, name, goals, sid="bbbb2222-0000-0000-0000-000000000000"):
+        body = "\n".join(f"- [ ] [[{g}]]" for g in goals)
+        write(os.path.join(self.topics, f"{name}.md"),
+              f"---\nclaude_session_id: {sid}\npage_type: topic\n---\n\n## Goals\n\n{body}\n")
+
+    def test_topic_manager_live_is_true_for_a_live_armed_topic_that_declares_the_goal(self):
+        self.topic("A Topic", ["A Goal"])
+        cm.session_state = lambda sid: "LIVE"
+        cm.cadence_state = lambda name, branch: "OK"
+        self.assertTrue(cm.topic_manager_live(self.vault, "A Goal"))
+
+    def test_topic_manager_live_is_false_when_the_topics_loop_is_stopped(self):
+        """A LIVE session with a STOPPED loop covers nothing — `/supervisor:stop` disarms it."""
+        self.topic("A Topic", ["A Goal"])
+        cm.session_state = lambda sid: "LIVE"
+        cm.cadence_state = lambda name, branch: "STOPPED"
+        self.assertFalse(cm.topic_manager_live(self.vault, "A Goal"))
+
+    def test_topic_manager_live_is_false_when_no_topic_declares_the_goal(self):
+        self.topic("A Topic", ["Another Goal"])
+        cm.session_state = lambda sid: "LIVE"
+        cm.cadence_state = lambda name, branch: "OK"
+        self.assertFalse(cm.topic_manager_live(self.vault, "A Goal"))
+
+    def test_unkept_topics_maps_dead_to_resume_and_undecidable_to_cannot_tell(self):
+        self.topic("Dead Topic", ["G"], sid="dead0000-0000-0000-0000-000000000000")
+        self.topic("Unknown Topic", ["G"], sid="unk00000-0000-0000-0000-000000000000")
+        self.topic("Live Topic", ["G"], sid="live0000-0000-0000-0000-000000000000")
+        cm.session_state = lambda sid: (
+            "ABSENT" if sid.startswith("dead")
+            else "UNKNOWN" if sid.startswith("unk")
+            else "LIVE")
+        self.assertEqual(cm.unkept_topics(self.vault), {
+            "Dead Topic": "resume", "Unknown Topic": "cannot-tell"})
+
+    def test_unkept_topics_skips_a_topic_with_no_session_id(self):
+        self.topic("No Sid Topic", ["G"], sid="")
+        self.assertEqual(cm.unkept_topics(self.vault), {})
+
+
 class SubjectsTest(unittest.TestCase):
     def setUp(self):
         cm._MEMO.clear()
