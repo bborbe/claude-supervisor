@@ -2,7 +2,7 @@
 # No `name:` field, deliberately — a command takes its name from its filename. The
 # frontmatter rule for `commands/*.md` (`agent-cmd/command-frontmatter`) requires
 # `description`, `allowed-tools` and `argument-hint` and nothing else.
-description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start only flagged goals, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
+description: Arm the TOPIC manager loop — drive the goals this topic declares directly (no goal-manager tier), keep their workers alive, print the goal table (default 15 min, `--interval`). The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Drives goals, never workers.
 allowed-tools:
   - Task
   - Read
@@ -174,7 +174,7 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   the goal-drive act leg for every goal it declares (keeping each goal's workers alive), and it
   may open a worker with `/supervisor:open --task`.
 - **Never present a manager-owned action as an `AskUserQuestion` option.** Opening or
-  resuming an approved goal manager, readying a row, repairing a page box — execute them,
+  resuming an approved goal, readying a row, repairing a page box — execute them,
   then report them as a table line. The modal is reserved for operator-only decisions
   (`phase: todo` approval, a production-touching or irreversible action, a TDR), and even
   those reach the operator as an attention-board card carrying a `--dedup-key`.
@@ -204,7 +204,7 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `# Completion Gate`** — a topic is the only level carrying both sets
   (`docs/session-progress.md:37`). When every box in both sets reads `[x]`, the round runs
   `vault-cli topic complete "<topic>" --vault "<vault>"` and quotes its verdict. A member goal is
-  never closed from this tier — its goal manager closes it, after moving its open tasks out
+  never closed from this tier — the topic round closes it after moving its open tasks out
   (goal-closure.md § Step 0b);
   the execution, the terminal guard and the `--vault` contract live in
   `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are not restated here. ⚠️ **Tick a
