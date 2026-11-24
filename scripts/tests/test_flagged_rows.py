@@ -520,6 +520,69 @@ class RowGate(unittest.TestCase):
         self.assertEqual(row["branch"], "resume")
 
 
+class SessionlessRowUpgrade(unittest.TestCase):
+    """A row with no `claude_session_id` whose name a live session carries is LIVE.
+
+    Measured 2026-11-24: the SC3 probe scored
+    `private-personal/topic/Scratch Keep-Alive Fixture` as `liveness: none`,
+    `branch: create` while the tick reported the same row `already-live`. The probe
+    never asked, because `liveness_of(None)` returns `none` for a sessionless row and
+    the name-based upgrade accepted only `ABSENT`. The guard now covers `none` too, and
+    this class pins both the new arm and the control that keeps it honest.
+    """
+
+    def row(self, managers, sid=None, no_liveness=False, liveness_cache=None):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        front = ("page_type: task\nflag: true\nflag_set_by: operator\nrole: agent\n"
+                 "status: in_progress")
+        if sid is not None:
+            front += "\nclaude_session_id: %s" % sid
+        path = os.path.join(tasks, "A Task.md")
+        write(path, page(front))
+        cfg = {"tasks_dir": "25 Tasks", "path": root,
+               "worker_launcher": "/opt/l/cc-v", "claude_script": "/opt/l/cc"}
+        ctx = {"today": "2026-11-24", "role_map": ROLE_MAP,
+               "template_root": tempfile.mkdtemp(), "no_liveness": no_liveness,
+               "no_pane": True, "no_wait": True,
+               "managers": (None if managers is None else set(managers)),
+               "topic_map": {}, "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": dict(liveness_cache or {}),
+               "fleet_sid": None}
+        row, reason = fr.row_for("v", cfg, "task", path, ctx)
+        self.assertIsNone(reason)
+        return row
+
+    def test_a_sessionless_row_with_a_live_namesake_is_live(self):
+        # The regression: `none` (no session id) plus a live name must upgrade to LIVE,
+        # not read `create` and re-open a row the tick already reports open.
+        row = self.row({"A Task"})
+        self.assertEqual(row["liveness"], "LIVE")
+        self.assertEqual(row["branch"], "skip")
+
+    def test_a_sessionless_row_with_no_live_namesake_still_creates(self):
+        # The control: no name hit, so the row is genuinely unowned and must open.
+        row = self.row(set())
+        self.assertEqual(row["liveness"], "none")
+        self.assertEqual(row["branch"], "create")
+
+    def test_an_absent_row_with_a_live_namesake_still_upgrades(self):
+        # The original arm, kept: a dead declared id with a live namesake is LIVE.
+        stale = "a88b5438-86fc-4aec-954f-39488ffa02a7"
+        row = self.row({"A Task"}, sid=stale,
+                       liveness_cache={("row", stale): "ABSENT"})
+        self.assertEqual(row["liveness"], "LIVE")
+        self.assertNotEqual(row["branch"], "resume")
+
+    def test_no_liveness_never_upgrades(self):
+        # `--no-liveness` sets `managers` empty and reads every row `none`; the upgrade
+        # must not fire, or a fixture run would claim liveness it never read.
+        row = self.row(set(), no_liveness=True)
+        self.assertEqual(row["liveness"], "none")
+        self.assertEqual(row["branch"], "create")
+
+
 class OwnerResolution(unittest.TestCase):
     """`docs/fleet-surface.md` § Which manager owns a subject — the rungs, in order.
 
