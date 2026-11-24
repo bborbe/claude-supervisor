@@ -38,8 +38,8 @@ def load():
     return mod
 
 
-GOAL_PAGE = """---
-page_type: goal
+TOPIC_PAGE = """---
+page_type: topic
 status: in_progress
 phase: execution
 claude_session_id: {sid}
@@ -54,7 +54,7 @@ class KeepAliveTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.vault = pathlib.Path(self.tmp.name) / "vault"
-        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "23 Topics").mkdir(parents=True, exist_ok=True)
         self.k = load()
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
@@ -76,8 +76,8 @@ class KeepAliveTest(unittest.TestCase):
          self.k.flagged_path) = self._orig
 
     def page(self, sid="sid-1", extra=""):
-        (self.vault / "24 Goals" / "A Goal.md").write_text(
-            GOAL_PAGE.format(sid=sid, extra=extra), encoding="utf-8"
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            TOPIC_PAGE.format(sid=sid, extra=extra), encoding="utf-8"
         )
 
     def run_keepalive(self, live="ABSENT", cadence="OK", argv=()):
@@ -86,11 +86,12 @@ class KeepAliveTest(unittest.TestCase):
         self.k.cadence_state_detail = lambda subject, branch="goal", vault="": (cadence, "")
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = self.k.main(["--vault", str(self.vault), "--goal", "A Goal", *argv])
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                              "--branch", "topic", *argv])
         return rc, out.getvalue().splitlines()
 
     def seed(self, stamps):
-        path = self.k.state_path(str(self.vault), "A Goal")
+        path = self.k.state_path(str(self.vault), "A Topic", "topic")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"resumes": stamps}, fh)
 
@@ -147,7 +148,8 @@ class KeepAliveTest(unittest.TestCase):
         self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
-            self.k.main(["--vault", str(self.vault), "--goal", "A Goal"])
+            self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                         "--branch", "topic"])
         self.assertEqual(["sid-new"], seen)
 
     def test_no_recorded_id_without_a_flag_is_held(self):
@@ -170,7 +172,7 @@ class KeepAliveTest(unittest.TestCase):
     # ------------------------------------------------ unflag → stand-down (M1)
 
     def _marker(self):
-        return self.state / "goal--a-goal.flagged"
+        return self.state / "topic--a-topic.flagged"
 
     def test_an_admitted_flag_writes_the_stand_down_marker(self):
         """The marker is what makes "cleared" distinguishable from "never flagged"."""
@@ -245,7 +247,8 @@ class KeepAliveTest(unittest.TestCase):
     def run_actor(self, flag, sid="sid-1"):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = self.k.main(["--vault", str(self.vault), "--goal", "A Goal", flag, sid])
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                              "--branch", "topic", flag, sid])
         return rc, out.getvalue().splitlines()
 
     def test_a_second_writer_cannot_take_the_same_claim(self):
@@ -268,7 +271,7 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual("claimed", out[0])
         # Read-only: a probe that took or released a claim would block the real resume.
         self.assertTrue(os.path.exists(
-            self.k.claim_path(str(self.vault), "A Goal", "sid-1")))
+            self.k.claim_path(str(self.vault), "A Topic", "sid-1", "topic")))
 
     def test_a_probe_that_decides_resume_writes_no_claim(self):
         self.page()
@@ -276,14 +279,14 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("resume", out[0])
         self.assertFalse(os.path.exists(
-            self.k.claim_path(str(self.vault), "A Goal", "sid-1")))
+            self.k.claim_path(str(self.vault), "A Topic", "sid-1", "topic")))
 
     def test_a_stale_claim_does_not_block_a_resume(self):
         # Past CLAIM_TTL the claim is stale: a resume that never landed must not become a
         # permanent block, which would recreate the gap this guard closes.
         self.page()
-        self.k.state_path(str(self.vault), "A Goal")  # creates the directory
-        claim = self.k.claim_path(str(self.vault), "A Goal", "sid-1")
+        self.k.state_path(str(self.vault), "A Topic", "topic")  # creates the directory
+        claim = self.k.claim_path(str(self.vault), "A Topic", "sid-1", "topic")
         with open(claim, "w", encoding="utf-8") as fh:
             fh.write("0")
         os.utime(claim, (0, 0))
@@ -302,22 +305,22 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("recorded", out[0])
         self.assertFalse(os.path.exists(
-            self.k.claim_path(str(self.vault), "A Goal", "sid-1")))
+            self.k.claim_path(str(self.vault), "A Topic", "sid-1", "topic")))
         rc, again = self.run_keepalive(live="ABSENT")
         self.assertEqual("resume", again[0])
 
     def test_an_unsafe_session_id_never_escapes_the_state_dir(self):
         # The id is page content, so it is untrusted: a separator would otherwise name a path.
         self.page()
-        p = self.k.claim_path(str(self.vault), "A Goal", "../../etc/passwd")
+        p = self.k.claim_path(str(self.vault), "A Topic", "../../etc/passwd", "topic")
         self.assertNotIn("etc/passwd", p)
         self.assertTrue(p.startswith(str(self.state)), p)
         self.assertTrue(p.endswith(".claim"), p)
 
     def test_a_stale_claim_is_reclaimed_and_leaves_no_leftover(self):
         self.page()
-        self.k.state_path(str(self.vault), "A Goal")
-        claim = self.k.claim_path(str(self.vault), "A Goal", "sid-1")
+        self.k.state_path(str(self.vault), "A Topic", "topic")
+        claim = self.k.claim_path(str(self.vault), "A Topic", "sid-1", "topic")
         with open(claim, "w", encoding="utf-8") as fh:
             fh.write("0")
         os.utime(claim, (0, 0))
@@ -334,19 +337,20 @@ class KeepAliveTest(unittest.TestCase):
         self.k.session_verdict = lambda sid: "ABSENT"
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = self.k.main(["--vault", str(self.vault), "--goal", "A Goal",
-                              "--record-resume", "sid-1"])
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                              "--branch", "topic", "--record-resume", "sid-1"])
         self.assertEqual(1, rc)
         self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
-        self.assertFalse(os.path.exists(self.k.state_path(str(self.vault), "A Goal")))
+        self.assertFalse(os.path.exists(
+            self.k.state_path(str(self.vault), "A Topic", "topic")))
 
 
     # --- the topic branch -----------------------------------------------------
 
     def test_topic_branch_reads_the_topic_directory_and_writes_its_own_cap(self):
-        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics").mkdir(parents=True, exist_ok=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
-            GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
+            TOPIC_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
         )
         self.k.session_verdict = lambda sid: "LIVE"
         self.k.cadence = lambda subject, branch="goal", vault="": "OK"
@@ -362,9 +366,13 @@ class KeepAliveTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.k.state_path(str(self.vault), "A Topic", "goal")))
 
     def test_topic_branch_never_reads_a_goal_page(self):
-        # The goal page exists and the topic page does not: a topic read must not
-        # fall back to it, or a lapsed goal manager would be reported as a topic one.
-        self.page()
+        # A goal page of the same name exists and the topic page does not: a topic read
+        # must not fall back to it, or a lapsed goal manager would be reported as a
+        # topic one. (The goal branch is retired, but a stale goal page may remain.)
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            TOPIC_PAGE.replace("page_type: topic", "page_type: goal").format(
+                sid="sid-1", extra=""), encoding="utf-8")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--subject", "A Goal",
@@ -375,9 +383,9 @@ class KeepAliveTest(unittest.TestCase):
     def test_topic_branch_names_the_topic_opener_on_an_open(self):
         # Master's `open`/`open-unflagged` split applies to the topic branch too: a topic
         # page with no recorded id is an OPEN, and rule 4 makes that the operator's act.
-        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics").mkdir(parents=True, exist_ok=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
-            GOAL_PAGE.format(sid="", extra="flag: true\nflag_set_by: operator\n"),
+            TOPIC_PAGE.format(sid="", extra="flag: true\nflag_set_by: operator\n"),
             encoding="utf-8"
         )
         self.k.cadence = lambda subject, branch="goal", vault="": "OK"
@@ -391,9 +399,9 @@ class KeepAliveTest(unittest.TestCase):
         self.assertIn("/supervisor:open --topic", lines[1])
 
     def test_topic_branch_refuses_an_unflagged_open(self):
-        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics").mkdir(parents=True, exist_ok=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
-            GOAL_PAGE.format(sid="", extra=""), encoding="utf-8")
+            TOPIC_PAGE.format(sid="", extra=""), encoding="utf-8")
         self.k.cadence = lambda subject, branch="goal", vault="": "OK"
         self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("OK", "")
         out = io.StringIO()
@@ -403,9 +411,9 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual("open-unflagged", out.getvalue().splitlines()[0])
 
     def test_a_topic_stand_down_is_left_alone(self):
-        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics").mkdir(parents=True, exist_ok=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
-            GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
+            TOPIC_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
         )
         self.k.session_verdict = lambda sid: "LIVE"
         self.k.cadence = lambda subject, branch="goal", vault="": "STOPPED"
@@ -429,11 +437,17 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("jump", out[0])
 
-    def test_the_goal_alias_still_works(self):
+    def test_the_goal_branch_is_retired(self):
+        """The goal-manager tier is merged into the topic tier (2026-11-24): `--branch goal`
+        answers `goal-branch-retired` and exits non-zero, so a caller still passing it is
+        stopped loudly rather than silently resuming a goal manager that no longer exists."""
         self.page()
-        rc, out = self.run_keepalive(live="ABSENT")
-        self.assertEqual(0, rc)
-        self.assertEqual("resume", out[0])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                              "--branch", "goal"])
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-branch-retired", out.getvalue().splitlines()[0])
 
 
 if __name__ == "__main__":
