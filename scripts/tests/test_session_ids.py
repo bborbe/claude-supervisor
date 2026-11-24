@@ -253,5 +253,75 @@ class TestCliSpellings(Frontmatter):
         self.assertEqual(out, "")
 
 
+DEAD = "7daf8265-7a51-4703-ac9e-9fc026942c08"
+LIVE = "c49298a8-8fad-4dfa-85dc-b401c994969d"
+
+EXIT_NOT_OWNS = 3
+
+
+class TestOwns(Frontmatter):
+    """`--owns`: the reap join's guard.
+
+    The regression this pins is measured, not hypothetical. Round `1795464184.784114`
+    reaped a healthy goal manager (`c49298a8`, 2/3 SC) because a COMPLETED task page
+    (`A Worker That Dies Mid-Turn Becomes Unresumable.md`, frontmatter stamp `7daf8265`)
+    mentioned `claude_session_id: c49298a8-…` in its `# Tasks` prose. The join was
+    performed in prose, so a body mention read as a stamp.
+    """
+
+    def test_owns_when_the_frontmatter_names_the_session(self):
+        path = self.write(f"---\nclaude_session_id: {LIVE}\n---\nbody\n")
+        code, out, err = run("--task", path, "--owns", LIVE)
+        self.assertEqual(code, EXIT_OK, err)
+        self.assertEqual(out.strip(), "OWNS")
+
+    def test_not_owns_when_the_frontmatter_names_another_session(self):
+        path = self.write(f"---\nclaude_session_id: {DEAD}\n---\nbody\n")
+        code, out, err = run("--task", path, "--owns", LIVE)
+        self.assertEqual(code, EXIT_NOT_OWNS, err)
+        self.assertIn("NOT-OWNS", out)
+        self.assertIn(DEAD, out, "the page's own stamp must be named")
+        self.assertIn(LIVE, out, "and the session it was asked about")
+
+    def test_a_body_mention_never_confers_ownership(self):
+        """THE regression: the measured specimen's exact shape.
+
+        Frontmatter stamps the dead id; the body carries the live manager's id as a
+        routing instruction. A frontmatter read must answer NOT-OWNS — the body is
+        prose, and reading it as a stamp is what reaped a healthy manager.
+        """
+        path = self.write(
+            f"---\nclaude_session_id: {DEAD}\nstatus: completed\nphase: done\n---\n"
+            f"# Tasks\n\n- [x] Confirm end to end — routed to the goal manager "
+            f"(`claude_session_id: {LIVE}` on [[Claim Scheduling Is Hardened]]).\n"
+        )
+        code, out, err = run("--task", path, "--owns", LIVE)
+        self.assertEqual(code, EXIT_NOT_OWNS, err)
+        self.assertIn(DEAD, out)
+
+    def test_owns_is_satisfied_by_a_metrics_sessions_id(self):
+        """A resumed row may carry only `metrics_sessions` — the whole set counts."""
+        path = self.write(
+            f"---\nclaude_session_id: {DEAD}\n"
+            f"metrics_sessions:\n    - session_id: {LIVE}\n---\nbody\n"
+        )
+        code, out, err = run("--task", path, "--owns", LIVE)
+        self.assertEqual(code, EXIT_OK, err)
+        self.assertEqual(out.strip(), "OWNS")
+
+    def test_a_prefix_fails_closed(self):
+        """A prefix matches nothing, and nothing means no reap — the safe direction."""
+        path = self.write(f"---\nclaude_session_id: {LIVE}\n---\nbody\n")
+        code, out, err = run("--task", path, "--owns", LIVE[:8])
+        self.assertEqual(code, EXIT_NOT_OWNS, err)
+
+    def test_owns_needs_a_task_not_a_bare_frontmatter_read(self):
+        path = self.write(f"---\nclaude_session_id: {LIVE}\n---\nbody\n")
+        code, out, err = run("--frontmatter", path, "--owns", LIVE)
+        self.assertEqual(code, EXIT_UNREADABLE)
+        self.assertIn("UNREADABLE:", err)
+        self.assertEqual(out, "")
+
+
 if __name__ == "__main__":
     unittest.main()
