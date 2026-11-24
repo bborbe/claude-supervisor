@@ -333,6 +333,36 @@ class CensusTest(unittest.TestCase):
         self.assertIn("MISMATCH live session stray-sid (private-personal-xx) — no page records it",
                       text)
 
+    def test_a_stamped_goal_page_emits_no_mismatch_and_an_unstamped_one_does(self):
+        """The goal-page bind's census producer: a stamped page is attributed, an unstamped
+        one is not — and the second half is the control that proves the first can fail.
+
+        A goal manager opened by the flagged tick used to depend on its own start turn for
+        the page stamp, and that turn can never run (measured 2026-11-23 20:51:49, the
+        start command was not sent). The endpoint now writes the stamp before its start
+        commands run, so the census must attribute the manager; without the control, the
+        absence assertion below would pass on a census that never looked.
+        """
+        self.write("topic", "T", sid="topic-sid", body="## Goals\n- [[G]]\n\n## Non-goals\n")
+        self.write("goal", "G", sid="goal-sid")
+        self.alive("topic-sid", "T Manager")
+        self.alive("goal-sid", "G Manager")
+        self.states[("topic", "T")] = "OK"
+        self.states[("goal", "G")] = "OK"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertNotIn("no page records it", text)
+        self.assertNotIn('MISMATCH page "G"', text)
+
+        # Positive control: the same live session, with the goal page's id removed, IS
+        # reported. The exit code is not asserted — the goal row reads unkept on its own
+        # account once its keeper is gone, which is a different claim from the attribution
+        # this case pins.
+        self.write("goal", "G")
+        _code, text = self.run_census("--no-card")
+        self.assertIn("MISMATCH live session goal-sid (G Manager) — no page records it", text)
+
     def test_notify_pins_the_attention_argv(self):
         """A wrong producer id or kind posts no card while every other test stays green."""
         seen = {}
