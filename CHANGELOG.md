@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.367.3
 
 - fix: **the keep-alive leg's hand-back is its last emission.** `agents/fleet-keepalive-actor.md` now names `SubagentHandback` as the terminal action and forbids anything after it — no `SendMessage`, no heading, summary or trailing note — and states that a late-landing digest is corrected by calling the tool again rather than by messaging `main` and narrating. Measured 2026-11-24 on session `893df368`: 36 of 39 keepalive delegates complied (410–779 B), and 2 of the 3 over-cap ones were exactly this shape — a correction `SendMessage` plus a prose `Final state` block naming the round, which `check-handback-size.py` counts under its `ROUND_ID` regex (1 973 B and 1 109 B). The `<output_format>` "two artifacts" framing and its separate Digest paragraph are gone: the digest is written by `fleet-legs.py` and never reported, so the hand-back is the only thing the leg emits. Change set: `agents/fleet-keepalive-actor.md`, `CHANGELOG.md`.
 
