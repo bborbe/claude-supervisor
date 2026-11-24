@@ -97,6 +97,11 @@ class _NudgeBase(unittest.TestCase):
         self.tasks.mkdir(parents=True)
         self.vault_config = self.tmp / "vault-config.json"
         self.vault_config.write_text("[]")
+        # The park-event store, isolated per test: the gate reads
+        # `PARK_EVENT_STATE_DIR`, and a test that inherited the live one would
+        # pass or fail on whatever watches this host happens to hold.
+        self.park_events = self.tmp / "park-events"
+        self.park_events.mkdir()
         for sid in all_fixture_sids():
             self.anchor(sid)
 
@@ -113,6 +118,7 @@ class _NudgeBase(unittest.TestCase):
         env["MANAGER_LIVENESS_STATE_DIR"] = str(self.mgr_state)
         env["SUPERVISOR_VAULTS_ROOT"] = str(self.vaults)
         env["SUPERVISOR_VAULT_CONFIG"] = str(self.vault_config)
+        env["PARK_EVENT_STATE_DIR"] = str(self.park_events)
         env.update(extra_env or {})
         payload = data if isinstance(data, str) else json.dumps(data)
         return subprocess.run(
@@ -569,6 +575,64 @@ class AnchorTest(_NudgeBase):
         lines = self.nudges(p)
         self.assertEqual(len(lines), 1, p.stdout)
         self.assertIn("--task 'Handed Off'", lines[0])
+
+
+class ParkEventTest(_NudgeBase):
+    """A row a live park watch already covers is never a nudge candidate.
+
+    `park-event.py register` bound the wait to an anchored task and wrote a
+    `defer_date`; the park the nudge exists to enforce is DONE, so re-asking every
+    round only burns a model turn for the whole wait. The gate must exclude a FUTURE
+    park event and leave an EXPIRED one a candidate — a blanket exclusion would stop
+    nudging rows whose recheck has passed, which is the defect it must not add.
+    """
+
+    FUTURE = "cccccccc-0000-4000-8000-0000000000f1"
+    EXPIRED = "cccccccc-0000-4000-8000-0000000000e1"
+
+    def setUp(self):
+        super().setUp()
+        self.anchor(self.FUTURE)
+        self.anchor(self.EXPIRED)
+
+    def park(self, sid, recheck, slug):
+        record = dict(event=slug, slug=slug, recheck_at=recheck,
+                      created_at="2026-11-01T00:00:00Z",
+                      sessions=[sid], tasks={sid: "Task"}, repark_count=0)
+        (self.park_events / f"{slug}.json").write_text(json.dumps(record))
+
+    def test_a_future_park_event_is_excluded_and_an_expired_one_still_nudges(self):
+        """The two-row fixture: a FUTURE recheck is excluded with its reason
+        recorded; a PAST recheck is still a candidate. A blanket `if the sid has
+        any park_event: exclude` skips the expired row too and fails this box."""
+        self.park(self.FUTURE, "2999-01-01T00:00:00Z", "future-park")
+        self.park(self.EXPIRED, "2000-01-01T00:00:00Z", "expired-park")
+        p = self.run_script(reading([
+            row(sid=self.FUTURE, bucket="idle", quiet=31),
+            row(sid=self.EXPIRED, bucket="idle", quiet=31),
+        ]), "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual([n["sid"] for n in data["nudges"]], [self.EXPIRED], p.stdout)
+        self.assertEqual(data["park_event"], 1, p.stdout)
+        self.assertEqual(data["park_event_rows"][0]["sid"], self.FUTURE)
+        self.assertIn("2999-01-01", data["park_event_rows"][0]["recheck"])
+        self.assertIn("1 park-event-skipped", data["summary"])
+
+    def test_the_skip_applies_to_a_watching_row_too(self):
+        """The gate is on the candidate population, not the `idle` bucket alone:
+        a `watching` row covered by a future park watch is excluded and counted."""
+        self.park(self.FUTURE, "2999-06-01T12:00:00Z", "future-park")
+        p = self.run_script(reading([row(sid=self.FUTURE, bucket="watching", quiet=31)]))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.nudges(p), [], p.stdout)
+        self.assertIn("1 park-event-skipped", p.stdout)
+
+    def test_a_row_with_no_park_event_is_still_nudged(self):
+        """Positive control: the gate must not suppress a row with no park watch."""
+        p = self.run_script(reading([row(sid=OVER, bucket="watching", quiet=31)]))
+        self.assertEqual(len(self.nudges(p)), 1, p.stdout)
+        self.assertIn("0 park-event-skipped", p.stdout)
 
 
 if __name__ == "__main__":
