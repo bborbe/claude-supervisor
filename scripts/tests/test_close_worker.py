@@ -1115,7 +1115,9 @@ class TestUnanchoredVerdict(unittest.TestCase):
     def _reset_cache(self):
         """`_vault_config()` memoises per process, so a rewritten config needs a reset."""
         cw._VAULT_CONFIG = None
+        cw._VAULT_CONFIG_ERROR = None
         self.addCleanup(setattr, cw, "_VAULT_CONFIG", None)
+        self.addCleanup(setattr, cw, "_VAULT_CONFIG_ERROR", None)
 
     def _write_config(self, payload):
         with open(self.config, "w", encoding="utf-8") as handle:
@@ -1136,6 +1138,21 @@ class TestUnanchoredVerdict(unittest.TestCase):
         self._write_config([])
         self._reset_cache()
         token, _detail = cw.unanchored_verdict(SID, self.tmp, empty_root)
+        self.assertEqual(token, "task-unresolved")
+
+    def test_an_unreadable_config_is_unresolved(self):
+        """A failed config read must not pass for 'no vault declares a tasks_dir'.
+
+        With `{}` the own-vault check goes vacuously False while the root-wide task probe
+        still yields directories, so a session anchored in a configured vault's
+        non-standard `tasks_dir` would be declared unanchored and closed.
+        """
+        broken = os.path.join(self.tmp, "broken.json")
+        with open(broken, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        with mock.patch.dict(os.environ, {"SUPERVISOR_VAULT_CONFIG": broken}):
+            self._reset_cache()
+            token, _detail = cw.unanchored_verdict(SID, self.tasks, self.vaults)
         self.assertEqual(token, "task-unresolved")
 
     def test_a_different_sessions_page_does_not_anchor_this_one(self):

@@ -137,6 +137,9 @@ VAULTS_ROOT = os.path.expanduser(
 #: A `tasks_dir` of `None` means the vault declares no task directory and contributes none.
 _VAULT_CONFIG = None
 
+#: Why that read failed, or `None` when it succeeded. Read via `vault_config_error()`.
+_VAULT_CONFIG_ERROR = None
+
 
 def _vault_config():
     """`{realpath(vault path): tasks_dir}` from the vault config.
@@ -146,13 +149,16 @@ def _vault_config():
     `find_task` docstring records. The source is `vault-cli config list --output json`, or
     `SUPERVISOR_VAULT_CONFIG` (a JSON file with the same shape) when set — the override a
     drill or a test needs, for the same reason the registry and the vault root carry one.
-    A failed or unreadable config yields `{}` — every vault then contributes nothing,
-    which is the fail-closed direction.
+    A failed or unreadable config yields `{}` — every vault then contributes nothing.
+    ⚠️ That is NOT the fail-closed direction for a close: `vault_config_error()` records why,
+    and `unanchored_verdict` refuses while it is set, because with `{}` the own-vault check
+    goes vacuous while the root-wide task probe still yields directories.
     """
-    global _VAULT_CONFIG
+    global _VAULT_CONFIG, _VAULT_CONFIG_ERROR
     if _VAULT_CONFIG is not None:
         return _VAULT_CONFIG
     config = {}
+    error = None
     override = os.environ.get("SUPERVISOR_VAULT_CONFIG")
     try:
         if override:
@@ -163,15 +169,35 @@ def _vault_config():
                 ["vault-cli", "config", "list", "--output", "json"],
                 capture_output=True, text=True, timeout=10,
             )
-            entries = json.loads(proc.stdout or "[]") if proc.returncode == 0 else []
+            if proc.returncode != 0:
+                error = f"`vault-cli config list` exited {proc.returncode}"
+                entries = []
+            else:
+                entries = json.loads(proc.stdout or "[]")
         for entry in entries:
             path = entry.get("path")
             if path:
                 config[os.path.realpath(path)] = entry.get("tasks_dir")
-    except Exception:
+    except Exception as exc:
         config = {}
+        error = f"vault config unreadable ({exc})"
     _VAULT_CONFIG = config
+    _VAULT_CONFIG_ERROR = error
     return config
+
+
+def vault_config_error():
+    """Why the vault config could not be read, or `None` when it was read successfully.
+
+    ⚠️ **A failed read is not an empty config, and a destructive path must tell them
+    apart.** With `{}` the own-vault check in `unanchored_verdict` is always False, so the
+    only completeness guard left is a non-empty directory list — which the root-wide task
+    probe satisfies on any real machine. A session anchored in a configured vault whose
+    `tasks_dir` uses a non-standard name is reachable ONLY through the config, so it would
+    be declared unanchored and closed. Measured 2026-11-24 in PR review.
+    """
+    _vault_config()
+    return _VAULT_CONFIG_ERROR
 
 # The terminal statuses. A deferred row is the other accepted end state: the operator has
 # said "not now", which is a decision rather than an absence of one.
@@ -485,6 +511,15 @@ def unanchored_verdict(session_id, cwd, vault_root=None, searched=None):
     absent anchor; every caller refuses on a lookup error before reaching here.
     """
     dirs = task_search_dirs(cwd, vault_root) if searched is None else list(searched)
+    # ⚠️ Checked BEFORE the directory list: a config that could not be read yields `{}`,
+    # which makes `own_vault_unsearched` vacuously False while the root probe keeps `dirs`
+    # non-empty. Order is the guard here.
+    error = vault_config_error()
+    if error:
+        return (
+            "task-unresolved",
+            f"{error}; absence is unproven, so nothing is closed",
+        )
     if not dirs or own_vault_unsearched(cwd, dirs):
         _refusal, detail = resolution_refusal(session_id, cwd, vault_root)
         return ("task-unresolved", detail)
