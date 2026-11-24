@@ -44,12 +44,18 @@ goals, and the same starvation that stalled the fleet round for 2h30m on 2026-10
 tier down. The sweep is the product; everything else is delegated.
 
 1. **Run the goal round's sweep → drive for each declared goal.** There is no goal-manager
-   session, so this agent runs the goal round's two legs per goal:
+   session, so this agent runs the goal round's legs per goal:
+   - **Readings** — `round-readings.py --subject "<goal>" --vault "<vault-root>" --tracked
+     "<the tracked-set path>" --interval <seconds>`. The sweep reader **refuses** without a
+     per-goal readings file (measured 2026-11-24: `REFUSED: no readings for <goal> — … does
+     not exist`), so this call is not optional.
    - **Sweep** — dispatch `supervisor:goal-sweep-reader` for the goal: tracked-set path, the
      topic's member goals, the `ListAgents` roster verbatim, vault root, mode `tick`, timestamp,
      `today` (ISO `YYYY-MM-DD`), the four verdict families, the park threshold and the
      prior-snapshot path. It writes the rendered payload (`--write-payload`) and the per-bucket
-     classification (`--write-buckets`) to the gate's own paths.
+     classification (`--write-buckets`) to the gate's own paths. ⚠️ **The bucket vocabulary
+     comes from the vault's `65 Runbooks/Manager Session.md`** — a vault without it cannot
+     classify, and the reader refuses by name rather than falling back.
    - **Save** — `manager-predispatch.py --vault "<vault-root>" --subject "<goal>" --save`
      (exit **10** is success; never feed it a table on stdin).
    - **Drive** — dispatch the **goal-drive act leg** (`agents/goal-drive.md`) with that
