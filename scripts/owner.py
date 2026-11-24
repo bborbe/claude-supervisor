@@ -571,7 +571,7 @@ class Unreadable(Exception):
     """
 
 
-def declaring_topic(vault: str, goal: str) -> str:
+def declaring_topic(vault: str, goal: str, directory: str = "") -> str:
     """The name of the topic whose `## Goals` lists `goal`, or `""` when none does.
 
     After the goal-manager tier is removed (docs/session-tiers.md), a goal's manager is the
@@ -581,11 +581,16 @@ def declaring_topic(vault: str, goal: str) -> str:
     ⚠️ **Sorted, so the answer is deterministic** — `os.listdir` order is filesystem-dependent,
     and a goal declared by two topics would otherwise resolve to a different one per machine.
 
+    ⚠️ **Honours a `directory` override** — the same one `of_subject` accepts, so a caller
+    pointing at a non-default topics folder is resolved against that folder and not the
+    default one.
+
     ⚠️ **Raises `Unreadable` on an unreadable folder or page**, rather than answering "no topic
     declares it". A fail-open here would make `of_subject` resolve the goal against its own
     (possibly absent) page and answer `not-owner`, which licenses a second keeper.
     """
-    for root in SUBJECT_DIRS["topic"]:
+    roots = [directory] if directory else SUBJECT_DIRS["topic"]
+    for root in roots:
         base = os.path.join(vault, root)
         try:
             entries = os.listdir(base)
@@ -622,12 +627,19 @@ def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = 
     # resolution below, so this is backward-compatible when no topic declares it.
     if branch == "goal":
         try:
-            topic = declaring_topic(vault, subject)
+            topic = declaring_topic(vault, subject, directory)
         except Unreadable as err:
             loop, detail = loop_state(subject, branch, vault)
             return Ownership(CANNOT_TELL, "topic-unreadable", NONE, loop, "", str(err))
         if topic:
-            return of_subject(vault, topic, "topic")
+            return of_subject(vault, topic, "topic", directory)
+        # ⚠️ **No topic declares it, and the goal page's `claude_session_id` is a RETIRED
+        # goal-manager stamp.** Resolving `owner` from it would point a caller at a session
+        # that no longer exists (the goal tier is merged into the topic tier). The goal falls
+        # to the fleet manager, so answer `not-owner` — never `owner` on the retired stamp.
+        loop, detail = loop_state(subject, branch, vault)
+        return Ownership(NOT_OWNER, "no-declaring-topic", NONE, loop, "",
+                         detail or "no topic declares this goal; the fleet manager takes it")
     path, why = locate(vault, subject, branch, directory)
     if why:
         loop, detail = loop_state(subject, branch, vault)

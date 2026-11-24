@@ -684,10 +684,10 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("", self.o.page_path(str(self.vault), "A Goal", "fleet"))
 
     def test_of_subject_resolves_the_page_and_its_loop(self):
-        self.page("A Goal", "claude_session_id: gm-1\n")
-        o = self.o.of_subject(str(self.vault), "A Goal")
+        self.page("A Topic", "claude_session_id: tm-1\n", directory="23 Topics")
+        o = self.o.of_subject(str(self.vault), "A Topic", "topic")
         self.assertEqual("owner", o.verdict)
-        self.assertEqual("gm-1", o.session_id)
+        self.assertEqual("tm-1", o.session_id)
 
     def test_a_goal_declared_by_a_topic_resolves_to_the_topic_manager(self):
         """After the goal tier is removed, a goal's manager is the topic that declares it.
@@ -701,6 +701,30 @@ class PageResolutionTest(unittest.TestCase):
             encoding="utf-8")
         self.page("A Goal", "claude_session_id: gm-stale\n")
         o = self.o.of_subject(str(self.vault), "A Goal")
+        self.assertEqual("owner", o.verdict)
+        self.assertEqual("tm-1", o.session_id)
+
+    def test_a_goal_with_no_declaring_topic_is_never_owned_by_its_retired_stamp(self):
+        """A goal in no topic falls to the fleet manager.
+
+        Its own `claude_session_id` is a RETIRED goal-manager stamp; resolving `owner` from it
+        would point a caller at a session that no longer exists.
+        """
+        self.page("A Goal", "claude_session_id: gm-live-looking\n")
+        o = self.o.of_subject(str(self.vault), "A Goal")
+        self.assertNotEqual("owner", o.verdict)
+        self.assertEqual("not-owner", o.verdict)
+        self.assertEqual("no-declaring-topic", o.reason)
+
+    def test_declaring_topic_honours_the_directory_override(self):
+        """A caller pointing at a non-default topics folder is resolved against that folder."""
+        (self.vault / "custom-topics").mkdir()
+        (self.vault / "custom-topics" / "A Topic.md").write_text(
+            "---\nclaude_session_id: tm-1\n---\n## Goals\n\n- [[A Goal]]\n", encoding="utf-8")
+        self.assertEqual("A Topic",
+                         self.o.declaring_topic(str(self.vault), "A Goal", "custom-topics"))
+        self.page("A Goal", "claude_session_id: gm-stale\n")
+        o = self.o.of_subject(str(self.vault), "A Goal", "goal", "custom-topics")
         self.assertEqual("owner", o.verdict)
         self.assertEqual("tm-1", o.session_id)
 
@@ -720,18 +744,18 @@ class PageResolutionTest(unittest.TestCase):
     def test_of_subject_on_a_missing_page_is_not_an_owner(self):
         o = self.o.of_subject(str(self.vault), "No Such Goal")
         self.assertEqual("not-owner", o.verdict)
-        self.assertIn("no page", o.detail)
+        self.assertEqual("no-declaring-topic", o.reason)
 
     def test_an_unreadable_page_is_cannot_tell_not_not_owner(self):
-        """THE INVARIANT THIS MODULE EXISTS FOR.
+        """THE INVARIANT THIS MODULE EXISTS FOR, pinned on the live topic branch.
 
         The page exists and may record a live manager; we simply could not read it. Answering
         `not-owner` would license a second keeper over a possibly-live manager — the very
         double-writer the module is written to withhold.
         """
-        path = self.page("A Goal", "claude_session_id: gm-1\n")
-        path.write_bytes(b"---\nclaude_session_id: gm-1\n\xff\xfe not utf-8\n---\n")
-        o = self.o.of_subject(str(self.vault), "A Goal")
+        path = self.page("A Topic", "claude_session_id: tm-1\n", directory="23 Topics")
+        path.write_bytes(b"---\nclaude_session_id: tm-1\n\xff\xfe not utf-8\n---\n")
+        o = self.o.of_subject(str(self.vault), "A Topic", "topic")
         self.assertEqual("cannot-tell", o.verdict)
         self.assertEqual("page-unreadable", o.reason)
         self.assertIn("unreadable", o.detail)
@@ -741,8 +765,8 @@ class PageResolutionTest(unittest.TestCase):
         # ⚠️ The page is a DIRECTORY named `<subject>.md`, not a `chmod 000` file: a
         # mode-based fixture passes as root, and the review container runs as root, so
         # `make test` would fail there while passing here.
-        (self.vault / "24 Goals" / "A Goal.md").mkdir()
-        o = self.o.of_subject(str(self.vault), "A Goal")
+        (self.vault / "23 Topics" / "A Topic.md").mkdir()
+        o = self.o.of_subject(str(self.vault), "A Topic", "topic")
         self.assertEqual("cannot-tell", o.verdict)
         self.assertEqual("page-unreadable", o.reason)
 
@@ -753,9 +777,9 @@ class PageResolutionTest(unittest.TestCase):
         A `chmod 000` directory would be listable as root, and the review container runs as
         root, so that fixture would pass here and fail there.
         """
-        not_a_dir = self.vault / "24 Goals" / "A Goal.md"
+        not_a_dir = self.vault / "23 Topics" / "A Topic.md"
         not_a_dir.write_text("x", encoding="utf-8")
-        o = self.o.of_subject(str(self.vault), "A Goal", "goal", str(not_a_dir))
+        o = self.o.of_subject(str(self.vault), "A Topic", "topic", str(not_a_dir))
         self.assertEqual("cannot-tell", o.verdict)
         self.assertEqual("page-unreadable", o.reason)
 
@@ -769,7 +793,7 @@ class PageResolutionTest(unittest.TestCase):
         # The complement of the two above: absence that was ESTABLISHED stays not-owner.
         o = self.o.of_subject(str(self.vault), "No Such Goal")
         self.assertEqual("not-owner", o.verdict)
-        self.assertEqual("no-session", o.reason)
+        self.assertEqual("no-declaring-topic", o.reason)
 
 
 class CallerAnchoredTest(unittest.TestCase):
