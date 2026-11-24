@@ -689,6 +689,21 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("owner", o.verdict)
         self.assertEqual("gm-1", o.session_id)
 
+    def test_a_goal_declared_by_a_topic_resolves_to_the_topic_manager(self):
+        """After the goal tier is removed, a goal's manager is the topic that declares it.
+
+        The goal page's own `claude_session_id` is the OLD goal-manager stamp and must be
+        ignored — the topic page's session is the answer, so a stale goal field cannot keep a
+        dead manager looking live.
+        """
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            "---\nclaude_session_id: tm-1\n---\n## Goals\n\n- [[A Goal]] — x\n",
+            encoding="utf-8")
+        self.page("A Goal", "claude_session_id: gm-stale\n")
+        o = self.o.of_subject(str(self.vault), "A Goal")
+        self.assertEqual("owner", o.verdict)
+        self.assertEqual("tm-1", o.session_id)
+
     def test_of_subject_on_a_missing_page_is_not_an_owner(self):
         o = self.o.of_subject(str(self.vault), "No Such Goal")
         self.assertEqual("not-owner", o.verdict)

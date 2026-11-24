@@ -530,6 +530,72 @@ def page_path(vault: str, subject: str, branch: str = "goal", directory: str = "
     return locate(vault, subject, branch, directory)[0]
 
 
+def goals_section(text: str) -> list:
+    """The lines under a page's `## Goals` heading, up to the next heading (any level).
+
+    Only this region declares membership — the same narrowness `crashed-managers.py` uses, so a
+    `# Progress` entry or a prose mention that merely names the goal is not read as a declaration.
+    """
+    lines = []
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            inside = stripped.lower() == "## goals"
+            continue
+        if inside:
+            lines.append(line)
+    return lines
+
+
+def declares(text: str, goal: str) -> bool:
+    """Does this topic page list `[[<goal>]]` as a bullet in its `## Goals` section?
+
+    Only a `-`/`*` bullet whose FIRST wikilink is the goal counts, case-insensitively — a prose
+    removal note in the section is not a declaration (the rule `crashed-managers.py` measured).
+    """
+    wanted = goal.casefold()
+    for line in goals_section(text):
+        if not line.lstrip().startswith(("- ", "* ")):
+            continue
+        start = line.find("[[")
+        if start == -1:
+            continue
+        ends = [i for i in (line.find("]]", start), line.find("|", start),
+                           line.find("#", start)) if i != -1]
+        if not ends:
+            continue
+        if line[start + 2:min(ends)].strip().casefold() == wanted:
+            return True
+    return False
+
+
+def declaring_topic(vault: str, goal: str) -> str:
+    """The name of the topic whose `## Goals` lists `goal`, or `""` when none does.
+
+    After the goal-manager tier is removed (docs/session-tiers.md), a goal's manager is the
+    topic manager that declares it. This is the only place that resolves that edge, so the
+    ownership verdict and the tier that drives the goal cannot disagree.
+    """
+    for root in SUBJECT_DIRS["topic"]:
+        base = os.path.join(vault, root)
+        try:
+            entries = os.listdir(base)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.endswith(".md"):
+                continue
+            try:
+                with open(os.path.join(base, entry), encoding="utf-8") as fh:
+                    text = fh.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if declares(text, goal):
+                return entry[: -len(".md")]
+    return ""
+
+
 def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = "") -> Ownership:
     """Resolve a subject named by the caller, reading its page and its loop.
 
@@ -540,6 +606,13 @@ def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = 
     session is `not-owner` (`no-session`), and only a folder that is genuinely absent is a known
     absence.
     """
+    # A goal is owned by the topic manager that declares it (the goal tier is removed).
+    # Resolve the declaring topic and answer as that topic; a goal in no topic keeps its own
+    # resolution below, so this is backward-compatible when no topic declares it.
+    if branch == "goal":
+        topic = declaring_topic(vault, subject)
+        if topic:
+            return of_subject(vault, topic, "topic")
     path, why = locate(vault, subject, branch, directory)
     if why:
         loop, detail = loop_state(subject, branch, vault)
