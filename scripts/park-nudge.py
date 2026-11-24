@@ -74,6 +74,18 @@ instead of a `"<your anchored task>"` placeholder. No anchor counts
 `<n> unanchored-skipped`; a FAILED search counts `<n> anchor-unknown` and nudges
 nothing, because a search that errored proves no absence.
 
+⚠️ A ROW WITH A REGISTERED FUTURE PARK EVENT IS NEVER A CANDIDATE. `park-event.py
+register` already bound the wait to an anchored task and wrote a `defer_date`, so the
+park this nudge exists to enforce is DONE — re-asking every round burns a turn for the
+whole wait. The row is excluded by its park event, and the skip is recorded as a
+`park_event_rows` entry (sid + future recheck instant) plus a `<n> park-event-skipped`
+count, so a round that skipped a parked row can be told from one with nothing to draft.
+The gate sits BEFORE the unmeasured-`watching_min` skip, so a row the instrument cannot
+measure this round is still excluded by its park event rather than falling through to
+the nudge. ⚠️ An EXPIRED park event is NOT a park: the recheck has passed, the row is
+due, and it stays a candidate — a blanket `if the sid has any park_event: exclude`
+skips the due row too and is the defect this gate must not introduce.
+
 ⚠️ HANDED-OVER PATHS ARE THE MARKETPLACE CLONES. `park-event.py` and
 `session-self-exit.py` are named by their unversioned marketplace paths, never by
 this process's cache dir (the SENDER's loaded version) or the newest installed
@@ -152,6 +164,31 @@ def threshold_seconds() -> int:
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return int(mod.PARK_THRESHOLD_SECONDS)
+
+
+def future_park_parks() -> dict:
+    """`sid -> future recheck instant` for every row a LIVE park watch covers.
+
+    Reads `park-event.py`'s store through its own API — `all_watches` and
+    `is_future` — never a second copy of the path or the instant parse. A watch
+    whose `recheck_at` is in the PAST is not a park (the row is due), so it is
+    omitted and the row stays a candidate. `all_watches` returns corrupt record
+    names rather than raising, so a corrupt record is skipped, not allowed to
+    unpark every session it named.
+    """
+    spec = importlib.util.spec_from_file_location("park_event", PARK_EVENT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    parks = {}
+    records, _corrupt = mod.all_watches()
+    for record in records:
+        recheck = record.get("recheck_at") or ""
+        if not mod.is_future(recheck):
+            continue
+        for sid in record.get("sessions") or []:
+            if sid:
+                parks[sid] = recheck
+    return parks
 
 
 def liveness_module():
@@ -366,7 +403,7 @@ def same_episode(prev: dict, row: dict, quiet: int) -> bool:
 
 
 def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str,
-             tier=None, anchor=None):
+             tier=None, anchor=None, parks=None):
     """The decision over one reading. Returns (nudges, next_ledger, stats).
 
     ⚠️ **Not pure once `anchor` is supplied** — that resolver shells out to
@@ -390,10 +427,15 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str,
 
     `anchor` is `sid -> (task name | None, error | None)`. `None` disables the anchor
     gate and leaves the placeholder task name in the text — only for a caller that
-    has resolved anchors itself; the CLI always passes one."""
+    has resolved anchors itself; the CLI always passes one.
+
+    `parks` is `sid -> future recheck instant` for every row a live park watch
+    covers. `None` disables the park-event gate — only for a caller that has already
+    excluded parked rows; the CLI always passes one."""
     nudges, nxt = [], {}
     stats = dict(watching=0, over=0, suppressed=0, within=0, manager=0, manager_rows=[],
-                 status_skipped=0, unanchored=0, anchor_unknown=0)
+                 status_skipped=0, unanchored=0, anchor_unknown=0,
+                 park_event=0, park_event_rows=[])
     limit_min = limit_s // 60
     for row in sessions:
         bucket = row.get("bucket")
@@ -434,6 +476,21 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str,
         # idle row is still in the candidate population, so its entry stays.
         if bucket == "idle" and row.get("status") != "idle":
             stats["status_skipped"] += 1
+            if prev:
+                nxt[sid] = prev
+            continue
+        # ⚠️ THE PARK-EVENT GATE, before the unmeasured-`watching_min` skip. A row
+        # `park-event.py register` already parked has the wait bound to an anchored
+        # task and a `defer_date` written; re-asking it to park is the defect. The
+        # gate precedes the unmeasured skip so a row the instrument cannot measure
+        # this round is still excluded by its park event rather than falling through.
+        # An EXPIRED park event is not a park (the row is due), so it is not in
+        # `parks` and stays a candidate. `prev` is carried for the same reason the
+        # status gate carries it — the row is still in the candidate population.
+        if parks is not None and sid in parks:
+            stats["park_event"] += 1
+            stats["park_event_rows"].append(
+                dict(sid=sid, name=row.get("name") or "-", recheck=parks[sid]))
             if prev:
                 nxt[sid] = prev
             continue
@@ -535,6 +592,14 @@ def main(argv=None) -> int:
         print(f"park-nudge: unknown — threshold unreadable ({type(e).__name__}: {e})")
         return EXIT_UNKNOWN
     exit_script = self_exit_path()
+    # The park-event gate's input: sid -> future recheck instant for every live park
+    # watch. A broken import is a broken install, so it exits 2 rather than running
+    # without the gate — the same rule as the threshold and the manager tier.
+    try:
+        parks = future_park_parks()
+    except Exception as e:
+        print(f"park-nudge: unknown — park-event store unreadable ({type(e).__name__}: {e})")
+        return EXIT_UNKNOWN
     # The manager-tier test's inputs, read once for the whole reading.
     # ⚠️ A broken import is a BROKEN INSTALL, and the leg exits 2 rather than
     # running without the gate: without it, a manager is nudged and the output
@@ -563,7 +628,7 @@ def main(argv=None) -> int:
     try:
         with locked(state):
             ledger = read_ledger(state)
-            nudges, nxt, stats = evaluate(sessions, ledger, limit_s, exit_script, tier, anchor)
+            nudges, nxt, stats = evaluate(sessions, ledger, limit_s, exit_script, tier, anchor, parks)
             if not a.dry_run:
                 write_ledger(state, nxt)
     except Exception as e:
@@ -573,6 +638,7 @@ def main(argv=None) -> int:
     summary = (f"park-nudge: {len(nudges)} nudged · {stats['suppressed']} suppressed · "
                f"{stats['within']} within {limit_s // 60}m · {stats['watching']} watching · "
                f"{len(sessions)} live · {stats['manager']} manager-skipped · "
+               f"{stats['park_event']} park-event-skipped · "
                f"{stats['status_skipped']} status-skipped · {stats['unanchored']} unanchored-skipped · "
                f"{stats['anchor_unknown']} anchor-unknown")
     if a.json:
