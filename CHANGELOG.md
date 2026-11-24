@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.367.2
 
 - test: **the census's goal-page attribution gains its positive control.** A goal manager opened by the flagged tick used to depend on its own `/vault-cli:work-on-goal` start turn for the page stamp, and that turn can never run — measured 2026-11-23 20:51:49 in `~/Library/Logs/claude-wrapper/stderr.log`, the start command was not sent ("the keystrokes reached the pty but the Enter did not take effect"), so the page kept no `claude_session_id` while its manager ran. The wrapper now stamps the page at open time, before its start commands run, and this test pins the census half: a goal page carrying its session id, with that session live, emits no `live session <sid> — no page records it` line and no `MISMATCH page`, **and** the same live session with the page's id removed IS reported — the control that proves the absence assertion can fail. Change set: `scripts/tests/test_keeper_census.py`, `CHANGELOG.md`.
 
