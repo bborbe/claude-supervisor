@@ -433,6 +433,14 @@ def main(argv: list[str]) -> int:
                          "an outcome")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
     a = ap.parse_args(argv)
+    if a.branch == "goal":
+        # The goal-manager tier is merged into the topic tier (2026-11-24): there is no
+        # goal-manager session to keep alive. The topic round drives each declared goal's
+        # rows via `agents/goal-drive.md`; `--branch topic` remains for the topic manager.
+        print("goal-branch-retired")
+        print("the goal-manager tier is merged into the topic tier; drive the goal's rows "
+              "with agents/goal-drive.md — this keeper serves --branch topic only.")
+        return 1
     if a.receipt and a.branch != "goal":
         ap.error("--receipt records a goal manager's verdict; it needs --branch goal")
 

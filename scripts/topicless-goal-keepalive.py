@@ -195,6 +195,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--goals-dir", help="override the goals directory (default: the vault's config)")
     ap.add_argument("--topics-dir", help="override the topics directory (default: the vault's config)")
     a = ap.parse_args(argv)
+    # The goal-manager tier is merged into the topic tier (2026-11-24): there is no
+    # goal-manager session to keep alive, so this fleet-tier keeper for topicless goal
+    # managers is retired. A topicless goal is driven by the fleet round directly.
+    print("retired")
+    print("the goal-manager tier is merged into the topic tier; a topicless goal is driven "
+          "by the fleet round directly — this keeper is retired.")
+    return 1
     vault = os.path.abspath(os.path.expanduser(a.vault))
     if not (a.goals_dir and a.topics_dir):
         try:
