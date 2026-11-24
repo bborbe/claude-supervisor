@@ -291,9 +291,9 @@ session failing any limb is some other state and belongs to its own branch.
    manager at EVERY re-arm"*: it writes the cadence record, so calling it
    from the triage session **fakes an arm on a manager that never armed itself** — the record
    then reads armed while nothing ticks, and the next sweep reports a healthy loop that does not
-   exist. It also cannot be made correct from here: `--arm` takes `--branch <fleet|goal|topic>`
-   and a triage row may be any of the three, so a hardcoded `--branch goal` writes the wrong
-   namespace for a fleet or topic manager. The manager owns its own arm; this command owns the
+   exist. It also cannot be made correct from here: `--arm` takes `--branch <fleet|topic>`
+   and a triage row may be either, so a hardcoded `--branch topic` writes the wrong
+   namespace for a fleet manager. The manager owns its own arm; this command owns the
    finding.
 
 ⚠️ **Every STUCK row must end the run either moving or carded.** A row that is still stuck

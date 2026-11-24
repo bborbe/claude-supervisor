@@ -7,7 +7,7 @@ Two independent signals are read every time, because neither answers the other's
      `session-liveness.py --check`. `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) /
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
-  2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
+  2. **Is its loop armed?** `manager-liveness.py --state --subject <topic> --branch topic`
      → `OK` / `WORKING` / `LAPSED` / `IDLE` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID`. This is the
      signal a liveness probe structurally cannot give — a manager process can be alive with
      its loop unarmed after a missed re-arm. `STOPPED` is a deliberate stand-down and

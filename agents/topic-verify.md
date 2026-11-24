@@ -33,9 +33,9 @@ The caller passes, in its dispatch prompt:
   numbers differently.
 - **the coverage output**, when the caller could dispatch it
 - **`VAULT_NAME`** — the **registered** vault name, not the directory basename. Report it; never
-  derive a vault root from it, since `topic-spawn.py --vault` wants a path.
-- **the ranking line**, when the caller ran `topic-spawn.py --rank`. Absent is the normal case —
-  row 15 then reports `SKIPPED` rather than computing a split itself.
+  derive a vault root from it, since the wrapper's open endpoint wants a path.
+- **the ranking line** — retired with `topic-spawn.py --rank` (the goal-manager tier is merged into
+  the topic tier); row 15 reports `SKIPPED — retired`.
 
 ⚠️ **A folder that arrives empty or absent is `SKIPPED`, not a default.** An empty path makes
 `find ""` match nothing, and every membership row then reports a topic with no members — a
@@ -241,15 +241,10 @@ across separate sessions, every one a false violation.
     separately, never silently into one of the other two). ⚠️ **Never recommend flipping
     `todo → planning`** — that flip is the operator's own approval.
 
-15. **SLOTS** — report the slot split **only from a ranking line the caller passed**. The line is
-    the caller's to produce, with
-    `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/topic-spawn.py --topic "<topic>" --rank --vault "<vault-root>"`
-    — ⚠️ **`--topic` is mandatory** (without it the script exits 2 on argparse), **`--vault` takes
-    the vault ROOT and never the registered name**, and the bare name is not on PATH. **The root
-    is the caller's to supply** — you are given the name, not the root, so never substitute it.
-    ⚠️ **Never invent an order and never derive the cap yourself** — read N and the held count off
-    the script's own line. ⚠️ **No ranking line → `SKIPPED — no ranking line`**: this row is
-    caller-optional and **no shipped caller passes one today**.
+15. **SLOTS** — `SKIPPED — retired`. The per-topic slot ranking lived in `topic-spawn.py --rank`,
+    which retired with the goal-manager tier (2026-11-24): the topic manager drives each declared
+    goal's rows directly, so there is no set of goal managers to rank. Report the retirement —
+    ⚠️ **never invent an order and never derive a cap yourself**.
 
 16. **ROUTE** — the one line the caller must send to the topic's manager, naming what to start
     or resume first. ⚠️ **You hold no `SendMessage`** — return the line and say so.

@@ -416,13 +416,32 @@ def _read(path, limit=None):
         return ""
 
 
+_CRASHED = None
+
+
+def _crashed():
+    """`scripts/crashed-managers.py` loaded lazily — the one home of the `## Goals` region walk.
+
+    Lazy because it loads `topic-keepalive.py`, which loads `owner.py`; a module-level load
+    would put that chain in this module's import path. `fleet-board` keeps its own link
+    extraction, but the section boundary must be the same one the card and the ownership
+    verdict use, or a link in a later heading counts as membership for one and not the others.
+    """
+    global _CRASHED
+    if _CRASHED is None:
+        _CRASHED = _load("crashed_managers_for_board", "crashed-managers.py")
+    return _CRASHED
+
+
 def _goals_section_links(text):
     """The wikilinks under a page's `## Goals` heading, one per list item.
 
     Three narrowings, each closing a measured false positive:
 
-    * **Stops at the next `## ` heading** — the section is the declaration, so a
-      link in a later section cannot claim membership.
+    * **Stops at the next heading, any level** — the section is the declaration, so a
+      link in a later section (including a `# Progress` entry) cannot claim membership.
+      ⚠️ **The region walk is `crashed-managers.goals_section`** — one home, so the
+      board, the crash card and the ownership verdict cannot disagree on the boundary.
     * **List items only** — the section carries prose notes too, and a paragraph
       recording that a goal was *removed* from the list names it. Read whole,
       `a page in 23 Topics`'s removal note claimed that goal as a
@@ -431,12 +450,9 @@ def _goals_section_links(text):
       and the annotation after the dash routinely links other goals and tasks.
       The entry admits one member; the rest are provenance.
     """
-    out, inside = [], False
-    for line in text.splitlines():
-        if line.startswith("## "):
-            inside = line.strip().lower() == "## goals"
-            continue
-        if inside and _LIST_ITEM.match(line):
+    out = []
+    for line in _crashed().goals_section(text):
+        if _LIST_ITEM.match(line):
             links = _WIKILINK.findall(line)
             if links:
                 out.append(links[0])

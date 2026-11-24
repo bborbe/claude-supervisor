@@ -530,22 +530,36 @@ def page_path(vault: str, subject: str, branch: str = "goal", directory: str = "
     return locate(vault, subject, branch, directory)[0]
 
 
+_CRASHED = None
+
+
+def _crashed():
+    """`scripts/crashed-managers.py` loaded lazily — the one home of `goals_section`/`declares`.
+
+    Loaded lazily because `crashed-managers.py` loads `topic-keepalive.py`, which loads this
+    module: a module-level import would close that cycle. Both scripts answer the same
+    topic→goal membership question, and a second parser is a second answer.
+    """
+    global _CRASHED
+    if _CRASHED is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crashed-managers.py")
+        spec = importlib.util.spec_from_file_location("crashed_managers_for_owner", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _CRASHED = mod
+    return _CRASHED
+
+
 def goals_section(text: str) -> list:
     """The lines under a page's `## Goals` heading, up to the next heading (any level).
 
     Only this region declares membership — the same narrowness `crashed-managers.py` uses, so a
     `# Progress` entry or a prose mention that merely names the goal is not read as a declaration.
+    ⚠️ **Delegated, not re-implemented** — `crashed-managers.py` owns the parser, and a second
+    copy would let the ownership verdict and the crash card disagree about membership.
     """
-    lines = []
-    inside = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            inside = stripped.lower() == "## goals"
-            continue
-        if inside:
-            lines.append(line)
-    return lines
+    return _crashed().goals_section(text)
 
 
 def declares(text: str, goal: str) -> bool:
@@ -553,21 +567,9 @@ def declares(text: str, goal: str) -> bool:
 
     Only a `-`/`*` bullet whose FIRST wikilink is the goal counts, case-insensitively — a prose
     removal note in the section is not a declaration (the rule `crashed-managers.py` measured).
+    ⚠️ **Delegated, not re-implemented** — one predicate for the ownership verdict and the card.
     """
-    wanted = goal.casefold()
-    for line in goals_section(text):
-        if not line.lstrip().startswith(("- ", "* ")):
-            continue
-        start = line.find("[[")
-        if start == -1:
-            continue
-        ends = [i for i in (line.find("]]", start), line.find("|", start),
-                           line.find("#", start)) if i != -1]
-        if not ends:
-            continue
-        if line[start + 2:min(ends)].strip().casefold() == wanted:
-            return True
-    return False
+    return _crashed().declares(text, goal)
 
 
 def declaring_topic(vault: str, goal: str) -> str:
@@ -576,6 +578,9 @@ def declaring_topic(vault: str, goal: str) -> str:
     After the goal-manager tier is removed (docs/session-tiers.md), a goal's manager is the
     topic manager that declares it. This is the only place that resolves that edge, so the
     ownership verdict and the tier that drives the goal cannot disagree.
+
+    ⚠️ **Sorted, so the answer is deterministic** — `os.listdir` order is filesystem-dependent,
+    and a goal declared by two topics would otherwise resolve to a different one per machine.
     """
     for root in SUBJECT_DIRS["topic"]:
         base = os.path.join(vault, root)
@@ -583,7 +588,7 @@ def declaring_topic(vault: str, goal: str) -> str:
             entries = os.listdir(base)
         except OSError:
             continue
-        for entry in entries:
+        for entry in sorted(entries):
             if not entry.endswith(".md"):
                 continue
             try:

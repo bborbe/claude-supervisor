@@ -51,8 +51,10 @@ file reaches you, it is a caller bug — say so and render no row for it.
       **You must not read the clock yourself.**
    5. **The manager verdicts**, as `<goal> → LIVE | ABSENT | UNKNOWN`, from the caller's
       `session-liveness.py --check` over each goal page's `claude_session_id`, for every goal the topic declares.
-   6. **The cadence verdicts**, as `<goal> → OK | WORKING | LAPSED | IDLE | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
-      caller's `manager-liveness.py --state --subject <goal> --branch goal --vault <vault-root>`.
+   6. **The cadence verdicts**, as `<topic> → OK | WORKING | LAPSED | IDLE | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
+      caller's `manager-liveness.py --state --subject <topic> --branch topic --vault <vault-root>`.
+      ⚠️ **The goal-manager tier is retired** — there is no per-goal manager to probe; the topic
+      manager drives each declared goal's rows directly, so its cadence is the one loop reading.
       ⚠️ **The record carries a WORK SIGNAL alongside round cadence, and `IDLE` is its verdict.**
       `--state`'s detail carries `work=<seconds>s` — the age of the manager's own transcript,
       resolved from the session id `--arm` records — so `OK` means a round OR work inside the
