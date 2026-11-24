@@ -45,6 +45,11 @@ tier down. The sweep is the product; everything else is delegated.
 
 1. **Run the goal round's sweep → drive for each declared goal.** There is no goal-manager
    session, so this agent runs the goal round's legs per goal:
+   - **Tracked set** — resolve the goal's task rows (every task whose `goals:` names the goal)
+     and write the set with `manager-predispatch.py --vault "<vault-root>" --subject "<goal>"
+     --write-tracked` (names on stdin). Carry the **path it prints**, never the names — every
+     later leg reads the set off disk. ⚠️ **Without this call the sweep reader has no tracked
+     set and drives nothing** (the round-9 finding).
    - **Readings** — `round-readings.py --subject "<goal>" --vault "<vault-root>" --tracked
      "<the tracked-set path>" --interval <seconds>`. The sweep reader **refuses** without a
      per-goal readings file (measured 2026-11-24: `REFUSED: no readings for <goal> — … does

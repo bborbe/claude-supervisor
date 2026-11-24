@@ -716,7 +716,7 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("not-owner", o.verdict)
         self.assertEqual("no-declaring-topic", o.reason)
 
-    def test_declaring_topic_honours_the_directory_override(self):
+    def test_declaring_topic_honours_the_topics_dir_override(self):
         """A caller pointing at a non-default topics folder is resolved against that folder."""
         (self.vault / "custom-topics").mkdir()
         (self.vault / "custom-topics" / "A Topic.md").write_text(
@@ -724,7 +724,19 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("A Topic",
                          self.o.declaring_topic(str(self.vault), "A Goal", "custom-topics"))
         self.page("A Goal", "claude_session_id: gm-stale\n")
-        o = self.o.of_subject(str(self.vault), "A Goal", "goal", "custom-topics")
+        o = self.o.of_subject(str(self.vault), "A Goal", "goal", topics_dir="custom-topics")
+        self.assertEqual("owner", o.verdict)
+        self.assertEqual("tm-1", o.session_id)
+
+    def test_a_goal_caller_passing_the_goals_folder_as_directory_still_resolves(self):
+        """`worker-keepalive.goal_owners` calls `of_subject(goal, "goal", goals_dir)` — the
+        GOALS folder in `directory`. `directory` must keep meaning the subject's folder, and
+        the declaring topic must still resolve from the default topics folder."""
+        self.page("A Goal", "claude_session_id: gm-stale\n")
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            "---\nclaude_session_id: tm-1\n---\n## Goals\n\n- [[A Goal]]\n", encoding="utf-8")
+        o = self.o.of_subject(str(self.vault), "A Goal", "goal",
+                              str(self.vault / "24 Goals"))
         self.assertEqual("owner", o.verdict)
         self.assertEqual("tm-1", o.session_id)
 
