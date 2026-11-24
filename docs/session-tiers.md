@@ -127,7 +127,7 @@ subject — two sessions on one subject are a double writer.
 
 | Level | Opened by | Kept alive by | Mechanism | Guard |
 |---|---|---|---|---|
-| **Fleet manager** | the operator | **the operator** | `scripts/fleet-keepalive.py` reads the digest, never the heartbeat; `scripts/fleet-keeper.py` posts one card after 40 min `stale`, and resumes only on the operator's `resume it` answer | report-only — rule 1's one exception (§ The four tiers) |
+| **Fleet manager** | the operator | **the operator** | `scripts/fleet-keepalive.py` reads the digest, never the heartbeat; `scripts/fleet-keeper.py` posts one card after 40 min `stale`, and resumes only on the operator's `resume it` answer | report-only — rule 1's one exception (§ The three tiers) |
 | **Topic manager** | the fleet manager, on the operator's initiative | the **fleet round** | `commands/steps/keepalive.md` § Restart a lapsed topic manager → `scripts/topic-keepalive.py --branch topic`, for every topic page `scripts/topic-candidates.py` selects — every verdict but `loop-stopped`, never filtered on `claude_session_id` | 3 resumes in 30 min → `crash-loop`, escalate once |
 | **Worker** — task with a goal | its declaring topic's manager, or the fleet manager when the goal has no topic | its **declaring topic manager's round**; otherwise the **fleet round** | `agents/goal-drive.md` auto-resume gate, run inside the topic round; the fallback is `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `last_auto_resume` cap on the topic tier, `worker--<slug>` cap on the fleet tier; `worker-keepalive.py` returns `jump` for a row the topic tier owns, so the two never resume one row |
 | **Worker** — task with no goal | the fleet manager, or the topic manager listing the task | the **fleet round** | `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `worker--<slug>` cap; a task with no recorded id is reported, never opened |
@@ -207,7 +207,7 @@ the assumption that it follows.
 
 - **Restart is not open.** A restart resumes a session that already has a subject and a
   recorded id, so it decides nothing new and runs automatically; an open creates supervision
-  and is the operator's act. The rulings are § The four tiers, rules 1 and 4.
+  and is the operator's act. The rulings are § The three tiers, rules 1 and 4.
 - **The flag gates an open, never a restart.** An unflagged goal whose manager died is still
   resumed (rule 2).
 - **The per-topic N start cap is retired with the goal tier.** There is no goal-manager session to start, so `scripts/topic-spawn.py`'s `goal-manager at running >= N` refusal no longer applies; the topic manager drives each declared goal directly, and no keep-alive verdict reads N.
