@@ -531,11 +531,25 @@ class TestCliRefusals(unittest.TestCase):
         with open(os.path.join(self.tasks, name), "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines))
 
-    def _run(self, *extra, holds=None, bin_dir=None, home=None):
+    def _empty_config(self):
+        """A config declaring no vault — so no configured `tasks_dir` is searched."""
+        path = os.path.join(self.tmp, "empty-vault-config.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump([], handle)
+        return path
+
+    def _empty_root(self):
+        """A vault root holding no vault, so the fleet-wide probe finds nothing either."""
+        path = os.path.join(self.tmp, "empty-root")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _run(self, *extra, holds=None, bin_dir=None, home=None, vault_config=None,
+             vaults_root=None):
         env = dict(os.environ)
         env["SUPERVISOR_SESSIONS_DIR"] = self.sessions
-        env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
-        env["SUPERVISOR_VAULT_CONFIG"] = self.vault_config
+        env["SUPERVISOR_VAULTS_ROOT"] = vaults_root or self.vaults
+        env["SUPERVISOR_VAULT_CONFIG"] = vault_config or self.vault_config
         env["SUPERVISOR_SESSION_HOLDS"] = holds or os.path.join(self.tmp, "no-holds.json")
         env["ATTENTION_STATE_DIR"] = self.attention
         env["ATTENTION_STORE_URL"] = self.store_url
@@ -868,11 +882,17 @@ class TestCliRefusals(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "dirty-worktree")
 
-    def test_task_unresolved(self):
-        """Clean worktree, no task claims the session — fail closed."""
+    def test_task_unresolved_when_nothing_was_searched(self):
+        """No task claims the session AND nothing was searched — still fails closed.
+
+        A *proven* absence is no longer this refusal; it closes as `unanchored-closed`.
+        What remains under `task-unresolved` is the config defect, where the anchor may
+        live in a directory this process cannot read.
+        """
         self._registry()
-        done = self._run()
+        done = self._run(vault_config=self._empty_config(), vaults_root=self._empty_root())
         self.assertEqual(done.stdout.splitlines()[0], "task-unresolved")
+        self.assertNotIn("unanchored-closed", done.stdout)
 
     def test_task_not_terminal(self):
         self._registry()
@@ -1001,6 +1021,114 @@ class TestCliRefusals(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
         self.assertIn("t.md", done.stdout)
+
+
+    # --- the unanchored shape -------------------------------------------------------
+    #
+    # A session that recorded itself nowhere: no `claude_session_id`, no
+    # `metrics_sessions` entry, no goal/topic anchor. Before this change the verb refused
+    # `task-unresolved` and the session was closable by no sanctioned path at all — the
+    # `kill` the fleet rules forbid was the only lever left.
+
+    def test_an_unanchored_session_closes(self):
+        """SC1: a proven absence is evidence, not a refusal."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        # No task page anywhere, and the vault's tasks dir exists — so the search was real.
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(done.stdout.splitlines()[0], "unanchored-closed")
+        self.assertIn("would close", done.stdout)
+        self.assertIn("anchor: none", done.stdout)
+        self.assertNotIn("task-unresolved", done.stdout)
+
+    def test_an_unsearched_vault_keeps_refusing(self):
+        """SC2: an absent SEARCH is not an absent anchor — nothing was read."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        done = self._run(
+            "--dry-run",
+            vault_config=self._empty_config(),
+            vaults_root=self._empty_root(),
+        )
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "task-unresolved")
+        self.assertNotIn("unanchored-closed", done.stdout)
+
+    def test_a_busy_unanchored_session_still_refuses(self):
+        """SC3: the busy guard is untouched, and the same fixture idle does close.
+
+        Paired on purpose — a no-op change cannot satisfy both halves.
+        """
+        self._registry(pid=999999, entrypoint="sdk-cli", status="working")
+        busy = self._run("--dry-run")
+        self.assertEqual(busy.returncode, 1)
+        self.assertEqual(busy.stdout.splitlines()[0], "busy-target")
+        self.assertNotIn("unanchored-closed", busy.stdout)
+
+        self._registry(pid=999999, entrypoint="sdk-cli", status="idle")
+        idle = self._run("--dry-run")
+        self.assertEqual(idle.returncode, 0, idle.stdout + idle.stderr)
+        self.assertIn("would close", idle.stdout)
+
+    def test_a_live_anchored_task_still_refuses(self):
+        """SC4: the new branch is reached only when resolution fails."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("live.md", **{"claude_session_id": SID, "status": "in_progress"})
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertNotIn("unanchored-closed", done.stdout)
+
+
+class TestUnanchoredVerdict(unittest.TestCase):
+    """The predicate both `close-worker.py` and `close-idle-tab.py` call."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.vaults = os.path.join(self.tmp, "vaults")
+        self.tasks = os.path.join(self.vaults, "v", "25 Tasks")
+        os.makedirs(self.tasks)
+        self.config = os.path.join(self.tmp, "cfg.json")
+        self._write_config([{"path": os.path.join(self.vaults, "v"), "tasks_dir": "25 Tasks"}])
+        patcher = mock.patch.dict(os.environ, {"SUPERVISOR_VAULT_CONFIG": self.config})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._reset_cache()
+
+    def _reset_cache(self):
+        """`_vault_config()` memoises per process, so a rewritten config needs a reset."""
+        cw._VAULT_CONFIG = None
+        self.addCleanup(setattr, cw, "_VAULT_CONFIG", None)
+
+    def _write_config(self, payload):
+        with open(self.config, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+    def test_a_proven_absence_is_unanchored(self):
+        token, _detail = cw.unanchored_verdict(SID, self.tasks, self.vaults)
+        self.assertEqual(token, "unanchored-closed")
+
+    def test_an_empty_config_is_unresolved(self):
+        """An empty config AND an empty root search nothing — closing would empty the fleet.
+
+        The cwd is `self.tmp`, not a task dir: `FLEET_PROBE_DIRS` includes `25 Tasks`, so a
+        cwd inside one would still be probed and the absence would be a proven one.
+        """
+        empty_root = os.path.join(self.tmp, "empty-root")
+        os.makedirs(empty_root)
+        self._write_config([])
+        self._reset_cache()
+        token, _detail = cw.unanchored_verdict(SID, self.tmp, empty_root)
+        self.assertEqual(token, "task-unresolved")
+
+    def test_a_present_page_is_never_unanchored(self):
+        """A page that carries the id means the caller should have resolved it first."""
+        path = os.path.join(self.tasks, "t.md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n")
+        # `unanchored_verdict` is only consulted when nothing resolved, so it reports on
+        # the search alone — this asserts it does not invent a close for a *different* id.
+        token, _detail = cw.unanchored_verdict(OTHER, self.tasks, self.vaults)
+        self.assertEqual(token, "unanchored-closed")
 
 
 class TestPageVerdict(unittest.TestCase):

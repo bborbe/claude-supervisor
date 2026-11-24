@@ -40,13 +40,28 @@ Eight refusals, each exit 1 with a stable reason token as the first line of outp
                       closed — holding it would keep the slot until the process dies.
   task-unresolved     no task file in the session's vault carries this session id as
                       `claude_session_id` — and no goal or topic page does either (see
-                      the goal/topic anchor below). Absent evidence is not evidence of a
-                      finished task; fail closed.
+                      the goal/topic anchor below) — while the absence is NOT a proven
+                      one: the session's own vault contributed no `tasks_dir`, or the
+                      search covered nothing, so the anchor may live where this process
+                      cannot read. Absent evidence is not evidence of a finished task;
+                      fail closed. A *proven* absence is a different fact and closes —
+                      see `unanchored-closed` below.
   task-not-terminal   any task the session holds as `claude_session_id` is neither
                       terminal (`completed`/`aborted`/`hold`) nor deferred to a future
                       `defer_date` — one live task refuses the close even when another
                       task bound to the same session has finished. Or, for a goal/topic
                       anchor, the page fails the goal/topic terminal-state rule below.
+
+One close outcome, printed as the first line of output before the `🧹` header:
+
+  unanchored-closed   every configured vault's `tasks_dir` was searched and no task, goal
+                      or topic page carries this session id. Nothing owns the session and
+                      nothing can resume it for, so the guards above are the whole
+                      authorisation — busy, gate, hold and worktree have all already
+                      passed. This is the token `reap-idle-headless.py` and
+                      `close-idle-tab.py` emit for the same shape; until now this verb was
+                      the one close path that refused it, leaving a finished idle session
+                      with no sanctioned close at all.
 
 Goal/topic anchor. When no task resolves the session, a goal page (`24 Goals` /
 `23 Goals`) or topic page (`23 Topics`) is resolved by the same join: `claude_session_id`,
@@ -401,6 +416,42 @@ def resolution_refusal(session_id, cwd, vault_root=None):
             f"searched {', '.join(dirs)}; {own_vault} not among them",
         )
     return ("task-unresolved", f"no page carries {session_id}")
+
+
+def unanchored_verdict(session_id, cwd, vault_root=None):
+    """`(token, detail)` for a session no page carries — `task-unresolved` or `unanchored-closed`.
+
+    `resolution_refusal` names *why* nothing matched; this decides whether the absence is
+    evidence. Two facts look alike and are not:
+
+    - the search was **incomplete** — the session's own vault contributed no `tasks_dir`,
+      or no directory was searched at all — so the anchor may live where this process
+      cannot read. That is `task-unresolved`, and it keeps refusing.
+    - the search was **complete** — every configured vault's `tasks_dir` was walked and
+      none carries the id. Nothing owns the session and nothing can resume it for, so a
+      finished one may be closed.
+
+    ⚠️ **The absent-search guard is load-bearing, not defensive.** Without it an empty
+    `vault-cli` config would read every session as unanchored and close the whole fleet in
+    one tick.
+
+    ⚠️ **`fleet_task_dirs`, not `task_dirs_for`.** The proof must be as wide as the
+    population it quantifies over: a vault missing from `vault-cli` config contributes no
+    `tasks_dir`, so an absence proven over the configured set alone would declare a
+    session in an unconfigured vault unanchored — the unreadable-vs-absent collapse this
+    module forbids everywhere else.
+
+    Shared with `close-idle-tab.py`, and the same predicate `reap-idle-headless.py`
+    applies inline.
+    """
+    _refusal, detail = resolution_refusal(session_id, cwd, vault_root)
+    if "not among them" in detail or not fleet_task_dirs(cwd, vault_root):
+        return ("task-unresolved", detail)
+    return (
+        "unanchored-closed",
+        f"no page among every configured vault carries {session_id}; nothing owns it, "
+        "so nothing can resume it for",
+    )
 
 
 def find_pages(session_id, cwd, vault_root=None):
@@ -989,6 +1040,9 @@ def main():
     held_tasks, handed_tasks, task_error = find_tasks(sid, cwd, VAULTS_ROOT)
     task = held_tasks[0] if held_tasks else (handed_tasks[0] if handed_tasks else None)
     pages = []
+    # Set when the session resolved to no page at all and the search that proved it was
+    # complete — the one state that closes without an anchor (`unanchored_verdict`).
+    unanchored = False
     if held_tasks:
         # Every held task must pass. A session can be bound to a finished task and a live
         # one at once, so a first-candidate verdict closes on whichever sorts first — the
@@ -1027,11 +1081,17 @@ def main():
                         "task holds this session",
                     )
                 else:
-                    bad = (
-                        resolution_refusal(sid, cwd, VAULTS_ROOT)
-                        if task is None
-                        else task_verdict(task, defer_date.as_now())
-                    )
+                    if task is not None:
+                        bad = task_verdict(task, defer_date.as_now())
+                    else:
+                        # No task, no held page, no handed page, and the search did not
+                        # fail. `unanchored_verdict` decides whether that absence is
+                        # evidence: a proven one closes, an incomplete search refuses.
+                        token, detail = unanchored_verdict(sid, cwd, VAULTS_ROOT)
+                        if token == "unanchored-closed":
+                            unanchored = True
+                        else:
+                            bad = (token, detail)
     if bad is not None:
         # ⚠️ Every refusal here names the session id, because the round joins a close line to
         # the refusal that follows it on that value. `task-unresolved` already carries it
@@ -1065,14 +1125,20 @@ def main():
     # record, and the refusal that follows a close (`restart-worker.py`'s `task-terminal`) names
     # the same full id — the two are joined on it, so a truncated one here cannot be joined and
     # the refusal reads as an unrelated event. Measured 2026-11-11 on session 2e540d65.
+    # ⚠️ The close token is the caller's contract, so it is printed BEFORE the `🧹` header —
+    # the same reason every refusal token is. `reap-idle-headless.py` prints it here too.
+    if unanchored:
+        print("unanchored-closed")
     print(f"🧹 close-worker · session {sid} · pid {pid} · {rec.get('name')!r}")
     if pages:
         for kind, page_path, fm, page_handed_off in pages:
             how = f"handed off to {fm.get('claude_session_id') or '(none)'}" if page_handed_off else "held"
             print(f"   {kind}: {page_path} (status {fm.get('status')}, {how}, session {sid})")
-    else:
+    elif task is not None:
         task_path, fm, _handed_off = task
         print(f"   task: {os.path.basename(task_path)} (status {fm.get('status')})")
+    else:
+        print(f"   anchor: none — no task, goal or topic page carries session {sid}")
     print(f"   worktree: {verdict}" + (f" · {others} other live session(s) share it" if verdict == "dirty" else ""))
     print(f"   classification: {branch} · {where}")
 
