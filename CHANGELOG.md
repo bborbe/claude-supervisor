@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the drive leg no longer routes an orphan row to the removed `keepalive.md` row 5b.** `agents/fleet-drive.md:48` read *"cause `orphan` — **resume it** (`keepalive.md` 5b)"* — a live instruction to the driving model to resume through a step file the round no longer dispatches, in an agent the round runs **every** round. Found 2026-11-24 by a closure probe that was itself too narrow: the probe covered `commands/fleet-drive.md` and `agents/fleet-round.md` and printed nothing, because `agents/fleet-drive.md` was outside its file list and the reference is the bare `` `keepalive.md` `` form rather than `commands/steps/keepalive.md`. The disposition now says the resume belongs to the wrapper's keep-alive tick, which owns the leg end to end, and that a round resuming it would be the second writer the tick's claim guard exists to defend against. Change set: `agents/fleet-drive.md`, `CHANGELOG.md`.
+
 ## v0.367.5
 
 - fix: **a row carrying a registered future `park_event` is no longer a nudge candidate.** `park-event.py register` already bound the wait to an anchored task and wrote a `defer_date`, so re-asking it to park every round only burns a model turn for the whole wait. `park-nudge.py` now excludes a row whose sid is a member of a park watch whose `recheck_at` is in the FUTURE, records the skip as a `park_event_rows` entry (sid + future recheck instant) plus a `<n> park-event-skipped` count, and places the gate BEFORE the unmeasured-`watching_min` skip so a row the instrument cannot measure this round is still excluded by its park event. An EXPIRED park event is not a park — the row is due and stays a candidate, so a blanket exclusion fails the two-row fixture. Change set: `scripts/park-nudge.py`, `scripts/tests/test_park_nudge.py`, `CHANGELOG.md`.
