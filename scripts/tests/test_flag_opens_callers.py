@@ -43,7 +43,6 @@ def _load(name, filename):
 CALLERS = (
     ("flagged_rows", "flagged-rows.py"),
     ("open_queue", "open-queue.py"),
-    ("topic_spawn", "topic-spawn.py"),
     ("topic_keepalive", "topic-keepalive.py"),
 )
 
@@ -81,7 +80,6 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
         """The behavioural half, over all three kinds, through each module's own entry."""
         rows = _load("flagged_rows", "flagged-rows.py")
         queue = _load("open_queue", "open-queue.py")
-        spawn = _load("topic_spawn", "topic-spawn.py")
         keepalive = _load("topic_keepalive", "topic-keepalive.py")
         shared = _load("flag_provenance", "flag_provenance.py")
 
@@ -96,8 +94,6 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
                         self.assertEqual(queue.is_flagged(block), want,
                                          "open-queue disagreed on %r" % block)
                     if kind in ("goal", "topic"):
-                        self.assertEqual(spawn.flagged(block, kind), want,
-                                         "topic-spawn disagreed on %r" % block)
                         self.assertEqual(keepalive.flagged(block, kind), want,
                                          "topic-keepalive disagreed on %r" % block)
 

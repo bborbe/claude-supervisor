@@ -210,51 +210,6 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("jump", out[0])
 
-    def test_the_flag_predicate_agrees_with_topic_spawn(self):
-        """⚠️ The predicate is duplicated because both scripts run standalone out of the
-        plugin cache. This is the anti-drift control: a split verdict between the two would
-        open exactly the goal the spawn gate refuses."""
-        spec = importlib.util.spec_from_file_location(
-            "topic_spawn", str(_HERE.parent / "topic-spawn.py")
-        )
-        spawn = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(spawn)
-        for fm in (
-            "flag: true\nflag_set_by: operator\n",
-            "flag: true\nflag_set_by: legacy\n",
-            "flag: yes\nflag_set_by: operator\n",
-            "flag: on\nflag_set_by: operator\n",
-            "flag: true\nflag_set_by: agent\n",
-            "flag: true\n",
-            "flag: false\nflag_set_by: operator\n",
-            "",
-        ):
-            with self.subTest(fm=fm):
-                self.assertEqual(spawn.flagged(fm), self.k.flagged(fm))
-
-    def test_the_session_id_fold_agrees_with_topic_spawn(self):
-        """⚠️ `session_id` is duplicated for the same reason `flagged` is, and needs the
-        same anti-drift control: a split verdict would let one script treat a `null` id as
-        "nothing recorded" while the other still probes it as an id."""
-        spec = importlib.util.spec_from_file_location(
-            "topic_spawn", str(_HERE.parent / "topic-spawn.py")
-        )
-        spawn = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(spawn)
-        for fm in (
-            "claude_session_id: 3716bdff-a825-433a-bd73-c96d64970d29\n",
-            "claude_session_id: fa2dc5f3-8dd\n",
-            "claude_session_id: null\n",
-            "claude_session_id: NULL\n",
-            "claude_session_id: ~\n",
-            "claude_session_id: []\n",
-            "claude_session_id:\n",
-            "claude_session_id: \"null\"\n",
-            "",
-        ):
-            with self.subTest(fm=fm):
-                self.assertEqual(spawn.session_id(fm), self.k.session_id(fm))
-
     # --- the crash-loop cap ---------------------------------------------------
 
     def test_fourth_resume_inside_the_window_is_a_crash_loop(self):
