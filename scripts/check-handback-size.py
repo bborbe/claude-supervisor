@@ -45,7 +45,8 @@ MAX_BYTES = 1024
 #: the leg names `check-handback-keys.LEGS` uses. A leg absent here has no variable lines and
 #: its whole hand-back must fit.
 VARIABLE = {
-    "supervisor:fleet-keepalive-actor": ("crash-loop:", "cannot-tell:", "park-nudge:"),
+    # The keep-alive acting leg was retired in v0.367.0 (`0bfff171`); no leg declares variable
+    # lines here any more. An empty map means every hand-back must fit its cap whole.
 }
 
 
