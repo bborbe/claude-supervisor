@@ -1006,13 +1006,13 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None, task_
     `goals:`. The field is hand-authored — nothing writes it automatically — so an absent
     or unresolvable value is not an error; it falls through to `goals:`.
 
-    A worker is parented only to a manager whose subject IS one of its declared
-    subjects (`managed_by`, then each goal). ⚠️ **The goal's topic is not a rung
-    for a worker.** `docs/fleet-surface.md` tier 4 makes the topic manager the
-    owner of an unmanaged GOAL so it can start that goal's manager; it does not
-    parent the worker to the topic manager, which a topic manager never manages
-    (`commands/topic-loop.md`). With no live goal manager the worker falls to the
-    root (the fleet manager) as a holding row.
+    A worker is parented to a manager whose subject IS one of its declared
+    subjects (`managed_by`, then each goal), and — since the goal tier merged
+    into the topic tier (2026-11-24) — to the **declaring topic manager** of a
+    goal the task declares. With no goal-manager tier, the topic manager that
+    declares the goal is its only manager, so the worker parents to it; a goal in
+    no topic, or a task that declares no goal, still falls to the task's own topic
+    or the root (the fleet manager) as a holding row.
 
     ⚠️ **The goal chain is not the whole order — the task's OWN topic is the last
     rung.** The design says a task with no goal is managed by the nearest existing
@@ -1027,6 +1027,16 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None, task_
                 continue
             if found[1].lower() == subject.lower():
                 return sid
+    # The goal's DECLARING TOPIC is a rung now the goal tier is gone (2026-11-24): the
+    # topic manager that declares the goal is its only manager, so a worker whose task
+    # declares the goal parents to it rather than falling to the root.
+    for goal in goal_titles:
+        for subject in index.topics_of(goal):
+            for sid, found in subjects.items():
+                if roles.get(sid) != ROLE_MANAGER or not found:
+                    continue
+                if found[1].lower() == subject.lower():
+                    return sid
     for subject in index.topics_of_task(task_title):
         for sid, found in subjects.items():
             if roles.get(sid) != ROLE_MANAGER or not found:

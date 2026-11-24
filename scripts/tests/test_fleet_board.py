@@ -348,20 +348,23 @@ class TestGroupingRules(unittest.TestCase):
         self.assertEqual(g.role_of(_sid(6)), "manager")
         self.assertIsNone(g.subject_of(_sid(6)), "orange proves a manager, not its scope")
 
-    def test_a_worker_whose_goal_has_no_manager_falls_to_the_root_not_its_topic(self):
-        """A topic manager never manages a worker.
+    def test_a_worker_whose_goal_has_no_manager_parents_to_the_declaring_topic(self):
+        """The goal tier is merged into the topic tier (2026-11-24), so the topic
+        manager that declares the goal is its only manager.
 
         `_sid(2)` is the live topic manager for "Manager Layer", which lists
         "Sample Goal A"; `_sid(3)`'s task names that goal, and no goal manager is
-        live. The worker must fall to the fleet manager, not to the topic manager.
+        live. The worker now parents to the declaring topic manager (`_sid(2)`),
+        not the fleet manager — the merge's whole point.
         """
         g = _grouping()
         self.assertEqual(g.role_of(_sid(3)), "worker")
-        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
+        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
 
     def test_rule_2_a_goal_manager_wins_over_its_topic(self):
-        """Both a goal-subject manager and its topic's manager exist; the worker is
-        parented to the goal manager, because the topic is not a rung for a worker."""
+        """Both a goal-subject manager and its declaring topic's manager exist; the
+        worker is parented to the goal manager — the goal is the first rung, the
+        declaring topic the fallback."""
         g = _grouping()
         self.assertEqual(g.parent_of(_sid(8)), _sid(7))
 
