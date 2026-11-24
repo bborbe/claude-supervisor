@@ -138,13 +138,17 @@ class TestTaskGate(unittest.TestCase):
     # The no-page case splits in two exactly as `reap-idle-headless.py` splits it
     # (`:783-805`): a proven absence of anchor is a close, an absent SEARCH is a refusal.
 
-    def _gate_unanchored(self, detail, dirs):
+    def _gate_unanchored(self, detail, dirs, unsearched=False):
         with mock.patch.object(
             close_idle_tab.close_worker,
             "resolution_refusal",
             return_value=("task-unresolved", detail),
         ), mock.patch.object(
             close_idle_tab.close_worker, "fleet_task_dirs", return_value=dirs
+        ), mock.patch.object(
+            close_idle_tab.close_worker,
+            "own_vault_unsearched",
+            return_value=unsearched,
         ):
             return close_idle_tab.task_gate(None, self.today, SID, "/tmp/worktree")
 
@@ -156,8 +160,10 @@ class TestTaskGate(unittest.TestCase):
         self.assertIn(SID, detail)
 
     def test_vault_not_searched_still_refuses(self):
+        # The own-vault check is structural now (`own_vault_unsearched`), not a substring
+        # test on the refusal's prose — a reworded message can no longer flip the close.
         token, _ = self._gate_unanchored(
-            "searched /a; /b not among them", ["/a"]
+            "searched /a; /b not among them", ["/a"], unsearched=True
         )
         self.assertEqual(token, "task-unresolved")
 
