@@ -412,9 +412,10 @@ and one that ran and found nothing must never print the same.
 </error_handling>
 
 <output_format>
-**Two artifacts.** The **digest** is the round's file: three count lines into its `LEGS` section
-through `fleet-legs.py` (steps 1, 1b, 4). The **hand-back** is the ≤ 1 KB summary below, obeying
-`docs/handback-contract.md` for the form.
+**One artifact: the hand-back, and it is your LAST action.** The digest is the round's file —
+three count lines into its `LEGS` section through `fleet-legs.py` (steps 1, 1b, 4), written
+before you hand back and never reported here. The hand-back obeys `docs/handback-contract.md`
+for the form.
 
 **Hand-back** — verdict lines and counts in `key=value` form, non-empty:
 
@@ -442,10 +443,8 @@ the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell
 line. ⚠️ **One dropped count per list, never one shared `truncated=`** — `crash-loop-truncated=`
 and `cannot-tell-truncated=` each say how many rows of THAT list ride `payload=`, since a shared
 count cannot tell which list lost rows and the caller's arithmetic could not be satisfied.
-⚠️ **`crash-loop:` and `cannot-tell:` are the only lines that truncate — never a count.** Their full lists go to `~/.claude/state/fleet-handback/<round timestamp>.keepalive` (one atomic `python3` write, the same rule `agents/fleet-sweep-reader.md` states; pruned by that file's clause, its single home). ⚠️ **The cap, the per-list counts and the payload rule are `docs/handback-contract.md` § The shape — the truncation exception** — not restated here; when nothing is truncated both counts are `0` and `payload=—`. ⚠️ **Emit the counts and the rows this block mandates, and NOTHING else — no heading, preamble, table, trailing note or explanation.** Measured 2026-11-21: a prose `Notes:` block pushed this leg to **1 235–2 563 B**, 10 of 20 over cap. `agents/fleet-round.md` § `<output_format>` states the same rule. ⚠️ **It carries no rules** — no procedure text, no population, no guard.
+⚠️ **`crash-loop:` and `cannot-tell:` are the only lines that truncate — never a count.** Their full lists go to `~/.claude/state/fleet-handback/<round timestamp>.keepalive` (one atomic `python3` write, the same rule `agents/fleet-sweep-reader.md` states; pruned by that file's clause, its single home). ⚠️ **The cap, the per-list counts and the payload rule are `docs/handback-contract.md` § The shape — the truncation exception** — not restated here; when nothing is truncated both counts are `0` and `payload=—`. ⚠️ **Deliver it as the `SubagentHandback` tool call, as your LAST action, and emit NOTHING after it — no `SendMessage`, no heading, summary or trailing note.** A late-landing digest is corrected by calling `SubagentHandback` again, never by messaging `main` and narrating. ⚠️ **It carries no rules** — no procedure text, no population, no guard.
 
-**Digest** — never restate it in the hand-back; never write a count the digest does not carry;
-the caller renders `LEGS` from it.
 </output_format>
 
 <success_criteria>
@@ -456,6 +455,6 @@ the caller renders `LEGS` from it.
   the half that could not run wrote its own `--not-run` reason at key granularity.
 - No fresh spawn happened where a recorded id existed, and no `--record-resume` was written for
   a resume the liveness instrument did not read `LIVE`.
-- The hand-back is ≤ 1 KB (or carries its own per-list dropped counts + payload) and carries
-  every key, zeros included.
+- The hand-back is ≤ 1 KB (or carries its own per-list dropped counts + payload), carries
+  every key, zeros included, and was the last thing you emitted — nothing followed the call.
 </success_criteria>

@@ -8,9 +8,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the keep-alive leg's hand-back is its last emission.** `agents/fleet-keepalive-actor.md` now names `SubagentHandback` as the terminal action and forbids anything after it — no `SendMessage`, no heading, summary or trailing note — and states that a late-landing digest is corrected by calling the tool again rather than by messaging `main` and narrating. Measured 2026-11-24 on session `893df368`: 36 of 39 keepalive delegates complied (410–779 B), and 2 of the 3 over-cap ones were exactly this shape — a correction `SendMessage` plus a prose `Final state` block naming the round, which `check-handback-size.py` counts under its `ROUND_ID` regex (1 973 B and 1 109 B). The `<output_format>` "two artifacts" framing and its separate Digest paragraph are gone: the digest is written by `fleet-legs.py` and never reported, so the hand-back is the only thing the leg emits. Change set: `agents/fleet-keepalive-actor.md`, `CHANGELOG.md`.
+
 ## v0.367.2
 
 - test: **the census's goal-page attribution gains its positive control.** A goal manager opened by the flagged tick used to depend on its own `/vault-cli:work-on-goal` start turn for the page stamp, and that turn can never run — measured 2026-11-23 20:51:49 in `~/Library/Logs/claude-wrapper/stderr.log`, the start command was not sent ("the keystrokes reached the pty but the Enter did not take effect"), so the page kept no `claude_session_id` while its manager ran. The wrapper now stamps the page at open time, before its start commands run, and this test pins the census half: a goal page carrying its session id, with that session live, emits no `live session <sid> — no page records it` line and no `MISMATCH page`, **and** the same live session with the page's id removed IS reported — the control that proves the absence assertion can fail. Change set: `scripts/tests/test_keeper_census.py`, `CHANGELOG.md`.
+
 
 ## v0.367.1
 
