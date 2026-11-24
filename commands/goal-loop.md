@@ -47,9 +47,9 @@ Manager-loop — the **narrow / deep** layer.
 
 Rationale and incident history: the Manager Session runbook § Command rationale. This file carries only what a sweep executes.
 
-One manager per topic: owns ONE topic's declared goal set (e.g. *billing*, *notification*), read from that topic's page; the fleet manager may run above. Step 6 confirms no manager owns the name before arming, and stops.
+One goal scope: a goal declared by a topic is driven by that topic manager (no goal-manager tier, 2026-11-24); a goal in no topic by the fleet manager. Step 6 confirms no manager owns the name before arming, and stops.
 
-⚠️ **Never invoke this command from a worker session.** Starting a *goal* manager is the **topic manager's** act, and starting a *topic* manager is the operator's. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles — who may start what.
+⚠️ **Never invoke this command from a worker session.** A goal is driven by its declaring topic manager (no goal-manager tier, 2026-11-24). Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles.
 
 ## The round — the arm owns no step list
 
