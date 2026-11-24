@@ -1,5 +1,5 @@
 ---
-description: ONE round of the TOPIC manager loop — read the goals this topic declares and the goal managers on them, keep the live ones alive, start only flagged goals, render the goal table and re-arm. The round the topic loop's wakeup runs, and runnable by hand. Sweeps goal managers, never workers.
+description: ONE round of the TOPIC manager loop — read the goals this topic declares, drive each goal's rows through the goal-drive act leg, render the goal table and re-arm. The round the topic loop's wakeup runs, and runnable by hand. Drives goals, never workers.
 allowed-tools:
   - Task
   - Read
@@ -42,9 +42,9 @@ Topic-drive — **the topic tier's round**. The wakeup names THIS command; the a
 manager carries a subject and a loop. A worker that needs a subject driven routes it to its
 manager with `SendMessage` and says so.
 
-⚠️ **The rows are GOAL MANAGERS.** The topic tier may open a worker, but it does so on demand
-with `/supervisor:open --task`, never by sweeping one here (`docs/session-tiers.md` § The four
-tiers). A worker row is reported downward.
+⚠️ **The rows are GOALS.** The topic tier may open a worker, but it does so on demand
+with `/supervisor:open --task`, never by sweeping one here (`docs/session-tiers.md` § The
+three tiers). A worker row is reported upward to this topic manager.
 
 ## Router — read a step file only when its When holds
 
@@ -56,7 +56,7 @@ tiers). A worker row is reported downward.
 | 2b | Quiet check | every tick, after the readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-quiet.md` |
 | 3 | Sweep — the goal rows and their manager state | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-sweep.md` |
 | 4c | Closure — close what the evidence already finished | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
-| 5 | Keep alive — resume, restart or leave, per goal | every tick, after the sweep | *inline — § Keep alive below* |
+| 5 | Drive — dispatch the act leg for every declared goal | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-drive-act.md` |
 | 6 | Start — retired with the goal tier | never | *inline — § Start below* |
 | 12 | Tail — re-arm the `Monitor` channels | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
@@ -75,15 +75,14 @@ arm or the step file — do not act from memory of a previous round.
 - **`--interval <N>m`** is the **arm's**, not this command's: accepted so the wakeup's
   prompt parses. Step 12 re-arms only the `Monitor` channels (no `noop` correction).
 
-## Keep alive — inline, because it runs every tick
+## Drive — the act leg, dispatched from step 5
 
-⚠️ **Row 0a — this topic manager's own liveness record — runs here each round, before the per-goal loop.** It records the **topic's** cadence, not a goal's; a loop-sourced subject would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`.
+⚠️ **Row 0a — this topic manager's own liveness record — runs here each round, before the drive.** It records the **topic's** cadence, not a goal's; a loop-sourced subject would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`.
 
 ⚠️ **The per-goal keep-alive is retired (2026-11-24).** There is no goal-manager session to
-keep alive or resume: the topic manager drives each declared goal's rows directly through the
-goal-drive act leg (`agents/topic-drive.md`, `agents/goal-drive.md`). `topic-keepalive.py
---branch goal` answers `goal-branch-retired`; never call it, and never record a goal manager's
-verdict.
+keep alive or resume. The round's act is the **goal-drive act leg**, dispatched per declared
+goal from `commands/steps/topic-drive-act.md` (router row 5). `topic-keepalive.py --branch
+goal` answers `goal-branch-retired`; never call it, and never record a goal manager's verdict.
 
 ⚠️ **Drop every goal whose page reads a terminal `status` before driving it** — the goal-drive
 act leg reaps a finished worker; it never re-opens a closed goal.
@@ -97,9 +96,9 @@ There is no goal-manager session to start (merged into the topic tier 2026-11-24
 ## What this round must never do
 
 - **Never manage a worker** — no `goal-spawn`, no `SendMessage` to a worker, no nudging a
-  task. A worker row is reported downward to its goal manager.
+  task. A worker row is reported to this topic manager; the act leg drives it.
 - **Never classify a task.** This tier's rows are goals and their managers; the task buckets
-  are the goal manager's, in `agents/goal-sweep-reader.md`.
+  are the goal round's, in `agents/goal-sweep-reader.md`.
 - **Never decide an operator gate.** You surface it; the operator answers it.
 - **Close on complete evidence; tick only with an inline citation.** This tier closes only
   the topic page itself (**SC + `# Completion Gate`** — the topic's own contract, and the

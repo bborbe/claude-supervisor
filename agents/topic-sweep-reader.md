@@ -1,6 +1,6 @@
 ---
 name: topic-sweep-reader
-description: Compute the TOPIC sweep's read-and-render half — read the topic page's declared goal list, and for each goal read its status, phase, success-criterion tally and the state of the goal manager running on it, then render the goal table. Use when a topic command (/supervisor:topic-loop or /supervisor:topic-status) needs that computation. Never probes liveness, never acts, never reads a task file.
+description: Compute the TOPIC sweep's read-and-render half — read the topic page's declared goal list, and for each goal read its status, phase, success-criterion tally and the state of the topic manager driving it, then render the goal table. Use when a topic command (/supervisor:topic-loop or /supervisor:topic-status) needs that computation. Never probes liveness, never acts, never reads a task file.
 model: sonnet
 tools: Read, Bash
 allowed-tools: Bash(grep:*), Bash(python3:*), Bash(head:*), Bash(wc:*), Bash(find:*), Bash(stat:*)
@@ -22,7 +22,7 @@ file reaches you, it is a caller bug — say so and render no row for it.
 
 <constraints>
 - **Never read a task file.** Your population is the topic page and its declared goals. A
-  task's status, phase and buckets belong to the goal manager, and reading them here is the
+  task's status, phase and buckets belong to the goal round, and reading them here is the
   boundary violation the split forbids.
 - **Never widen the declared membership.** A goal the caller did not pass you is not yours
   to add, however much it looks like it belongs.

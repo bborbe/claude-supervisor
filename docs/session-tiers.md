@@ -2,7 +2,7 @@
 
 Every `/supervisor:*` command belongs to the tier of the session that invokes it, and its
 prefix names that tier: `fleet-*` for the fleet manager, `topic-*` for a topic manager,
-`goal-*` for a goal manager, `worker-*` for a worker. A few bare verbs are cross-tier —
+`goal-*` for the goal scope, `worker-*` for a worker. A few bare verbs are cross-tier —
 **the table below is the list**, so it is never restated here. Ask one question — *which
 session am I in?* — and the table answers what you may run.
 

@@ -1109,9 +1109,9 @@ grep the transcript.
 
 ## Which launcher a manager opens on
 
-A **manager** session — a topic or goal manager opened by `/supervisor:open` Step 2C, a `spawn_agent` call with `role: manager`, or a manager resumed by `/supervisor:restart` — does **not** take the worker launcher rule in § Spawn a worker item 8. Operator decision 2026-10-19: managers run on the vault's Claude launcher, so their model and effort are deliberate (`cc-private-claude` / `cc-seibert-claude` start `--model claude-opus-5-5[1m] --effort low`) rather than inheriting the vault's cheaper `-deepseek` default. Precedence:
+A **manager** session — a topic manager opened by `/supervisor:open` Step 2C, a `spawn_agent` call with `role: manager`, or a manager resumed by `/supervisor:restart` — does **not** take the worker launcher rule in § Spawn a worker item 8. (There is no goal-manager session: the tier is merged into the topic tier.) Operator decision 2026-10-19: managers run on the vault's Claude launcher, so their model and effort are deliberate (`cc-private-claude` / `cc-seibert-claude` start `--model claude-opus-5-5[1m] --effort low`) rather than inheriting the vault's cheaper `-deepseek` default. Precedence:
 
-1. the subject's own **`manager_launcher:`** frontmatter — the topic page for a topic manager, the goal page for a goal manager;
+1. the subject's own **`manager_launcher:`** frontmatter — the topic page for a topic manager;
 2. the vault's configured **`manager_launcher`** from vault-cli config — reported as `manager-default`. It is itself the `-claude` sibling of `claude_script` (`cc-private-deepseek` → `cc-private-claude`, `cc-private` → `cc-private-claude`) when the key is unset, derived by vault-cli and only when that script exists;
 3. the **`-claude` sibling** of the vault's `claude_script`, **when that script exists** beside it — the compatibility rung, reported as `claude-sibling`, for a vault-cli too old to emit the key;
 4. the vault's `claude_script` unchanged.

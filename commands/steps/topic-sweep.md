@@ -56,7 +56,7 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
 
 4. **Never sweep a task here.** The goal tier's `agents/goal-sweep-reader.md` classifies a
    goal's **task set** into buckets. A task row reaching this step is a tier violation: report
-   it downward to the goal manager that owns it, and render no row for it.
+   it to the topic manager that owns it, and render no row for it.
 
 5. **Render the table** — from the agent, or with
    `python3 .../scripts/box-table.py` reading `${CLAUDE_PLUGIN_ROOT}/docs/sweep-output.md`

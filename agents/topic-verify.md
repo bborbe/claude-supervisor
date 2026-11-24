@@ -232,7 +232,7 @@ across separate sessions, every one a false violation.
     ```
 
 13. **FILL** — for each gap, **name the goal whose criteria need work** and the bar it must
-    clear. Do not author it here. ⚠️ **A criterion with no task is the goal manager's finding,
+    clear. Do not author it here. ⚠️ **A criterion with no task is the goal round's finding,
     not a task you file** — return it as a route line.
 
 14. **STARTABILITY** — for each declared goal, read `phase`. `phase: todo` is the operator's
