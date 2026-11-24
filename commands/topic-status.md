@@ -128,4 +128,4 @@ cross-session state for every later tick.
    I do about this topic", that is `/supervisor:topic-loop`, not this snapshot.
 
 ⚠️ **A goal that no manager owns is a row, not an error.** It renders `—` in the Manager
-cell. Starting one is `topic-spawn`'s act and this command's advice is only the table.
+cell. There is no goal-manager session to start (merged into the topic tier 2026-11-24); a goal no manager owns is a row.

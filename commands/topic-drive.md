@@ -57,7 +57,7 @@ tiers). A worker row is reported downward.
 | 3 | Sweep — the goal rows and their manager state | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-sweep.md` |
 | 4c | Closure — close what the evidence already finished | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 5 | Keep alive — resume, restart or leave, per goal | every tick, after the sweep | *inline — § Keep alive below* |
-| 6 | Start — the ranking, then `topic-spawn` | the keep-alive left a slot free **and a flagged startable goal is held** | *inline — § Start below* |
+| 6 | Start — retired with the goal tier | never | *inline — § Start below* |
 | 12 | Tail — re-arm the `Monitor` channels | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
 
@@ -109,37 +109,11 @@ The **first line is the verdict**:
 
 ⚠️ **Never a fresh spawn while a recorded id exists** — a second manager is the double-writer failure `commands/open.md` § Step 2C prevents. ⚠️ **`UNKNOWN`/`AMBIGUOUS`/`MALFORMED` are cannot-tell, never death** — an undecidable probe read as death hands a working session a second writer.
 
-## Start — inline, because it is this tier's whole product
+## Start — retired with the goal-manager tier
 
-⚠️ **This tier opens a goal manager only for a goal the operator FLAGGED.** Operator ruling
-2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"*.
-Restart is not open (`docs/session-tiers.md` § Keep-alive), so the Start row is gated on the
-flag, and `goal-spawn`'s own flag clause no longer excludes it.
+There is no goal-manager session to start (merged into the topic tier 2026-11-24). The topic round drives each declared goal's rows directly — the goal-drive act leg — instead of starting a goal manager and handing off. A goal that no manager owns is a **row**, not a start; `commands/topic-status.md` renders it `—`.
 
-A goal is **startable for this row** when all hold:
-
-- `flag: true` in its frontmatter, **operator-set or `legacy`** — an agent-set or absent setter
-  is refused (`docs/fleet-surface.md` § Approval provenance);
-- the phase gate below passes (`goal-not-startable` is still the operator's approval boundary);
-- a keep-alive slot is free (`resume`/`restart` did not consume it).
-
-Only then:
-
-1. `topic-spawn.py --topic "<topic>" --rank` → the ranked rows and which take the N slots.
-2. For each **flagged** `start` row not already running: `/supervisor:topic-spawn "<goal>"`. Its
-   tokens (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`, `goal-unflagged`,
-   `manager-cap`, the worker refusal) are the gate — never re-derive them here.
-3. ⚠️ **Never exceed N = 3 per topic and never exceed the fleet ceiling.** The cap is never
-   raised to make room; rank and wait, or say which goal is starved and why.
-
-⚠️ **An UNFLAGGED goal with a free slot is not started — it is reported.** `--rank` keeps it in
-the output carrying the `unflagged` slot, which never takes one of the N, so the report and the
-gate cannot disagree. Say plainly that it is held for the operator's flag. That is not a stall
-and not a shortage: an unmanaged goal still gets its **workers** opened by the wrapper's flagged
-tick, so the work moves without a manager.
-
-⚠️ **A `phase: todo` goal is never started** — `goal-not-startable` is the operator's
-approval boundary, not a bug.
+⚠️ **`topic-spawn.py --rank` and `/supervisor:topic-spawn "<goal>"` are gone.** The script is now the topic ceiling check only (`--topic-open`, `commands/topic-spawn.md`), and there is no goal to start. The per-topic N ranking and the five goal refusals retired with the tier.
 
 ## What this round must never do
 
