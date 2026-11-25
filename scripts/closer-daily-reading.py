@@ -140,38 +140,70 @@ def records_for(root, day):
 
 
 def read(records):
-    """`(closers, session_bound_sessions, closer_sessions)` for one day's records."""
+    """`(closers, session_bound_sessions, closer_sessions)` for one day's records.
+
+    ⚠️ A null `session_id` counts as its own distinct session, never as absent.
+    `verdict()` takes the id from the payload, so a record can carry a `class` with
+    no id — and dropping it would UNDERCOUNT the session-bound population, which is
+    the one direction that certifies a day clean. One shared sentinel keeps such
+    records in the count without pretending they are one session each.
+    """
     closers = [r for r in records if r.get("closer")]
-    bound = {r.get("session_id") for r in closers if r.get("class") and r.get("session_id")}
+    bound = {r.get("session_id") for r in closers if r.get("class")}
+    # The coverage numerator keeps real ids only: a null id is not a session the
+    # census counted, so counting it would inflate coverage — the opposite error.
     sessions = {r.get("session_id") for r in closers if r.get("session_id")}
     return len(closers), len(bound), len(sessions)
 
 
 def census_from_goal_page(path, day):
-    """The `sessions` cell of `day`'s row in a goal page's readings table, or `None`."""
+    """The `sessions` cell of `day`'s row in a goal page's readings table, or `None`.
+
+    The column is found by its header name, not by position: the table gains a
+    column once and every positional read of it silently returns the wrong number.
+    Falls back to index 3 only when no header row is found at all.
+    """
     try:
         handle = open(path, encoding="utf-8")
     except OSError:
         return None
+    index = 3
     with handle:
         for line in handle:
             if not line.lstrip().startswith("|"):
                 continue
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if not cells or cells[0] != day.isoformat():
+            if not cells:
                 continue
-            # Date | census unkept | census double-kept | sessions | closer-lint
-            if len(cells) < 4:
+            if "sessions" in [c.lower() for c in cells]:
+                index = [c.lower() for c in cells].index("sessions")
+                continue
+            if cells[0] != day.isoformat():
+                continue
+            if len(cells) <= index:
                 return None
             try:
-                return int(cells[3])
+                return int(cells[index])
             except ValueError:
                 return None
     return None
 
 
+class _Parser(argparse.ArgumentParser):
+    """`argparse` exits 2 on a usage error, which is this script's session-bound code.
+
+    A typo'd flag would then read as "the day is NOT clean" — a wrong answer in the
+    direction that gets investigated as a real finding. Usage errors are 1 here, so
+    the two can never be confused.
+    """
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def parse_args(argv):
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         description="One day's SC4 reading over the closer-gate-lint records.",
         epilog="Exit 0 clean · 2 session-bound observable · 3 no records · "
         "4 coverage below floor or unknown · 1 usage/IO.",
@@ -255,6 +287,16 @@ def main(argv=None):
             file=sys.stderr,
         )
         return EXIT_SESSION_BOUND
+    if census is not None and census <= 0:
+        # ⚠️ A non-positive denominator makes the floor vacuous: `sessions < 0` is
+        # never true, so a day with zero coverage would certify clean — exactly the
+        # vacuous pass this reading replaces. No population, no clean day.
+        print(
+            f"closer-daily-reading: census sessions={census} is not a population — "
+            "coverage cannot be proven against it",
+            file=sys.stderr,
+        )
+        return EXIT_COVERAGE
     if census is None:
         print(
             "closer-daily-reading: no census denominator — coverage unproven "

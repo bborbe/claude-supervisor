@@ -66,7 +66,10 @@ def _write(root, name, records):
 def _run(argv):
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cdr.main(argv)
+        try:
+            code = cdr.main(argv)
+        except SystemExit as exc:  # argparse raises on a usage error and on --help
+            code = exc.code if isinstance(exc.code, int) else cdr.EXIT_USAGE
     return code, out.getvalue(), err.getvalue()
 
 
@@ -88,6 +91,15 @@ class ReadTest(unittest.TestCase):
             _record("c", "allow-listed", closer="👤 You: approve: y"),
         ]
         self.assertEqual(cdr.read(records), (5, 2, 3))
+
+    def test_a_class_with_no_session_id_still_counts(self):
+        # `verdict()` takes the id from the payload, so a record can carry a class
+        # with no id. Dropping it would undercount the session-bound population —
+        # the one direction that certifies a day clean.
+        records = [_record(None, "session-bound-ends", closer="x", cls="monitor")]
+        _, bound, sessions = cdr.read(records)
+        self.assertEqual(bound, 1)
+        self.assertEqual(sessions, 0)
 
     def test_blocked_retry_alone_does_not_make_a_session_bound_session(self):
         # A retry record re-emits the original class; without the session dedupe a
@@ -191,6 +203,30 @@ class ExitCodeTest(unittest.TestCase):
             code, _, _ = _run(["--date", DAY, "--root", root, "--census-sessions", "100"])
         self.assertEqual(code, cdr.EXIT_SESSION_BOUND)
 
+    def test_a_zero_census_cannot_certify_a_day(self):
+        # `sessions < 0.9 * 0` is `sessions < 0`, never true — so a zero denominator
+        # would pass every day clean with zero coverage. The vacuous exit 0 this
+        # reading exists to replace, reintroduced through the denominator.
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "a", [_record("a", "allow-listed", closer="x")])
+            code, out, err = _run(["--date", DAY, "--root", root, "--census-sessions", "0"])
+        self.assertEqual(code, cdr.EXIT_COVERAGE)
+        self.assertIn("not a population", err)
+
+    def test_a_negative_census_cannot_certify_a_day(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "a", [_record("a", "allow-listed", closer="x")])
+            code, _, _ = _run(["--date", DAY, "--root", root, "--census-sessions", "-5"])
+        self.assertEqual(code, cdr.EXIT_COVERAGE)
+
+    def test_a_usage_error_is_not_exit_2(self):
+        # argparse's own error exit is 2, which is this script's session-bound code;
+        # a typo'd flag must not read as "the day is NOT clean".
+        with tempfile.TemporaryDirectory() as root:
+            code, _, _ = _run(["--date", DAY, "--root", root, "--no-such-flag"])
+        self.assertEqual(code, cdr.EXIT_USAGE)
+        self.assertNotEqual(code, cdr.EXIT_SESSION_BOUND)
+
     def test_missing_root_is_a_usage_error(self):
         code, _, err = _run(["--date", DAY, "--root", "/nonexistent/closer-state"])
         self.assertEqual(code, cdr.EXIT_USAGE)
@@ -285,6 +321,18 @@ class GoalPageTest(unittest.TestCase):
             self.assertIsNone(cdr.census_from_goal_page(path, day))
             path2 = self._page(root, [f"| {DAY} | 9 | 0 | not run | x |"])
             self.assertIsNone(cdr.census_from_goal_page(path2, day))
+
+    def test_the_sessions_column_is_found_by_header_not_position(self):
+        # A table that gains a column must not silently return the wrong number.
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "goal.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("| Date | census unkept | sessions | note |\n")
+                handle.write("|---|---|---|---|\n")
+                handle.write(f"| {DAY} | 9 | 44 | extra |\n")
+            self.assertEqual(
+                cdr.census_from_goal_page(path, cdr.datetime.date.fromisoformat(DAY)), 44
+            )
 
     def test_goal_page_supplies_the_denominator(self):
         with tempfile.TemporaryDirectory() as root:
