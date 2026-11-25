@@ -87,18 +87,8 @@ class CheckHandbackSizeTest(unittest.TestCase):
         self.assertIn("agents/fleet-round.md", result.stderr)
         self.assertIn("over its", result.stderr)
 
-    def test_variable_lines_are_excluded(self):
-        """A keepalive fence whose row lists run long still passes: the contract truncates them."""
-        keys = self.legs["supervisor:fleet-keepalive-actor"]["required"]
-        rows = "\n".join(f"crash-loop: subject-{i} · WORKER" for i in range(40))
-        self.write(
-            "agents/fleet-keepalive-actor.md",
-            "**Hand-back**\n\n```text\n"
-            + " · ".join(f"{k}=<n>" for k in keys)
-            + "\n" + rows + "\n```\n</output_format>\n",
-        )
-        result = self.run_check()
-        self.assertEqual(result.returncode, 0, result.stderr)
+    # The keep-alive actor's variable-line tests were removed with the leg's retirement
+    # (v0.367.0, `0bfff171`): `VARIABLE` is now empty, so no leg declares unbounded rows any more.
 
     def test_missing_fence_fails(self):
         self.write("agents/fleet-round.md", "# no hand-back here\n")
@@ -196,19 +186,7 @@ class TranscriptModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("over its", result.stderr)
 
-    def test_variable_lines_are_excluded_in_transcript_mode(self):
-        """The contract declares these rows unbounded, so a long row list still passes."""
-        keys = load(KEYS_SCRIPT, "check_handback_keys").LEGS["supervisor:fleet-keepalive-actor"]["required"]
-        rows = "\n".join(f"crash-loop: subject-{i} · WORKER" for i in range(40))
-        path = self.write("j.jsonl",
-                          "**Hand-back**\n\n```text\n"
-                          + " · ".join(f"{k}=<n>" for k in keys)
-                          + "\n" + rows + "\n```\n</output_format>")
-        result = subprocess.run(
-            [sys.executable, str(SIZE_SCRIPT), "--transcript", str(path),
-             "--agent-type", "supervisor:fleet-keepalive-actor"],
-            capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    # (removed with the keep-alive leg's retirement — see the note above)
 
     def test_a_missing_transcript_dir_fails(self):
         result = subprocess.run(
@@ -317,14 +295,7 @@ class SubagentHandbackTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("over its", result.stderr)
 
-    def test_variable_lines_are_excluded_in_the_tool_shape_too(self):
-        """The keepalive leg's `crash-loop:` rows are unbounded whichever shape it uses."""
-        rows = "\n".join(f"crash-loop: subject-{i} · WORKER" for i in range(40))
-        path = self.write("e.jsonl",
-                          tool_use_line("SubagentHandback",
-                                        message="- hand-back: x\n" + rows))
-        result = self.run_transcript(path, agent_type="supervisor:fleet-keepalive-actor")
-        self.assertEqual(result.returncode, 0, result.stderr)
+    # (removed with the keep-alive leg's retirement — see the note above)
 
     def test_a_tool_only_transcript_with_no_text_block_still_measures(self):
         """The measured transcript's text block is a 61 B remark; a leg may emit none at all."""

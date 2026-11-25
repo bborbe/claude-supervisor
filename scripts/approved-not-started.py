@@ -294,7 +294,7 @@ def split(rows):
     The two classes need opposite levers. A row with no `claude_session_id` was never
     opened, and the wrapper's flagged tick opens it. A row whose id names a session that is no longer
     live was started and its worker died, and the reopen rule
-    (`commands/steps/keepalive.md` § Resume a worker whose session died) resumes it.
+    (`the wrapper's keep-alive tick` § Resume a worker whose session died) resumes it.
     Measured 2026-10-30: 81 of 122 rows were orphans, invisible as a class inside the
     single total.
 

@@ -8,7 +8,7 @@ the round restarted a manager, and the artifact that survives the round said not
 
 Measured 2026-11-06: `~/.claude/state/fleet-handback/2026-11-06T19-10Z.digest` is a real
 69-line rendered round over 24 sessions, and `grep -c 'unactioned:'` over it returns **0** —
-while `keepalive.md` instructs the round to print those lines.
+while the retired round keep-alive leg used to instruct the round to print those lines.
 
 The fix is a persisted line, not a louder chat line: the digest carries the shape from the
 moment the sweep writes it, and the leg replaces its own line once it has a reading.

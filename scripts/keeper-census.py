@@ -53,12 +53,11 @@ GOALS = _load("goals_declaration", "goals-declaration.py")
 SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
-#: Where a keeper leg is declared: the actor that runs three of the four procedures, and every
-#: `commands/steps/keepalive*.md`. Globbing is the point — a leg added in a new step file is
-#: picked up without editing this list.
-LEG_FILES = sorted(glob.glob(os.path.join(REPO, "commands", "steps", "keepalive*.md"))) + [
-    os.path.join(REPO, "agents", "fleet-keepalive-actor.md"),
-]
+#: Where a keeper leg is declared: every `commands/steps/keepalive*.md`. Globbing is the point —
+#: a leg added in a new step file is picked up without editing this list. The round's keep-alive
+#: acting leg was RETIRED in v0.367.0 (`0bfff171`) and the wrapper's keeper is now the sole
+#: keep-alive authority, so no round actor is listed here; the glob may legitimately be empty.
+LEG_FILES = sorted(glob.glob(os.path.join(REPO, "commands", "steps", "keepalive*.md")))
 
 #: The branch token may be bare (`--branch topic`) or quoted (`"--branch", "topic"`).
 LEG_PATTERNS = {
@@ -252,8 +251,17 @@ def cadence(subject, branch, vault):
 
 
 def legs(leg_file=None):
-    """Which keeper legs exist, read from the leg files' own text."""
+    """Which keeper legs exist, read from the leg files' own text.
+
+    ⚠️ **No round leg files means the wrapper's keeper owns every tier, not that nothing is
+    kept.** The round's keep-alive acting leg was RETIRED in v0.367.0 (`0bfff171`) and the
+    wrapper's keep-alive tick is now the sole authority for topic, goal and worker. Returning
+    all-`False` here would make every live session read `unkept` and card the whole fleet on
+    every tick — the regression this branch would otherwise ship.
+    """
     paths = [leg_file] if leg_file else LEG_FILES
+    if not paths:
+        return {name: True for name in LEG_PATTERNS}
     text = "\n".join(_read(path) for path in paths)
     return {name: bool(pattern.search(text)) for name, pattern in LEG_PATTERNS.items()}
 

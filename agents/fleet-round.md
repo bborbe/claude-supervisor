@@ -79,7 +79,7 @@ does not exist yet, which is a guess at a reading rather than the reading.
 
 ⚠️ **A missing input is named, never defaulted.** A defaulted vault root reads another
 vault's pages and a defaulted tasks dir classifies another fleet's rows
-(`agents/fleet-keepalive-actor.md` § inputs states the same rule for its own leg).
+(`the wrapper's keep-alive tick` § inputs states the same rule for its own leg).
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>

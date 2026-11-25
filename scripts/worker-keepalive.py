@@ -340,7 +340,7 @@ def _no_owner_note(owners: list) -> str:
     """`"; declared goal … → not-owner (…)"` for every goal that resolved no owner, or `""`.
 
     ⚠️ **It is appended to the reason line, never printed as its own line** — callers take
-    `lines[:2]`, so a third line never reaches the operator (`agents/fleet-keepalive-actor.md`).
+    `lines[:2]`, so a third line never reaches the operator (`the wrapper's keep-alive tick`).
     A declared `goals:` link whose page is missing resolves `not-owner` and would otherwise be
     invisible: the row looks goal-less and this leg resumes it with nothing said. `detail`
     names the subject (`no page for <subject> under <branch>` from `owner.py`), so a dangling
@@ -458,7 +458,7 @@ def main(argv: list[str]) -> int:
         line 2.
 
         ⚠️ **Exactly TWO lines, never a third.** Callers read line 1 as the action and line 2 as
-        the reason, and `agents/fleet-keepalive-actor.md` slices `lines[:2]` into one TSV row —
+        the reason, and `the wrapper's keep-alive tick` slices `lines[:2]` into one TSV row —
         a third line is discarded before the operator ever sees it. So a `not-owner` answer (a
         declared `goals:` link whose page is missing, otherwise invisible: the row looks
         goal-less and is resumed with nothing said about the broken link) rides on line 2

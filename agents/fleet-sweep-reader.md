@@ -156,7 +156,7 @@ The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads i
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 50 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 50 plus the `LEGS` block as seeded here (header + two `not run` lines = three) — exactly these sections, each printed as `(none)` rather than dropped. The nine over 40 are `UNCLAIMABLE`'s header, its five recent rows, its counts line and its status line. ⚠️ **`CLOSERS` and `DETECTORS` are exempt from that allowance and are never collapsed to a summary**: their rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
+Return **≤ 50 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 50 — exactly these sections, each printed as `(none)` rather than dropped. The nine over 40 are `UNCLAIMABLE`'s header, its five recent rows, its counts line and its status line. ⚠️ **`CLOSERS` and `DETECTORS` are exempt from that allowance and are never collapsed to a summary**: their rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
 
 ```
 <line 1 of this round's .digest, pasted verbatim — fleet-snapshot.py composes it>
@@ -185,8 +185,6 @@ CONTEXT ≥70% (idle, not in tool)
   <name> · <pct>
 LEDGER (open)
   <id> · <kind> · <what> · <state> · <age>          — or: (none) / UNKNOWN (read failed)
-LEGS
-  keep-alive: not run — no reading recorded this round
 NOTES   runbook/command disagreements, unreadable inputs
 ```
 
@@ -203,7 +201,7 @@ opens every task file, and the vault volume is I/O-bound — re-measured 2026-11
 earlier read of 31 s / 3 m 12 s was taken under lighter load). Budget minutes, not seconds, and
 do not read a slow round as a stuck one.
 
-⚠️ **The `LEGS` section is seeded here and owned by `commands/steps/output-shape.md` item 12 — never restate its formats.** Row 5b runs *after* this digest is written, so no reading exists; a fabricated `0` would be indistinguishable from a leg that ran and found nothing. Write the `not run` line verbatim; the leg replaces it via `scripts/fleet-legs.py`. ⚠️ **Never write a count here** — this leg does not measure those populations.
+⚠️ **There is no `LEGS` section.** The fleet round's keep-alive acting leg was RETIRED in v0.367.0 (`0bfff171`): the wrapper's keeper is the sole keep-alive authority, so no leg writes `keep-alive: unactioned:` counts and no `LEGS` block is seeded here. Do not write one.
 
 ⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a non-progressing `CLASSIFICATION` row — `parked`, `parked-on-watcher`, `waiting-on-human` or `finished — reap candidate`, which is the same four step 7b attempts the lookup for. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the fixed-section allowance still holds; keep the link and trim the row's prose if a section runs long.
 

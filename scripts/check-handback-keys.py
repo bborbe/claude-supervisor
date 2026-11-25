@@ -11,9 +11,7 @@ permanently false, and the branch behind it silently never runs.
       trigger and its body disagree, here the trigger and the data it tests do.
   (2) **The delegated legs.** Since 2026-11-06 `commands/steps/round-readings.md` and
       `commands/steps/goal-spawn.md` each dispatch a reader agent
-      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`), since 2026-11-07
-      the fleet round's acting leg does the same (`commands/steps/keepalive.md` →
-      `agents/fleet-keepalive-actor.md`) — each returns
+      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`) — each returns
       the verdicts the step no longer computes itself. A step reverted to its pre-split text
       stops dispatching, and a reader that drops one value of a family leaves the caller a
       cell it cannot evaluate — both silently. `docs/handback-contract.md` § The shape — the
@@ -98,41 +96,9 @@ LEGS = {
             "task",
         ),
     },
-    # The fleet round's two acting legs (rows 5b / 5c). Their counts reach the round's DIGEST,
-    # so the hand-back is the only place the caller learns whether the write landed — a leg
-    # whose `legs=` vanished would render counts no digest carries, and the render reads the
-    # digest. `dead-scan` is emitted because the digest write branches on it: it is the
-    # `--floor` / `--exact` label, and inferring it from the count is the "a number with no
-    # label reads as a measurement" defect `output-shape.md` item 12 exists to remove.
-    "supervisor:fleet-keepalive-actor": {
-        "agent": "agents/fleet-keepalive-actor.md",
-        "sites": ("commands/steps/keepalive.md",),
-        "required": (
-            "legs", "legs-reason", "lapsed-managers", "topicless-goal-managers", "dead-workers",
-            "dead-scan",
-            "restarted", "resumed", "parked-due", "nudged", "undelivered",
-            # § 2b's two counts. `decision-candidates` exists so a round that saw rows and
-            # resumed none is distinguishable from one that saw none — the same reason
-            # `parked-due` is emitted beside `resumed`, applied to a population the clock
-            # leg cannot reach.
-            "decision-candidates", "decision-resumed-a", "decision-resumed-d", "decision-unread",
-            # § 2b's write verdict. The four counts above are persisted to the round's `.decision`
-            # by `decision-park-resume.py --persist-beside`; without this key a failed write is
-            # invisible to the caller, and the readings would live in the hand-back alone — the
-            # defect the `.decision` artifact exists to remove, reproduced one layer up.
-            "decision-persist",
-            # one count per truncatable row list: the caller's reconciliation is
-            # `rows printed + that list's dropped count == this count`, so a list without
-            # its count has no arithmetic to check and a row dropped in transit is invisible
-            "crash-loop", "cannot-tell",
-            # ⚠️ ONE DROPPED COUNT PER LIST, never one shared `truncated=`: two truncatable
-            # lists behind a single count cannot say which list lost rows, so the per-list
-            # reconciliation above is unsatisfiable.
-            "crash-loop-truncated", "cannot-tell-truncated",
-            # the size-cap exception's payload key
-            "payload",
-        ),
-    },
+    # The keep-alive acting leg (row 5b) was RETIRED in v0.367.0 (`0bfff171`): the fleet round
+    # no longer runs it and the wrapper's keeper is the sole keep-alive authority. Its hand-back
+    # registration is removed with it; no `supervisor:fleet-keepalive-actor` entry belongs here.
     # The round itself, since 2026-11-17: the manager dispatches ONE `fleet-round` delegate
     # that reads the step files, runs the legs and persists the round, so the manager's
     # context holds the verdict instead of the rules. Its hand-back is the ONLY channel for
