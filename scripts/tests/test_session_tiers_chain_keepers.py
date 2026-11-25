@@ -64,22 +64,21 @@ EMPTY_CELLS = ("", "—", "–", "-")
 SUBAGENT_DECISION = "no keeper, by decision 2026-11-08"
 SUBAGENT_TIER = "Background sub-agent"
 
-TIER_COUNT = 7
+TIER_COUNT = 5
 
 TIER_NAMES = {
     "Fleet manager",
     "Topic manager",
-    "Goal manager — goal declared by a topic",
-    "Goal manager — goal in no topic",
     "Worker — task with a goal",
     "Worker — task with no goal",
     "Background sub-agent",
 }
 
-#: Measured distinct artifacts at v0.264.1. A floor, not an equality: adding an artifact to a
-#: row must not break a passing test, but an extractor that returns almost nothing must not
+#: Measured distinct artifacts after the goal-manager tier was removed (2026-11-24: the chain is
+#: 5 rows, not 7 — both goal-manager rows retired). A floor, not an equality: adding an artifact
+#: to a row must not break a passing test, but an extractor that returns almost nothing must not
 #: read as a clean table either.
-MIN_DISTINCT_ARTIFACTS = 9
+MIN_DISTINCT_ARTIFACTS = 7
 
 BACKTICK = re.compile(r"`([^`]+)`")
 

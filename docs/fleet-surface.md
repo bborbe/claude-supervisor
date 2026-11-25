@@ -30,15 +30,15 @@ marketplace changes the prefix with it — a one-place edit here, not a sweep of
 
 **A manager is never started in a worker session.** A worker session carries a *task*; a manager session carries a *topic or goal* and a loop. Arming one inside the other collapses the two roles, and the collapse is silent: the session keeps its task name and its task anchor while its turns now sweep a topic's whole tracked set, and the operator sees a worker whose tab is quietly doing someone else's job. (Operator rule, 2026-09-21 — stated when a worker session proposed to exercise a one-sweep `/supervisor:goal-loop` run as its own end-to-end check.)
 
-The direction that **is** allowed runs the other way, and the operator's hierarchy (2026-10-23, amended 2026-10-30) names what each level may open: **the fleet manager is top of everything** — it opens topic managers, and a worker or a goal manager **only when no lower-tier manager owns that subject**, the goal-manager half further narrowed to *only when that goal is flagged*; **a topic manager opens workers, and a goal manager only when that goal is flagged**; **a goal manager opens workers** (§ Spawn a worker); **a worker opens nothing**. A manager is never opened fresh on the operator's behalf — only restarted, or opened because it was flagged (`docs/session-tiers.md` § The four tiers). A worker reaches its manager over `SendMessage`. **Starting a *topic* manager is the operator's decision** — no manager invents a topic — but the open is the fleet manager's, through `/supervisor:open --topic`; every rung below it belongs to a manager tier (`commands/topic-spawn.md`, `commands/open.md` § Step 2B).
+The direction that **is** allowed runs the other way, and the operator's hierarchy (2026-10-23, amended 2026-10-30; goal tier merged into the topic tier 2026-11-24) names what each level may open: **the fleet manager is top of everything** — it opens topic managers, and a **worker** only when no lower-tier manager owns that subject; **a topic manager opens workers** and drives each goal it declares directly (there is no goal-manager tier); **a worker opens nothing**. A manager is never opened fresh on the operator's behalf — only restarted, or opened because it was flagged (`docs/session-tiers.md` § The three tiers). A worker reaches its manager over `SendMessage`. **Starting a *topic* manager is the operator's decision** — no manager invents a topic — but the open is the fleet manager's, through `/supervisor:open --topic`; every rung below it belongs to a manager tier (`commands/topic-spawn.md`, `commands/open.md` § Step 2B).
 
-⚠️ **The tree is a tree, not a ladder** — fleet → topic → goal → worker, and a level may open any level below it, not only the next one down. A goal manager never starts or messages another goal manager, and a worker opens nothing. `docs/session-tiers.md` § The four tiers is the canonical table.
+⚠️ **The tree is a tree, not a ladder** — fleet → topic → worker, and a level may open any level below it, not only the next one down. A worker opens nothing. `docs/session-tiers.md` § The three tiers is the canonical table.
 
 ⚠️ **The tree starts at whatever level exists.** A task with no goal is managed by its nearest ancestor — its topic's manager if the task sits directly under a topic, otherwise the fleet manager. A goal with no topic is managed by the fleet manager. § Which manager owns a subject carries the resolution.
 
-**Dispatch authority is the manager's.** Only a manager opens sessions — the goal-loop for its topic or goal, the fleet-loop fleet-wide — under **one fleet-wide concurrent limit** (§ Spawn a worker item 5). The worker-side rule lives once, in the global rule `worker-does-not-open-sessions` at `~/.claude/claude-md-rules/worker-does-not-open-sessions.md`; that file carries the prohibition, and it is **not restated here**. A worker that finds work outside its anchored task routes it to its manager, per the rule above.
+**Dispatch authority is the manager's.** Only a manager opens sessions — the topic-loop for its topic, the fleet-loop fleet-wide — under **one fleet-wide concurrent limit** (§ Spawn a worker item 5). The worker-side rule lives once, in the global rule `worker-does-not-open-sessions` at `~/.claude/claude-md-rules/worker-does-not-open-sessions.md`; that file carries the prohibition, and it is **not restated here**. A worker that finds work outside its anchored task routes it to its manager, per the rule above.
 
-⚠️ **There is no one-sweep mode — use `/supervisor:goal-status` to look and `/supervisor:goal-drive` to act once** (topic tier: `/supervisor:topic-status` / `/supervisor:topic-drive`). `goal-loop` once carried a flag that suppressed the arming and nothing else: the Guardrails still ran, so a single sweep could spawn up to 2 sessions, auto-resume a dead worker, auto-compact one over 70% and reconcile the subject page. **"One sweep" is a cadence limit, not a blast-radius limit.** The flag was removed because its name promised a read-only look it never gave (read that way, and caught, on 2026-09-21); `goal-status` + `goal-drive` split the look from the act honestly.
+⚠️ **There is no one-sweep mode — use `/supervisor:topic-status` to look and `/supervisor:topic-drive` to act once** (goal scope: `/supervisor:goal-status` / `/supervisor:goal-drive`). `goal-loop` once carried a flag that suppressed the arming and nothing else: the Guardrails still ran, so a single sweep could spawn up to 2 sessions, auto-resume a dead worker, auto-compact one over 70% and reconcile the subject page. **"One sweep" is a cadence limit, not a blast-radius limit.** The flag was removed because its name promised a read-only look it never gave (read that way, and caught, on 2026-09-21); `goal-status` + `goal-drive` split the look from the act honestly.
 
 ⚠️ **The fleet side has the same split — use `/fleet-status` to look and `/fleet-drive` to act once.** `fleet-loop` once required a `loop` argument to repeat; a bare invocation ran one round and stopped, and a round dispatched nothing at all — no drive leg, so parked-but-unblocked sessions sat until someone ran `/fleet-drive` by hand. That is the manager-layer shape missing one leg, not a smaller blast radius: the round still swept, classified and wrote the snapshot, so "one round" was a cadence limit there too. The argument was removed on the same reading as the manager flag — a bare `/supervisor:fleet-loop` repeats by default and dispatches the drive leg every round, and `/fleet-drive` is the round, runnable by hand. ⚠️ **The two layers are exact mirrors — the same two-way split.** On the fleet side `fleet-loop` (arm) : `fleet-drive` (round); on each manager tier `topic-loop`/`goal-loop` (arm) : `topic-drive`/`goal-drive` (round). In all three, the **round** is what a wakeup names and what running by hand runs, so there is no separate by-hand act leg to name. Until 2026-10-12 the fleet side carried a third verb — a round with no manager-side twin, distinct from `fleet-drive` — and it was folded into `fleet-drive` so each layer has one `drive` verb, not two spellings of the round.
 
@@ -1109,9 +1109,9 @@ grep the transcript.
 
 ## Which launcher a manager opens on
 
-A **manager** session — a topic or goal manager opened by `/supervisor:open` Step 2C, a `spawn_agent` call with `role: manager`, or a manager resumed by `/supervisor:restart` — does **not** take the worker launcher rule in § Spawn a worker item 8. Operator decision 2026-10-19: managers run on the vault's Claude launcher, so their model and effort are deliberate (`cc-private-claude` / `cc-seibert-claude` start `--model claude-opus-5-5[1m] --effort low`) rather than inheriting the vault's cheaper `-deepseek` default. Precedence:
+A **manager** session — a topic manager opened by `/supervisor:open` Step 2C, a `spawn_agent` call with `role: manager`, or a manager resumed by `/supervisor:restart` — does **not** take the worker launcher rule in § Spawn a worker item 8. (There is no goal-manager session: the tier is merged into the topic tier.) Operator decision 2026-10-19: managers run on the vault's Claude launcher, so their model and effort are deliberate (`cc-private-claude` / `cc-seibert-claude` start `--model claude-opus-5-5[1m] --effort low`) rather than inheriting the vault's cheaper `-deepseek` default. Precedence:
 
-1. the subject's own **`manager_launcher:`** frontmatter — the topic page for a topic manager, the goal page for a goal manager;
+1. the subject's own **`manager_launcher:`** frontmatter — the topic page for a topic manager;
 2. the vault's configured **`manager_launcher`** from vault-cli config — reported as `manager-default`. It is itself the `-claude` sibling of `claude_script` (`cc-private-deepseek` → `cc-private-claude`, `cc-private` → `cc-private-claude`) when the key is unset, derived by vault-cli and only when that script exists;
 3. the **`-claude` sibling** of the vault's `claude_script`, **when that script exists** beside it — the compatibility rung, reported as `claude-sibling`, for a vault-cli too old to emit the key;
 4. the vault's `claude_script` unchanged.
@@ -1139,12 +1139,11 @@ rule**:
    goal branch. A reader looking for a topic declaration *on the goal page* finds none and
    falls through to tier 4, skipping the real owner;
 4. otherwise **the nearest live ancestor manager** — and since 2026-10-20 that is a tier, not
-   a single name. A **goal with no live manager, under a live topic manager, is owned by that
-   topic manager**: the topic tier's whole product is starting and keeping alive the goal
-   managers of the goals it declares, so an unmanaged goal inside a live topic is that
-   manager's to start (`commands/topic-spawn.md`), not the fleet manager's. A **topic** with
-   no live manager, and any subject with no live ancestor at all, falls to the **Fleet
-   Manager**.
+   a single name. A **goal declared by a live topic manager is owned by that topic manager**:
+   with no goal-manager tier, the topic manager drives each declared goal directly, so a goal
+   inside a live topic is that manager's — never the fleet manager's. A **goal with no
+   topic**, a **topic** with no live manager, and any subject with no live ancestor at all,
+   falls to the **Fleet Manager**.
 
 A **live** manager here is an *owner* as `docs/session-tiers.md` § Keep-alive defines it —
 this section owns the resolution order, that one owns the definition, and
@@ -1157,21 +1156,11 @@ next live ancestor, and `cannot-tell` **stops** the walk — an undecidable read
 to hand the subject to another tier, because two managers on one subject are a double writer.
 
 ⚠️ **The tier is what makes the fallback answerable, and getting it wrong is silent.** Naming
-the fleet manager as the owner of an unmanaged goal inside a live topic routes the start to
-the wrong tier: the fleet manager would start a goal manager the topic manager is already
-ranked to start, and the `manager-cap` accounting would be split across two counters that
-never see each other.
+the fleet manager as the owner of a goal inside a live topic routes the drive to the wrong
+tier: the fleet manager would drive a goal the topic manager already drives, and the
+`manager-cap` accounting would be split across two counters that never see each other.
 
-⚠️ **Tier 4 is about the GOAL's owner, not the WORKER's parent.** The topic manager owns an
-unmanaged goal so it can start that goal's manager; it does not put the worker under the topic
-manager. `scripts/fleet-board.py`'s `manager_on_chain` parents a worker only to the goal
-manager of a goal its task declares (`managed_by` first, then `goals:`), and when no goal
-manager is live the worker falls to the Fleet Manager (the root) as a holding row. ⚠️ **Opening
-a worker is a separate right from parenting one** — the topic tier may open a worker
-(`/supervisor:open --task`), but that does not adopt the worker of a goal it does not own
-(`commands/topic-loop.md`). Two exceptions keep a topic manager as a worker's parent: a task
-whose `managed_by` names a topic, and a goal-less task listed directly under a topic (the
-nearest-ancestor case above).
+⚠️ **A worker whose task declares a goal parents to that goal's declaring topic manager.** With no goal-manager tier, the topic manager that declares the goal is its only manager, so `scripts/fleet-board.py`'s `manager_on_chain` resolves the worker to it (`managed_by` first, then `goals:` → the goal → its declaring topic). A goal with no topic falls to the Fleet Manager (the root) as a holding row; a goal-less task listed directly under a topic parents to that topic, and a task whose `managed_by` names a topic parents there too.
 
 ⚠️ **`managed_by` has no writer yet, and saying so is part of the rule.** It is authored by
 hand — by the operator, or by a manager settling a task whose `goals:` genuinely names more
@@ -1232,7 +1221,7 @@ the split below. A surface that needs either half points here instead of restati
 | **Open** — `/supervisor:open --flagged` | `commands/open.md` § Step B, `scripts/flagged-rows.py` | yes — selects | **yes, at every tier** — only `OPENING_ACTORS` (`operator`, `legacy`) open; an agent-set or absent setter is `REFUSED` with `agent-set-flag`. The decision is `scripts/flag_provenance.py` `flag_admits()`, and every open path routes through it |
 | **Operator-named marker** — the cap exemption | `bborbe/claude-wrapper` `docs/open-endpoint.md` | yes | **yes** — `operator_named` needs the pair, `flag` true **and** an opening actor |
 | **Spawn** — a manager's `To open` rows | `commands/steps/goal-spawn.md` | yes — not a parked marker | **yes** — the selection routes through the shared predicate |
-| **Goal / topic opens** | `scripts/topic-spawn.py --goal`, `--topic-open`; `scripts/topic-keepalive.py` | yes | **yes** — both `flagged()` helpers delegate to the shared predicate |
+| **Topic opens** | `scripts/topic-spawn.py --topic-open`; `scripts/topic-keepalive.py --branch topic` | yes | **yes** — both `flagged()` helpers delegate to the shared predicate. The goal branch is retired (the goal-manager tier is merged into the topic tier), so there is no `--goal` open path |
 | **Focus rank** — read-only ranking | `scripts/next-focus.py` | yes | **yes** — an operator-set flag ranks; it opens nothing |
 | **Resume** — the drive leg's auto-resume gate | `agents/goal-drive.md` step 3 | **no** — the `not parked` clause is phase and status only | **no** |
 

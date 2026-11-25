@@ -6,7 +6,7 @@ Audience split follows `coding/docs/readme-guide.md`: README answers *"can a new
 
 ## Session tiers
 
-Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `topic-*` for a topic manager, `goal-*` for a goal manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next`, `close` and `ready` are cross-tier. The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may open: the fleet manager is top of everything — it opens topic managers, goal managers and workers, each when no lower-tier manager owns the subject; a topic manager opens goal managers and workers; a goal manager opens workers; a worker opens nothing. The `<tier>-spawn` verbs are narrower than their tier: `topic-spawn` starts a goal manager, `goal-spawn` a worker, and a worker opened from the topic tier goes through `/supervisor:open --task`. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
+Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `topic-*` for a topic manager, `goal-*` for a goal *scope* the topic round drives (there is no goal-manager tier — merged into the topic tier 2026-11-24), `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next`, `close` and `ready` are cross-tier. The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may open: the fleet manager is top of everything — it opens topic managers and workers, each when no lower-tier manager owns the subject; a topic manager opens workers and drives each goal it declares directly; a worker opens nothing. The `<tier>-spawn` verbs are narrower than their tier: `goal-spawn` starts a worker, and a worker opened from the topic tier goes through `/supervisor:open --task`. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
 
 ## How it works
 
@@ -153,14 +153,14 @@ commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
 commands/fleet-triage.md + commands/steps/fleet-triage-*.md  one pass over every live session — classify, close, drive, card; the deliverable is all five green conditions: zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for
 commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
-commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start only goals the operator flagged
-commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
+commands/topic-drive.md                  one TOPIC — the loop's round: drive the topic's declared goals directly, start only workers the operator flagged
+commands/topic-spawn.md                  one TOPIC — keep the topic's declared goals driven; holds no spawn tool
 commands/topic-verify.md                 topic manager — verify one topic, suggest fixes
 commands/{goal-loop,goal-status}.md      one GOAL — the loop's arm and its read-only task snapshot
 commands/goal-drive.md                   one GOAL — the loop's round, and runnable by hand
 commands/goal-spawn.md                   one GOAL — spawn ONE worker (holds the spawn tool)
 commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
-commands/goal-verify.md                          goal manager — verify one goal, suggest fixes
+commands/goal-verify.md                          goal scope — verify one goal, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done
 scripts/progress-window.py                       its measured window — verdict, A/B/C observations and the claim result, from disk only (spec: docs/session-progress.md)
 commands/restart.md                              restart ONE named session, worker or manager — kill, resume, re-orient
@@ -180,9 +180,9 @@ docs/sweep-output.md                             the manager sweep's output fram
 docs/fleet-drive-rationale.md                    the evidence behind the drive leg's rules — the agent body states them and points here
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
-scripts/topic-spawn.py                           the topic tier's spawn gate — goal-not-in-scope / goal-not-startable / manager-cap, the § 1 ranking, and the worker refusal
+scripts/topic-spawn.py                           the topic manager ceiling check (`--topic-open`) — the goal start gate and its refusals retired with the goal-manager tier
 scripts/topic-keepalive.py                       the topic tier's keep-alive — resume-not-respawn, 3 resumes per goal per 30 min, crash-loop line
-scripts/topicless-goal-keepalive.py              the fleet tier's keep-alive for goal managers no topic declares — selects in_progress+execution goals, asks topic-keepalive.py per goal, never acts
+scripts/topicless-goal-keepalive.py              RETIRED (goal-manager tier merged into the topic tier) — a refusing stub, exit 1
 scripts/owner.py                                 THE ownership definition (`docs/session-tiers.md` § Keep-alive) as code — owner / not-owner / cannot-tell from session liveness + loop state; every keeper and filter resolves through it
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
 docs/orphan-recovery.md                          stop + recreate a remote worker whose container or pod is gone (canonical)

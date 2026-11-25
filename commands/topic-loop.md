@@ -2,7 +2,7 @@
 # No `name:` field, deliberately — a command takes its name from its filename. The
 # frontmatter rule for `commands/*.md` (`agent-cmd/command-frontmatter`) requires
 # `description`, `allowed-tools` and `argument-hint` and nothing else.
-description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start only flagged goals, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
+description: Arm the TOPIC manager loop — drive the goals this topic declares directly (no goal-manager tier), keep their workers alive, print the goal table (default 15 min, `--interval`). The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Drives goals, never workers.
 allowed-tools:
   - Task
   - Read
@@ -39,16 +39,15 @@ argument-hint: "[topic] [--interval <N>m] (topic detected when omitted)"
 ---
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
-Topic-loop — the **topic tier's arm**. It owns ONE topic's declared goal set and the goal
-managers running on it. It manages **goal managers, and the workers it opens**.
+Topic-loop — the **topic tier's arm**. It owns ONE topic's declared goal set and drives each goal
+directly (there is no goal-manager tier, merged 2026-11-24). It manages **each goal's rows, and
+the workers it opens**.
 
-⚠️ **The loop sweeps goal rows; opening a worker is a separate right.** The operator's
-hierarchy (2026-10-23) puts the fleet manager at the top of everything, has a topic manager
-managing goal managers **and** workers, and a goal manager managing workers
-(`docs/session-tiers.md` § The four tiers). A worker is opened on demand with
-`/supervisor:open --task`, never swept here. A worker row reaching this tier is not work for
-the sweep: route it down to the goal manager that owns it, or up to the fleet manager when no
-goal owns it.
+⚠️ **The loop drives each declared goal; opening a worker is a separate right.** The operator's
+hierarchy (2026-10-23, goal tier merged into the topic tier 2026-11-24) puts the fleet manager at
+the top of everything, and a topic manager managing each goal it declares **and** the workers it
+opens (`docs/session-tiers.md` § The three tiers). A worker is opened on demand with
+`/supervisor:open --task`, never swept here.
 
 ⚠️ **This file is the ARM.** It resolves, confirms no manager already owns the subject,
 arms the wakeup and exits. Every wakeup runs **`/supervisor:topic-drive "<topic>"`** — the
@@ -56,8 +55,8 @@ arms the wakeup and exits. Every wakeup runs **`/supervisor:topic-drive "<topic>
 deliberately NOT copied here**: a list with two homes drifts.
 
 ⚠️ **Never invoke this command from a worker session.** Starting a *topic* manager is the
-operator's decision (the fleet manager performs the open); starting a *goal* manager is this
-tier's. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles.
+operator's decision (the fleet manager performs the open); this tier then drives each goal it
+declares. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles.
 
 ## Interval — the tick and its floor
 
@@ -171,26 +170,17 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
 - **The line is work vs management — not read vs write.** Management writes are the
   manager's own — the topic page, a goal's `status`/`phase`, stale stamps — via `Edit` /
   `vault-cli goal set`. Code, verification, investigation and the fix go to a worker.
-- **A topic manager never sweeps a worker.** It starts, keeps alive and reaps **goal
-  managers**, and it may open a worker on demand with `/supervisor:open --task` — but a
-  worker row is reported downward to the goal manager that owns it, never acted on here.
-  This is the boundary the split exists to draw.
+- **A topic manager drives each declared goal directly and opens workers on demand.** It runs
+  the goal-drive act leg for every goal it declares (keeping each goal's workers alive), and it
+  may open a worker with `/supervisor:open --task`.
 - **Never present a manager-owned action as an `AskUserQuestion` option.** Opening or
-  resuming an approved goal manager, readying a row, repairing a page box — execute them,
+  resuming an approved goal, readying a row, repairing a page box — execute them,
   then report them as a table line. The modal is reserved for operator-only decisions
   (`phase: todo` approval, a production-touching or irreversible action, a TDR), and even
   those reach the operator as an attention-board card carrying a `--dedup-key`.
-- **No goal manager → start one, under the ranking, and only for a goal the operator FLAGGED
-  (an agent-set flag is refused).** `/supervisor:topic-spawn` is the only route; it holds no spawn tool and
-  delegates to `/supervisor:open --goal`. ⚠️ **Rule 4 — restart is not open:** a goal
-  carrying no flag **and no recorded `claude_session_id`** is **reported and
-  held**, never opened, however free the slots are. `commands/topic-drive.md` § Start states
-  the same rule and this line must not drift from it; the executable gate is
-  `scripts/topic-spawn.py`'s `goal-unflagged` refusal.
-  ⚠️ **That gate is the OPEN's and must never be applied to a resume.** A goal with a
-  recorded id whose session is `ABSENT`, or whose loop is `STALE`, is a **restart** — rule 1
-  restarts it automatically and the flag is not consulted. Holding those as "unflagged"
-  makes the goal tier's automatic restart inert for every unflagged goal.
+- **Each declared goal is driven directly — there is no goal-manager session to start.** The
+  topic round runs the goal-drive act leg for every goal it declares; `commands/topic-drive.md`
+  § Start is the round's own statement of that, and this line must not drift from it.
 - **Anchored, always.** No work is delegated or spawned without a goal anchoring it.
   Read-only manager business (sweep, table, TTS) needs no anchor.
 
@@ -214,7 +204,7 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `# Completion Gate`** — a topic is the only level carrying both sets
   (`docs/session-progress.md:37`). When every box in both sets reads `[x]`, the round runs
   `vault-cli topic complete "<topic>" --vault "<vault>"` and quotes its verdict. A member goal is
-  never closed from this tier — its goal manager closes it, after moving its open tasks out
+  never closed from this tier — the topic round closes it after moving its open tasks out
   (goal-closure.md § Step 0b);
   the execution, the terminal guard and the `--vault` contract live in
   `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are not restated here. ⚠️ **Tick a

@@ -120,7 +120,7 @@ this before the act, not after**: `restart-worker.py` refuses a held target itse
 
 The topic tier has no keep-alive of its own, so a lapsed topic manager stayed lapsed. This
 leg is the missing rung: **restart is not open**, so resuming one that already
-owns its subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
+owns its subject decides nothing new (`docs/session-tiers.md` § The three tiers, rule 1).
 
 **Population — every topic page whose verdict is not `loop-stopped`.** ⚠️ **Never select on
 `claude_session_id`.** That is the field the stood-down handover clears, so filtering on it
@@ -179,9 +179,9 @@ installing task reads it. Format, not-run form and the dead-worker floor: **sing
 must land in the digest, which outlives the round** — a count spoken into chat and nowhere else
 dies with the round.
 
-## 1b. Restart an unkept lapsed goal manager
+## 1b. Retired — no goal-manager keep-alive
 
-Read `<plugin root>/commands/steps/keepalive-topicless-goals.md` (absolute; never search for it) and run it.
+The goal-manager tier is merged into the topic tier. Read `<plugin root>/commands/steps/keepalive-topicless-goals.md` — a retirement notice: record the leg not-run, run nothing.
 
 ## 2. Resume the park watches whose re-check has passed
 

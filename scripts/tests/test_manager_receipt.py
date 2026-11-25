@@ -245,15 +245,26 @@ class Receipt(unittest.TestCase):
     def topic_check(self):
         return self.cli("--check", "--topic", self.topic, "--tier", "topic")
 
-    def test_a_topic_round_owes_no_drive_leg(self):
-        # A topic round has no drive row at all (`commands/topic-drive.md` row 5 is
-        # *Keep alive*), so it must not be asked for one. Without the tier split this
-        # round would print `skipped: drive` forever — the permanent false red that
-        # `FLEET_STEPS`' own comment names.
+    def test_a_topic_round_that_does_its_work_is_green(self):
+        # Since 2026-11-24 the topic round owes a drive leg (row 5 dispatches the act
+        # leg), so a complete topic round records it and checks green.
         self.full_round()
         rc, out = self.topic_check()
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
+
+    def test_a_topic_round_that_skips_its_drive_is_red(self):
+        # The regression round 6 found: the topic router named the act leg but nothing
+        # recorded it, so a round could render a full table and drive nothing. `drive`
+        # is in TOPIC_STEPS now, and the skip must fail the round's own check.
+        self.start()
+        for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
+                        ("sweep", self.artifact("sweep.json", SWEEP_OK)),
+                        ("readings", self.artifact("readings.json", READINGS_OK))):
+            self.record(step, p)
+        rc, out = self.topic_check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: drive", out)
 
     def test_a_topic_round_still_owes_its_sweep(self):
         # `sweep` stays in the topic tuple: the topic round does sweep every tick, so
@@ -276,7 +287,7 @@ class Receipt(unittest.TestCase):
         self.assertEqual(self.m.steps_for("", "goal"), self.m.STEPS)
         self.assertEqual(self.m.steps_for("", "topic"), self.m.TOPIC_STEPS)
         self.assertIn("drive", self.m.STEPS)
-        self.assertNotIn("drive", self.m.TOPIC_STEPS)
+        self.assertIn("drive", self.m.TOPIC_STEPS)
         self.assertEqual(self.m.slug(self.topic, ""), self.m.slug(self.topic))
         self.assertNotIn("topic", self.m.BRANCHES)
 
@@ -307,14 +318,15 @@ class Receipt(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertNotIn("skipped: readings", out)
 
-    def test_record_drive_is_accepted_on_the_goal_tier_and_refused_on_topic(self):
+    def test_record_drive_is_accepted_on_both_tiers(self):
+        """The topic round owes a drive leg now, so the topic tier accepts its record."""
         self.start()
         p = self.artifact("drive.txt", DRIVE_OK)
         rc, _ = self.record("drive", p)
         self.assertEqual(rc, 0)
-        with self.assertRaises(SystemExit):
-            self.cli("--record", "--topic", self.topic, "--tier", "topic",
-                     "--step", "drive", "--path", p)
+        rc, _ = self.cli("--record", "--topic", self.topic, "--tier", "topic",
+                         "--step", "drive", "--path", p)
+        self.assertEqual(rc, 0)
 
     def test_a_partial_feed_read_is_a_completed_reading(self):
         """`partial` is a read that RAN, so it must not be flagged as a skipped step.
@@ -1353,7 +1365,8 @@ class KeepAliveVerdicts(unittest.TestCase):
             fh.write(json.dumps({"kind": "LIVENESS", "ts": iso_ts(time.time())}) + "\n")
         for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
                         ("sweep", self.artifact("sweep.txt", SWEEP_OK)),
-                        ("readings", self.artifact("readings.json", READINGS_OK))):
+                        ("readings", self.artifact("readings.json", READINGS_OK)),
+                        ("drive", self.artifact("drive.txt", DRIVE_OK))):
             self.cli("--record", "--topic", self.topic, "--step", step, "--path", p)
 
     def verdict(self, verdict="resume", goal=GOAL, session="sid-1"):
@@ -1664,21 +1677,26 @@ class KeepAliveVerdicts(unittest.TestCase):
     # --- the probe's own CLI, end to end in-process ----------------------------------
 
     def probe(self, liveness, loop, stamps=0, sid="sid-9"):
-        """Run `topic-keepalive.py main(... --receipt)` against a one-goal vault."""
+        """Run `topic-keepalive.py main(... --receipt)` against a one-topic vault.
+
+        The receipt is the TOPIC round's own: with the goal-manager tier retired there is no
+        goal manager to owe an outcome for, so the probe's subject is the topic itself.
+        """
         k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
         vault = os.path.join(self.arts.name, "vault")
-        os.makedirs(os.path.join(vault, "24 Goals"), exist_ok=True)
-        with open(os.path.join(vault, "24 Goals", f"{self.GOAL}.md"), "w", encoding="utf-8") as fh:
+        os.makedirs(os.path.join(vault, "23 Topics"), exist_ok=True)
+        with open(os.path.join(vault, "23 Topics", f"{self.topic}.md"), "w", encoding="utf-8") as fh:
             fh.write(f"---\nclaude_session_id: {sid}\n---\nbody\n")
         if stamps:
-            p = k.state_path(vault, self.GOAL)
+            p = k.state_path(vault, self.topic, "topic")
             with open(p, "w", encoding="utf-8") as fh:
                 json.dump({"resumes": [time.time() - 60] * stamps}, fh)
         k.session_verdict = lambda _sid: liveness
         k.cadence_state_detail = lambda _subject, _branch="goal", _vault="": (loop, "")
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = k.main(["--vault", vault, "--goal", self.GOAL, "--receipt", self.topic])
+            rc = k.main(["--vault", vault, "--subject", self.topic, "--branch", "topic",
+                         "--receipt", self.topic])
         return rc, out.getvalue().splitlines()
 
     def owed(self):
