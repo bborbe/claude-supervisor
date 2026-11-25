@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Tests for scripts/standdown-order.py and the two readers that delegate to it.
+
+The marker is honoured by ORDERING, not presence. `/supervisor:stop` writes
+`stopped: true` + `stop_date`; a later `flag_set_at` is the operator's newest word
+and reopens the row. Both readers — `open-queue.is_stopped()` and the keepalive's
+resume decision — used to test truthiness alone, so a re-flagged row stayed shut.
+
+Measured 2026-11-24 on `Classify the Heat-Pump Penetration Seal`: flag cleared
+17:10, stopped 18:05:33, re-flagged 19:36:58.408271.
+
+What this suite pins:
+
+  * the ordering itself — a stop strictly newer than the flag skips, a flag newer
+    than the stop opens, and the tie opens (a stop must be *newer* to win);
+  * the flag instant is the raw `flag_set_at`, never `approval_instant()`'s
+    `approved_at`-first fallback — a page carrying BOTH must order on the flag;
+  * the no-date fallback — `stopped: true` with `stop_date` absent, or with an
+    unparseable `flag_set_at`, keeps the presence-only skip, because absent
+    evidence never reopens a retired row;
+  * each reader's own call path, not just the shared module: `open-queue`'s
+    `is_stopped(frontmatter(text))` and `worker-keepalive`'s `main()`.
+
+Run: python3 -m unittest discover -s scripts/tests -v
+"""
+
+import importlib.util
+import io
+import os
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from unittest import mock
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPTS_DIR = os.path.dirname(_HERE)
+
+
+def _load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_SCRIPTS_DIR, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+order = _load("standdown_order", "standdown-order.py")
+open_queue = _load("open_queue", "open-queue.py")
+keepalive = _load("worker_keepalive", "worker-keepalive.py")
+
+#: The measured 2026-11-24 pair. They differ ONLY in which instant is later.
+STOPPED_AFTER_FLAG = ("2026-11-24T18:05:33+01:00", "2026-11-24T17:10:00+01:00")
+FLAG_AFTER_STOP = ("2026-11-24T18:05:33+01:00", "2026-11-24T19:36:58.408271+01:00")
+
+
+def page(stop_date=None, flag_set_at=None, stopped="true", approved_at=None):
+    """A task page's frontmatter, shaped the way the vault writes it."""
+    extra = f"stopped: {stopped}\n"
+    if stop_date is not None:
+        extra += f"stop_date: {stop_date}\n"
+    if flag_set_at is not None:
+        extra += f"flag_set_at: {flag_set_at}\n"
+    if approved_at is not None:
+        extra += f"approved_at: {approved_at}\n"
+    return (
+        "---\n"
+        "status: in_progress\n"
+        "phase: execution\n"
+        "priority: 2\n"
+        f"{extra}"
+        "---\n"
+        "Tags: [[Task]]\n"
+    )
+
+
+def reader_scalar(block, key):
+    """A dict-backed stand-in for either reader's frontmatter accessor."""
+    return block.get(key, "")
+
+
+class ParseInstantTest(unittest.TestCase):
+    def test_offset_and_z_and_naive_are_all_aware(self):
+        for value in ("2026-11-24T18:05:33+01:00", "2026-11-24T17:05:33Z",
+                      "2026-11-24T18:05:33"):
+            parsed = order.parse_instant(value)
+            self.assertIsNotNone(parsed, value)
+            self.assertIsNotNone(parsed.tzinfo, value)
+
+    def test_z_is_utc_and_orders_against_an_offset(self):
+        self.assertEqual(order.parse_instant("2026-11-24T17:05:33Z"),
+                         order.parse_instant("2026-11-24T18:05:33+01:00"))
+
+    def test_unreadable_values_are_none_never_now(self):
+        for value in ("", None, "   ", "not-a-date", "yesterday"):
+            self.assertIsNone(order.parse_instant(value), repr(value))
+
+
+class OrderingTest(unittest.TestCase):
+    def verdict(self, stop_date=None, flag_set_at=None, stopped="true"):
+        return order.is_stopped(
+            {"stopped": stopped, "stop_date": stop_date, "flag_set_at": flag_set_at},
+            reader_scalar,
+        )
+
+    def test_stop_after_flag_skips(self):
+        self.assertTrue(self.verdict(*STOPPED_AFTER_FLAG))
+
+    def test_flag_after_stop_opens(self):
+        self.assertFalse(self.verdict(*FLAG_AFTER_STOP))
+
+    def test_tie_opens(self):
+        same = "2026-11-24T18:05:33+01:00"
+        self.assertFalse(self.verdict(same, same))
+
+    def test_not_stopped_is_never_skipped(self):
+        for stopped in ("false", "no", "on-but-not", "", None):
+            self.assertFalse(self.verdict(stopped=stopped, flag_set_at="2026-11-24T19:00:00+01:00"))
+
+    def test_no_stop_date_keeps_the_presence_skip(self):
+        self.assertTrue(self.verdict(stop_date=None, flag_set_at="2026-11-24T19:00:00+01:00"))
+
+    def test_unparseable_flag_keeps_the_presence_skip(self):
+        self.assertTrue(self.verdict(stop_date="2026-11-24T18:05:33+01:00",
+                                     flag_set_at="not-a-date"))
+
+    def test_ordering_uses_the_raw_flag_instant_not_approved_at(self):
+        """`approval_instant()` returns `approved_at` first — the wrong instant here."""
+        block = {
+            "stopped": "true",
+            "stop_date": "2026-11-24T18:05:33+01:00",
+            # The approval predates the stop; the FLAG came after it.
+            "approved_at": "2026-11-20T09:00:00+01:00",
+            "flag_set_at": "2026-11-24T19:36:58.408271+01:00",
+        }
+        self.assertFalse(order.is_stopped(block, reader_scalar))
+
+
+class OpenQueueReaderTest(unittest.TestCase):
+    """SC1 — through the reader's own `is_stopped(frontmatter(text))` path."""
+
+    def verdict(self, stop_date=None, flag_set_at=None, **kwargs):
+        return open_queue.is_stopped(
+            open_queue.frontmatter(page(stop_date=stop_date, flag_set_at=flag_set_at, **kwargs)))
+
+    def test_both_orderings_disagree(self):
+        self.assertTrue(self.verdict(*STOPPED_AFTER_FLAG))
+        self.assertFalse(self.verdict(*FLAG_AFTER_STOP))
+
+    def test_no_date_fallbacks(self):
+        self.assertTrue(self.verdict(stop_date=None, flag_set_at="2026-11-24T19:00:00+01:00"))
+        self.assertTrue(self.verdict(stop_date="2026-11-24T18:05:33+01:00",
+                                     flag_set_at="not-a-date"))
+
+    def test_unflagged_row_is_never_stopped(self):
+        self.assertFalse(self.verdict(stopped="false", stop_date="2026-11-24T18:05:33+01:00",
+                                      flag_set_at="2026-11-24T17:10:00+01:00"))
+
+
+class KeepaliveReaderTest(unittest.TestCase):
+    """SC2 — through `worker-keepalive.py`'s own resume decision (`main`)."""
+
+    def run_keepalive(self, stop_date=None, flag_set_at=None, **kwargs):
+        with tempfile.TemporaryDirectory() as vault, \
+                tempfile.TemporaryDirectory() as state:
+            tasks = os.path.join(vault, "25 Tasks")
+            os.makedirs(tasks)
+            with open(os.path.join(tasks, "Fixture Row.md"), "w", encoding="utf-8") as fh:
+                fh.write(page(stop_date=stop_date, flag_set_at=flag_set_at, **kwargs))
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"MANAGER_RESUMES_STATE_DIR": state}), \
+                    redirect_stdout(out):
+                keepalive.main(["--vault", vault, "--task", "Fixture Row",
+                                "--dir", "25 Tasks", "--now", "1795000000"])
+            return out.getvalue()
+
+    STOP_LINE = "task is stopped by the operator; a stop is not a death"
+
+    def test_stop_after_flag_is_skipped(self):
+        self.assertIn(self.STOP_LINE, self.run_keepalive(*STOPPED_AFTER_FLAG))
+
+    def test_flag_after_stop_falls_through(self):
+        self.assertNotIn(self.STOP_LINE, self.run_keepalive(*FLAG_AFTER_STOP))
+
+    def test_no_date_fallbacks_are_skipped(self):
+        self.assertIn(self.STOP_LINE,
+                      self.run_keepalive(stop_date=None,
+                                         flag_set_at="2026-11-24T19:00:00+01:00"))
+        self.assertIn(self.STOP_LINE,
+                      self.run_keepalive(stop_date="2026-11-24T18:05:33+01:00",
+                                         flag_set_at="not-a-date"))
+
+
+if __name__ == "__main__":
+    unittest.main()

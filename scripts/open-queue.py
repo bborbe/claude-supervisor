@@ -200,15 +200,11 @@ FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 # sentinel string, so the key stays a tuple of comparables.
 NO_PRIORITY = 10**6
 
-#: The task tier's deliberate-stop marker — see `is_stopped()`. `scripts/task-standdown.py`
-#: is the only writer; this module and `scripts/worker-keepalive.py` are the readers.
-#: ⚠️ **The truthy set is declared in the two READERS rather than imported** — the repo's
-#: scripts are loaded by path, so a cross-module import would couple two files that are
-#: otherwise independent. `scripts/task-standdown.py` is the writer and holds no set: it
-#: writes the literal `"true"`. Keep the two readers' literals identical: a drift would
-#: make the open queue and the keepalive disagree about whether one row is stopped.
-STOPPED_KEY = "stopped"
-TRUTHY = {"true", "yes", "on"}
+#: The task tier's deliberate-stop marker's ORDERING rule — see `is_stopped()`.
+#: `scripts/task-standdown.py` is the only writer; this module and
+#: `scripts/worker-keepalive.py` are the readers, and both delegate the decision to
+#: `scripts/standdown-order.py` so the two cannot drift apart.
+standdown_order = _load("standdown_order", "standdown-order.py")
 
 
 def frontmatter(text):
@@ -318,10 +314,12 @@ def is_stopped(block):
     file cannot serve here: the state dir is per-user, so a slug would let two same-titled
     tasks in different vaults share one marker.
 
-    Truthiness matches `is_flagged()`'s set, so the two boolean readers cannot disagree
-    about what `true` looks like.
+    The decision is `scripts/standdown-order.py`'s, not this file's: the marker is
+    honoured by ORDERING, so a row the operator re-flagged after stopping it opens
+    again. A presence-only read here is what kept such a row shut (measured
+    2026-11-24 on `Classify the Heat-Pump Penetration Seal`).
     """
-    return (field(block, STOPPED_KEY) or "").strip().lower() in TRUTHY
+    return standdown_order.is_stopped(block, field)
 
 
 #: The vault's topic and goal folders, SIBLINGS of the task folder — the same folders the
