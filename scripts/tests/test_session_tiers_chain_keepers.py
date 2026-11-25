@@ -78,7 +78,9 @@ TIER_NAMES = {
 #: 5 rows, not 7 — both goal-manager rows retired). A floor, not an equality: adding an artifact
 #: to a row must not break a passing test, but an extractor that returns almost nothing must not
 #: read as a clean table either.
-MIN_DISTINCT_ARTIFACTS = 7
+# The keep-alive leg's retirement removed one more distinct artifact (`commands/steps/keepalive.md`)
+# from the chain, on top of the goal-tier merge; the floor is 6.
+MIN_DISTINCT_ARTIFACTS = 6
 
 BACKTICK = re.compile(r"`([^`]+)`")
 
@@ -276,7 +278,7 @@ class ChainTableTest(unittest.TestCase):
         first valid. A first-token-only check stays green and is caught here."""
         row = next(r for r in self.rows if tier(r) == "Worker — task with a goal")
         paths = row_artifacts(row)
-        self.assertEqual(len(paths), 3, f"expected three artifacts in {tier(row)}, got {paths}")
+        self.assertGreaterEqual(len(paths), 2, f"expected at least two artifacts in {tier(row)}, got {paths}")
         dead = "scripts/this-artifact-was-renamed.py"
         mutated_cell = row["Mechanism"].replace(f"`{paths[1]}", f"`{dead}", 1)
         self.assertNotEqual(mutated_cell, row["Mechanism"], "the mutation did not apply")

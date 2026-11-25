@@ -374,35 +374,9 @@ class TestStatus(Base):
         self.assertEqual(ctx.exception.code, 2)
 
 
-class TestSingleHome(unittest.TestCase):
-    """The formats live in output-shape.md item 12, and nowhere else is a second copy."""
-
-    def test_output_shape_defines_the_three_formats(self):
-        with open(SHAPE, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("**`Legs`**", text)
-        self.assertIn("keep-alive: unactioned: <n> lapsed-managers", text)
-        self.assertIn("keep-alive: unactioned: <n> topicless-goal-managers", text)
-        self.assertIn("keep-alive: unactioned: <n> dead-workers", text)
-        self.assertIn("(lower bound, scan incomplete)", text)
-        self.assertIn("not run — <reason>", text)
-        self.assertIn("fleet-legs.py", text)
-
-    def test_the_acting_legs_point_at_that_home_and_do_not_restate_it(self):
-        for path in (KEEPALIVE,):
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-            with self.subTest(path=os.path.basename(path)):
-                self.assertIn("output-shape.md` item 12", text)
-                self.assertIn("fleet-legs.py", text)
-                # The pre-fix instruction, verbatim, is what the change removes.
-                self.assertNotIn("Print `unactioned: <n>", text)
-
-    def test_the_sweep_seeds_the_section_so_the_shape_always_exists(self):
-        with open(READER, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("LEGS", text)
-        self.assertIn("keep-alive: not run — no reading recorded this round", text)
+# TestSingleHome is retired with the keep-alive leg (v0.367.0, `0bfff171`): there is no LEGS
+# section, no `output-shape.md` item 12, and no sweep seed to assert against. The `fleet-legs.py`
+# unit tests above still exercise the script's own contract in isolation.
 
 
 if __name__ == "__main__":

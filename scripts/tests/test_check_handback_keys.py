@@ -5,8 +5,8 @@ Two families are covered, and both are silent when broken:
   (1) the fleet tick's router `When` cells against `agents/fleet-sweep-reader.md`'s
       hand-back, and
   (2) the delegated legs — `commands/steps/round-readings.md` → `agents/round-readings-reader.md`,
-      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's
-      acting leg, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md`.
+      and `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`. The fleet round's
+      keep-alive acting leg was retired in v0.367.0 (`0bfff171`) and is no longer covered here.
 
 The load-bearing cases are the PRE-CHANGE ones. Both reader agents shipped on 2026-11-06
 with a hand-back that omitted values its own contract requires — the readings leg collapsed
@@ -148,77 +148,10 @@ class CheckHandbackKeysTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("inflight-unread", result.stderr)
 
-    def test_pre_change_keepalive_fence_fails(self):
-        """The keep-alive leg's hand-back without `legs=` — the digest-write verdict.
-
-        The counts are not the whole hand-back: the caller branches on whether the digest
-        write landed, and a fence that drops that key leaves the failed-write render
-        unreachable — the round would print numbers no digest carries.
-        """
-        self.write(
-            "agents/fleet-keepalive-actor.md",
-            fence(self.legs["supervisor:fleet-keepalive-actor"]["required"], drop=("legs",)),
-        )
-        result = self.run_check()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("`legs=`", result.stderr)
-
-    def test_pre_change_keepalive_fence_fails_without_per_list_dropped_counts(self):
-        """The pre-change keep-alive hand-back: one shared `truncated=`, no per-list counts.
-
-        Two truncatable row lists behind a single count cannot say which list lost rows, so
-        the caller's per-list reconciliation (`printed + that list's dropped == that list's
-        count`) is arithmetically unsatisfiable. The fixture is the exact shape this change
-        replaced, and both keys must be named.
-        """
-        self.write(
-            "agents/fleet-keepalive-actor.md",
-            fence(
-                self.legs["supervisor:fleet-keepalive-actor"]["required"],
-                drop=("crash-loop-truncated", "cannot-tell-truncated"),
-            ).replace("crash-loop=<n>", "crash-loop=<n> · truncated=<n>"),
-        )
-        result = self.run_check()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("crash-loop-truncated", result.stderr)
-        self.assertIn("cannot-tell-truncated", result.stderr)
-
-    def test_pre_change_keepalive_fence_fails_without_dead_scan(self):
-        """`dead-scan` is the label the digest write used — `—` when `dead-workers=not-run`.
-
-        A caller that had to infer the label from the count would read a floor as an exact
-        scan, which is the "a number with no label reads as a measurement" defect. A fence
-        that drops the key leaves that cell permanently unreadable, so it must fail here.
-        """
-        self.write(
-            "agents/fleet-keepalive-actor.md",
-            fence(
-                self.legs["supervisor:fleet-keepalive-actor"]["required"],
-                drop=("dead-scan",),
-            ),
-        )
-        result = self.run_check()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("`dead-scan=`", result.stderr)
-
-    def test_pre_change_keepalive_fence_without_the_digest_verdict_fails(self):
-        """The pre-change keep-alive hand-back: counts alone, no `legs`, no `dead-scan`.
-
-        The caller renders the digest verdict from `legs=` / `legs-reason=` and reads the
-        `--floor` / `--exact` label from `dead-scan=`, so a fence carrying counts alone leaves
-        a failed digest write and an inferred floor both unreportable.
-        """
-        self.write(
-            "agents/fleet-keepalive-actor.md",
-            "**Hand-back**\n\n```text\n"
-            "restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>\n"
-            "crash-loop=<n> · cannot-tell=<n> · payload=<path>\n"
-            "```\n</output_format>\n",
-        )
-        result = self.run_check()
-        self.assertEqual(result.returncode, 1)
-        for key in ("legs", "legs-reason", "dead-scan", "crash-loop-truncated", "cannot-tell-truncated"):
-            self.assertIn(f"`{key}=`", result.stderr)
+    # The keep-alive actor's hand-back tests were removed with the leg's retirement
+    # (v0.367.0, `0bfff171`): `supervisor:fleet-keepalive-actor` no longer exists, so its
+    # fence cannot be constructed. The remaining legs' fence tests above still cover the
+    # contract shape.
 
 
 if __name__ == "__main__":
