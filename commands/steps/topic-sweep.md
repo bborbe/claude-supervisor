@@ -10,33 +10,37 @@ When: every tick
 
 Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure for this half.
 
-1. **Take the readings first — before the dispatch, never batched with it.** For every goal
-   the topic declares, read its page's `claude_session_id` and probe it:
+1. **Take the readings first — before the dispatch, never batched with it.** ⚠️ **The
+   goal-manager tier is retired** — there is no per-goal manager session, so a goal page's
+   `claude_session_id` is **not** probed. Read each declared goal's `status`, `phase` and
+   `# Success Criteria` tally from its page, and probe **the topic manager's own session**
+   from the topic page:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py --check <id>
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py --check <the topic page's claude_session_id>
    ```
 
-   Record `<goal> → LIVE | ABSENT | UNKNOWN`. ⚠️ **`UNKNOWN` is not `ABSENT`** — an
-   unreadable source cannot prove a session dead, so it stays `UNKNOWN` and the row renders
-   `UNVERIFIED`.
+   Record `<topic> → LIVE | ABSENT | UNKNOWN` — the reader's Manager cell and classification
+   both consume it. ⚠️ **`UNKNOWN` is not `ABSENT`** — an unreadable source cannot prove a
+   session dead, so it stays `UNKNOWN` and the row renders `UNVERIFIED`. (A goal page that
+   still carries a `claude_session_id` carries a retired record; ignore it.)
 
 2. **Take the cadence verdicts the same way, and before the dispatch for the same reason.**
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py \
-     --state --subject "<goal>" --branch goal --vault "<vault-root>"
+     --state --subject "<topic>" --branch topic --vault "<vault-root>"
    ```
 
    ⚠️ **`--vault` is what makes `UNARMED` mean "never armed" rather than "not found here".** Without
-   it the page test runs against the process cwd, and a goal whose page lives in another vault is
+   it the page test runs against the process cwd, and a topic whose page lives in another vault is
    refused (exit 3) instead of read as a never-armed loop.
 
-   Record `<goal> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`; a non-zero
+   Record `<topic> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`; a non-zero
    exit (exit 3: the name resolves no page and no record) is no verdict — leave the slot unstated,
-   never `UNARMED`. ⚠️ **`--branch goal` is not optional** —
-   the state slug carries the tier (`goal--<base>`), so a topic and a goal that share a name
-   never overwrite each other's cadence record.
+   never `UNARMED`. ⚠️ **`--branch topic` is not optional** —
+   the state slug carries the tier (`topic--<base>`). ⚠️ **The goal-manager tier is retired** — there
+   is no per-goal manager to probe; the topic manager drives each declared goal's rows directly.
 
    ⚠️ **Write no reading into this dispatch that you have not taken this tick.** A prompt
    written in the same message as its own input has no output to quote and fills the slot
@@ -60,7 +64,7 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
 
 4. **Never sweep a task here.** The goal tier's `agents/goal-sweep-reader.md` classifies a
    goal's **task set** into buckets. A task row reaching this step is a tier violation: report
-   it downward to the goal manager that owns it, and render no row for it.
+   it to the topic manager that owns it, and render no row for it.
 
 5. **Render the table** — from the agent, or with
    `python3 .../scripts/box-table.py` reading `${CLAUDE_PLUGIN_ROOT}/docs/sweep-output.md`

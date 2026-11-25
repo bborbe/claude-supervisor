@@ -138,13 +138,24 @@ class TestTaskGate(unittest.TestCase):
     # The no-page case splits in two exactly as `reap-idle-headless.py` splits it
     # (`:783-805`): a proven absence of anchor is a close, an absent SEARCH is a refusal.
 
-    def _gate_unanchored(self, detail, dirs):
+    def _gate_unanchored(self, detail, dirs, unsearched=False, config_error=None):
         with mock.patch.object(
             close_idle_tab.close_worker,
             "resolution_refusal",
             return_value=("task-unresolved", detail),
         ), mock.patch.object(
             close_idle_tab.close_worker, "fleet_task_dirs", return_value=dirs
+        ), mock.patch.object(
+            close_idle_tab.close_worker,
+            "own_vault_unsearched",
+            return_value=unsearched,
+        ), mock.patch.object(
+            # ⚠️ Stubbed, not left real: `unanchored_verdict` consults it FIRST, so a host
+            # with no readable `vault-cli` config (CI) would refuse every case here and the
+            # positive test would assert a close the code never reaches.
+            close_idle_tab.close_worker,
+            "vault_config_error",
+            return_value=config_error,
         ):
             return close_idle_tab.task_gate(None, self.today, SID, "/tmp/worktree")
 
@@ -156,8 +167,19 @@ class TestTaskGate(unittest.TestCase):
         self.assertIn(SID, detail)
 
     def test_vault_not_searched_still_refuses(self):
+        # The own-vault check is structural now (`own_vault_unsearched`), not a substring
+        # test on the refusal's prose — a reworded message can no longer flip the close.
         token, _ = self._gate_unanchored(
-            "searched /a; /b not among them", ["/a"]
+            "searched /a; /b not among them", ["/a"], unsearched=True
+        )
+        self.assertEqual(token, "task-unresolved")
+
+    def test_unreadable_config_still_refuses(self):
+        # A config read that FAILED is not an empty config: with `{}` the own-vault check
+        # is vacuous while the root probe keeps the dir list non-empty.
+        token, _ = self._gate_unanchored(
+            f"no page carries {SID}", ["/v/25 Tasks"],
+            config_error="vault config unreadable",
         )
         self.assertEqual(token, "task-unresolved")
 

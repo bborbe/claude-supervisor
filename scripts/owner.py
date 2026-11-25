@@ -79,7 +79,7 @@ its own `--self` and never per poll — a caller on a hot path must cache, not r
 ## Usage
 
     owner.py --session <id> [--subject <name> --branch goal|topic|fleet|task]
-    owner.py --subject <name> --branch goal [--vault <path>] [--dir <dir>]
+    owner.py --subject <name> --branch goal [--vault <path>] [--dir <dir>] [--topics-dir <dir>]
 
 Prints `<verdict>\\t<reason>\\t<session>\\t<loop>\\t<detail>` and exits 0 for every verdict it
 can answer — the verdict IS the answer, and a non-zero exit would make `not-owner` read as a
@@ -530,7 +530,91 @@ def page_path(vault: str, subject: str, branch: str = "goal", directory: str = "
     return locate(vault, subject, branch, directory)[0]
 
 
-def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = "") -> Ownership:
+_CRASHED = None
+
+
+def _crashed():
+    """`scripts/crashed-managers.py` loaded lazily — the one home of `goals_section`/`declares`.
+
+    Loaded lazily because `crashed-managers.py` loads `topic-keepalive.py`, which loads this
+    module: a module-level import would close that cycle. Both scripts answer the same
+    topic→goal membership question, and a second parser is a second answer.
+    """
+    global _CRASHED
+    if _CRASHED is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crashed-managers.py")
+        spec = importlib.util.spec_from_file_location("crashed_managers_for_owner", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _CRASHED = mod
+    return _CRASHED
+
+
+def declares(text: str, goal: str) -> bool:
+    """Does this topic page list `[[<goal>]]` as a bullet in its `## Goals` section?
+
+    Only a `-`/`*` bullet whose FIRST wikilink is the goal counts, case-insensitively — a prose
+    removal note in the section is not a declaration (the rule `crashed-managers.py` measured).
+    ⚠️ **Delegated, not re-implemented** — one predicate for the ownership verdict and the card.
+    """
+    return _crashed().declares(text, goal)
+
+
+class Unreadable(Exception):
+    """A topic folder or page could not be read while resolving a goal's declaring topic.
+
+    ⚠️ **Never answered as `not-owner`.** `not-owner` licenses a caller to hand the subject to
+    another keeper; answering it because a folder would not open is exactly the second writer
+    over a possibly live manager that this module exists to withhold. `crashed-managers.py`
+    raises the same way (`Refused`), so the census and the ownership verdict agree.
+    """
+
+
+def declaring_topic(vault: str, goal: str, topics_dir: str = "") -> str:
+    """The name of the topic whose `## Goals` lists `goal`, or `""` when none does.
+
+    After the goal-manager tier is removed (docs/session-tiers.md), a goal's manager is the
+    topic manager that declares it. This is the only place that resolves that edge, so the
+    ownership verdict and the tier that drives the goal cannot disagree.
+
+    ⚠️ **Sorted, so the answer is deterministic** — `os.listdir` order is filesystem-dependent,
+    and a goal declared by two topics would otherwise resolve to a different one per machine.
+
+    ⚠️ **Honours a `topics_dir` override** — the topics folder only. `directory` is the
+    SUBJECT's folder (a caller resolving a goal passes the goals folder there), so the two are
+    separate parameters: conflating them made `worker-keepalive.goal_owners` resolve the goal
+    page from the topics folder.
+
+    ⚠️ **Raises `Unreadable` on an unreadable folder or page**, rather than answering "no topic
+    declares it". A fail-open here would make `of_subject` resolve the goal against its own
+    (possibly absent) page and answer `not-owner`, which licenses a second keeper.
+    """
+    roots = [topics_dir] if topics_dir else SUBJECT_DIRS["topic"]
+    for root in roots:
+        base = os.path.join(vault, root)
+        try:
+            entries = os.listdir(base)
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # a genuinely absent topics folder declares nothing — a known absence
+        except OSError as err:
+            raise Unreadable(f"cannot list {base}: {err}") from err
+        for entry in sorted(entries):
+            if not entry.endswith(".md"):
+                continue
+            path = os.path.join(base, entry)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+            except (OSError, UnicodeDecodeError) as err:
+                raise Unreadable(f"cannot read {path}: {err}") from err
+            if declares(text, goal):
+                return entry[: -len(".md")]
+    return ""
+
+
+def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = "",
+               topics_dir: str = "") -> Ownership:
     """Resolve a subject named by the caller, reading its page and its loop.
 
     ⚠️ **"Could not read it" is `cannot-tell`, never `not-owner`, at both hops.** `not-owner` is
@@ -540,6 +624,24 @@ def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = 
     session is `not-owner` (`no-session`), and only a folder that is genuinely absent is a known
     absence.
     """
+    # A goal is owned by the topic manager that declares it (the goal tier is removed).
+    # Resolve the declaring topic and answer as that topic; a goal in no topic keeps its own
+    # resolution below, so this is backward-compatible when no topic declares it.
+    if branch == "goal":
+        try:
+            topic = declaring_topic(vault, subject, topics_dir)
+        except Unreadable as err:
+            loop, detail = loop_state(subject, branch, vault)
+            return Ownership(CANNOT_TELL, "topic-unreadable", NONE, loop, "", str(err))
+        if topic:
+            return of_subject(vault, topic, "topic", directory=topics_dir)
+        # ⚠️ **No topic declares it, and the goal page's `claude_session_id` is a RETIRED
+        # goal-manager stamp.** Resolving `owner` from it would point a caller at a session
+        # that no longer exists (the goal tier is merged into the topic tier). The goal falls
+        # to the fleet manager, so answer `not-owner` — never `owner` on the retired stamp.
+        loop, _ = loop_state(subject, branch, vault)
+        return Ownership(NOT_OWNER, "no-declaring-topic", NONE, loop, "",
+                         f"{subject}: no topic declares this goal; the fleet manager takes it")
     path, why = locate(vault, subject, branch, directory)
     if why:
         loop, detail = loop_state(subject, branch, vault)
@@ -571,6 +673,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--branch", choices=BRANCHES, default="goal")
     ap.add_argument("--vault", help="the vault ROOT path, to read the subject's page")
     ap.add_argument("--dir", help="override the subject directory")
+    ap.add_argument("--topics-dir", help="override the topics directory (goal→declaring-topic resolution)")
     a = ap.parse_args(argv)
 
     # ⚠️ **Dispatch on PRESENCE, never on truthiness.** `--session ""` is what a spawned child
@@ -586,7 +689,7 @@ def main(argv: list[str]) -> int:
             return 2
         o = of_caller(a.session, a.vault, a.subject, a.branch, a.dir or "")
     elif a.subject and a.vault:
-        o = of_subject(a.vault, a.subject, a.branch, a.dir or "")
+        o = of_subject(a.vault, a.subject, a.branch, a.dir or "", a.topics_dir or "")
     elif a.session:
         o = of_session(a.session, a.subject or "", a.branch)
     else:

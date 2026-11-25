@@ -7,7 +7,7 @@ Two independent signals are read every time, because neither answers the other's
      `session-liveness.py --check`. `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) /
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
-  2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
+  2. **Is its loop armed?** `manager-liveness.py --state --subject <topic> --branch topic`
      → `OK` / `WORKING` / `LAPSED` / `IDLE` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID`. This is the
      signal a liveness probe structurally cannot give — a manager process can be alive with
      its loop unarmed after a missed re-arm. `STOPPED` is a deliberate stand-down and
@@ -416,8 +416,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
     ap.add_argument("--subject", "--goal", dest="subject", required=True,
                     help="the goal or topic name; --goal is kept as an alias")
-    ap.add_argument("--branch", choices=("goal", "topic"), default="goal",
-                    help="which tier's subject page and cadence to read (default: goal)")
+    ap.add_argument("--branch", choices=("goal", "topic"), default="topic",
+                    help="which tier's subject page and cadence to read (default: topic — "
+                         "the goal branch is retired, so an omitted flag must not retire)")
     ap.add_argument("--dir", help="override the subject directory (a vault may rename "
                                   "`24 Goals` / `23 Topics`; read it from `vault-cli config list`)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
@@ -433,9 +434,14 @@ def main(argv: list[str]) -> int:
                          "an outcome")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
     a = ap.parse_args(argv)
-    if a.receipt and a.branch != "goal":
-        ap.error("--receipt records a goal manager's verdict; it needs --branch goal")
-
+    if a.branch == "goal":
+        # The goal-manager tier is merged into the topic tier (2026-11-24): there is no
+        # goal-manager session to keep alive. The topic round drives each declared goal's
+        # rows via `agents/goal-drive.md`; `--branch topic` remains for the topic manager.
+        print("goal-branch-retired")
+        print("the goal-manager tier is merged into the topic tier; drive the goal's rows "
+              "with agents/goal-drive.md — this keeper serves --branch topic only.")
+        return 1
     now = a.now if a.now is not None else time.time()
     vault = os.path.abspath(os.path.expanduser(a.vault))
     opener = "--topic" if a.branch == "topic" else "--goal"
