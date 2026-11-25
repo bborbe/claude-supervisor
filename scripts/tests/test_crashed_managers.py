@@ -617,6 +617,24 @@ class CoverageTest(unittest.TestCase):
             "an unreadable page read as 'no page', carding an unverifiable manager",
         )
 
+    def test_a_goal_under_a_heading_subsection_is_still_declared(self):
+        """A topic groups goals under `### Lever …` sub-headings; those are inside `## Goals`.
+
+        Measured 2026-11-25: `23 Topics/Development Pipeline Throughput.md` lists 54 goals
+        under four `###` levers, and the old any-heading rule saw only the 6 intro lines and
+        declared none of them — so the merged ownership resolver answered `no-declaring-topic`
+        for a goal the topic plainly declares.
+        """
+        text = "## Goals\n\n- [[Intro Goal]]\n\n### Lever A\n\n- [[Nested Goal]] — x\n"
+        self.assertTrue(cm.declares(text, "Intro Goal"))
+        self.assertTrue(cm.declares(text, "Nested Goal"))
+
+    def test_a_goal_after_the_goals_section_is_not_declared(self):
+        """A level-2 heading still ends the section; only `###` subsections stay inside."""
+        text = "## Goals\n\n- [[Intro Goal]]\n\n## Priority\n\n- [[Later Goal]]\n"
+        self.assertTrue(cm.declares(text, "Intro Goal"))
+        self.assertFalse(cm.declares(text, "Later Goal"))
+
     def test_a_fleet_subject_never_cards(self):
         cm.cadence_state = lambda n, b: "STALE"
         cm.session_state = lambda s: "LIVE"

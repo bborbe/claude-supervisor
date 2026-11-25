@@ -277,7 +277,14 @@ def goals_section(text: str) -> list[str]:
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
-            inside = stripped.lower() == "## goals"
+            level = len(stripped) - len(stripped.lstrip("#"))
+            if level <= 2:
+                inside = stripped.lower() == "## goals"
+            # ⚠️ **A `###` subsection stays inside `## Goals`.** A topic page groups its goals
+            # under `### Lever …` sub-headings (measured 2026-11-25 on
+            # `23 Topics/Development Pipeline Throughput.md`: 54 goals under four `###` levers,
+            # and the old any-heading rule saw 6 intro lines and declared none of them). Only a
+            # level-1/2 heading ends the section.
             continue
         if inside:
             lines.append(line)
