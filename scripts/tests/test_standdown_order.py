@@ -15,6 +15,8 @@ What this suite pins:
     than the stop opens, and the tie opens (a stop must be *newer* to win);
   * the flag instant is the raw `flag_set_at`, never `approval_instant()`'s
     `approved_at`-first fallback — a page carrying BOTH must order on the flag;
+  * the provenance gate — an agent-set or unattributed flag never reopens a stop,
+    because `flag_set_at` is written for those too and they open nothing here;
   * the no-date fallback — `stopped: true` with `stop_date` absent, or with an
     unparseable `flag_set_at`, keeps the presence-only skip, because absent
     evidence never reopens a retired row;
@@ -27,6 +29,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import io
 import os
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -52,13 +55,18 @@ STOPPED_AFTER_FLAG = ("2026-11-24T18:05:33+01:00", "2026-11-24T17:10:00+01:00")
 FLAG_AFTER_STOP = ("2026-11-24T18:05:33+01:00", "2026-11-24T19:36:58.408271+01:00")
 
 
-def page(stop_date=None, flag_set_at=None, stopped="true", approved_at=None):
+def page(stop_date=None, flag_set_at=None, stopped="true", approved_at=None,
+         flag="true", flag_set_by="operator"):
     """A task page's frontmatter, shaped the way the vault writes it."""
     extra = f"stopped: {stopped}\n"
     if stop_date is not None:
         extra += f"stop_date: {stop_date}\n"
     if flag_set_at is not None:
         extra += f"flag_set_at: {flag_set_at}\n"
+    if flag is not None:
+        extra += f"flag: {flag}\n"
+    if flag_set_by is not None:
+        extra += f"flag_set_by: {flag_set_by}\n"
     if approved_at is not None:
         extra += f"approved_at: {approved_at}\n"
     return (
@@ -72,9 +80,10 @@ def page(stop_date=None, flag_set_at=None, stopped="true", approved_at=None):
     )
 
 
-def reader_scalar(block, key):
-    """A dict-backed stand-in for either reader's frontmatter accessor."""
-    return block.get(key, "")
+def text_scalar(block, key):
+    """A frontmatter-text accessor — the shape both real readers take."""
+    match = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", block, re.MULTILINE)
+    return match.group(1).strip().strip("\"'") if match else ""
 
 
 class ParseInstantTest(unittest.TestCase):
@@ -95,10 +104,12 @@ class ParseInstantTest(unittest.TestCase):
 
 
 class OrderingTest(unittest.TestCase):
-    def verdict(self, stop_date=None, flag_set_at=None, stopped="true"):
+    def verdict(self, stop_date=None, flag_set_at=None, stopped="true",
+                flag="true", flag_set_by="operator"):
         return order.is_stopped(
-            {"stopped": stopped, "stop_date": stop_date, "flag_set_at": flag_set_at},
-            reader_scalar,
+            page(stop_date=stop_date, flag_set_at=flag_set_at, stopped=stopped,
+                 flag=flag, flag_set_by=flag_set_by),
+            text_scalar,
         )
 
     def test_stop_after_flag_skips(self):
@@ -122,16 +133,29 @@ class OrderingTest(unittest.TestCase):
         self.assertTrue(self.verdict(stop_date="2026-11-24T18:05:33+01:00",
                                      flag_set_at="not-a-date"))
 
+    def test_agent_set_flag_never_reopens_a_stop(self):
+        """`flag_set_at` is written for an agent flag too — ordering alone would reopen."""
+        self.assertTrue(self.verdict(flag_set_by="agent", *FLAG_AFTER_STOP))
+        self.assertTrue(self.verdict(flag_set_by="manager", *FLAG_AFTER_STOP))
+
+    def test_unattributed_flag_never_reopens_a_stop(self):
+        self.assertTrue(self.verdict(flag_set_by=None, *FLAG_AFTER_STOP))
+
+    def test_unflagged_row_never_reopens_a_stop(self):
+        self.assertTrue(self.verdict(flag="false", *FLAG_AFTER_STOP))
+        self.assertTrue(self.verdict(flag=None, *FLAG_AFTER_STOP))
+
+    def test_legacy_operator_flag_reopens(self):
+        self.assertFalse(self.verdict(flag_set_by="legacy", *FLAG_AFTER_STOP))
+
     def test_ordering_uses_the_raw_flag_instant_not_approved_at(self):
         """`approval_instant()` returns `approved_at` first — the wrong instant here."""
-        block = {
-            "stopped": "true",
-            "stop_date": "2026-11-24T18:05:33+01:00",
-            # The approval predates the stop; the FLAG came after it.
-            "approved_at": "2026-11-20T09:00:00+01:00",
-            "flag_set_at": "2026-11-24T19:36:58.408271+01:00",
-        }
-        self.assertFalse(order.is_stopped(block, reader_scalar))
+        self.assertFalse(order.is_stopped(
+            page(stop_date="2026-11-24T18:05:33+01:00",
+                 flag_set_at="2026-11-24T19:36:58.408271+01:00",
+                 approved_at="2026-11-20T09:00:00+01:00"),
+            text_scalar,
+        ))
 
 
 class OpenQueueReaderTest(unittest.TestCase):
