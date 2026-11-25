@@ -243,6 +243,11 @@ class WorkerKeepAliveTest(unittest.TestCase):
         (self.vault / "24 Goals").mkdir(parents=True)
         (self.vault / "24 Goals" / "A Goal.md").write_text(
             "---\nclaude_session_id: gm-1\n---\n# Success Criteria\n", encoding="utf-8")
+        # The goal tier is merged into the topic tier: the goal's manager is the topic that
+        # declares it, so ownership now comes from the topic page.
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            "---\nclaude_session_id: gm-1\n---\n## Goals\n\n- [[A Goal]]\n", encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
         self.goal_loop("OK")
         out = io.StringIO()
@@ -298,9 +303,11 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.page(body=TASK_PAGE.format(sid="sid-1").replace(
             "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
         (self.vault / "24 Goals").mkdir(parents=True)
-        (self.vault / "24 Goals" / "A Goal.md").write_text(
-            "---\nmanager_session_id: gm-old\nclaude_session_id: gm-new\n---\n",
-            encoding="utf-8")
+        # The manager page is the TOPIC page now; the retired key must still be ignored.
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            "---\nmanager_session_id: gm-old\nclaude_session_id: gm-new\n---\n"
+            "## Goals\n\n- [[A Goal]]\n", encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-new" else "ABSENT"
         self.goal_loop("OK")
         out = io.StringIO()
@@ -395,8 +402,10 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.page(body=TASK_PAGE.format(sid="sid-1").replace(
             "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
         (self.vault / "24 Goals").mkdir(parents=True)
-        # A DIRECTORY named `<subject>.md`: `locate()` matches the entry, the read fails.
-        (self.vault / "24 Goals" / "A Goal.md").mkdir()
+        # The manager page is the TOPIC page now: a DIRECTORY named `<subject>.md` makes the
+        # read fail, and an unreadable declaring-topic page is cannot-tell.
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").mkdir()
         rc, out = self.run_it(live="ABSENT")
         self.assertEqual(1, rc)
         self.assertEqual("cannot-tell", out[0])

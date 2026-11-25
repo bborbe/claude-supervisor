@@ -369,8 +369,8 @@ Everything else — recent activity, no gate, nothing terminal. **Do nothing.**
 not armed is correct behaviour, and reporting them all as "manager without a loop" sends the
 operator to fix things that are already right.
 
-Check every manager — the fleet manager (`--branch fleet`), every goal manager
-(`--branch goal`), every topic manager (`--branch topic`):
+Check every manager — the fleet manager (`--branch fleet`) and every topic manager
+(`--branch topic`). The goal-manager tier is retired.
 
 ⚠️ **Check the name with the script before it reaches the shell — and single-quote the check,
 which is the opposite of how the query below is quoted.** The subject is a vault page name:

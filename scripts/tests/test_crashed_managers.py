@@ -64,47 +64,36 @@ class EvaluateTest(unittest.TestCase):
               f"---\nclaude_session_id: {sid}\npage_type: goal\nstatus: {status}\n"
               f"phase: {phase}\n---\n\n# Impact\n")
 
-    def test_a_topicless_execution_goal_is_covered_by_the_fleet_leg(self):
-        """The fleet round's keep-alive restarts it, so a card would duplicate the restart."""
+    # --- the goal branch is retired: reported, never carded -------------------
+
+    def test_a_goal_record_is_never_carded(self):
+        """The goal-manager tier is merged into the topic tier: a LIVE-but-lapsed goal record
+        is reported for the census but never carded — a card would resurrect the retired tier."""
         self.kept_goal("Topicless Goal")
         self.stub("STALE", "LIVE")
         row = cm.evaluate(self.vault, "goal", "topicless-goal")
         self.assertFalse(row["card"], row["reason"])
-        self.assertIn("fleet round", row["reason"])
+        self.assertIn("merged into the topic tier", row["reason"])
 
-    def test_a_topicless_goal_outside_execution_still_cards(self):
-        """The other direction: the fleet leg skips a non-execution goal, so nothing covers it."""
-        self.kept_goal("Todo Goal", phase="todo")
+    def test_a_goal_record_is_never_carded_even_when_nothing_covers_it(self):
+        self.goal("Lonely Goal")
         self.stub("STALE", "LIVE")
-        row = cm.evaluate(self.vault, "goal", "todo-goal")
-        self.assertTrue(row["card"], row["reason"])
-
-    def test_a_backlog_goal_still_cards(self):
-        self.kept_goal("Backlog Goal", status="backlog")
-        self.stub("STALE", "LIVE")
-        self.assertTrue(cm.evaluate(self.vault, "goal", "backlog-goal")["card"])
-
-    def test_a_declared_execution_goal_under_a_dead_topic_manager_is_covered(self):
-        """The 2026-11-18 ruling: a dead topic manager is restarted by no round, so the fleet
-        leg takes its declared goal managers — and the census must not card a row it keeps."""
-        self.kept_goal("Declared Goal")
-        self.topic("Dead Topic", ["Declared Goal"], sid="dead0000-0000-0000-0000-000000000000")
-        cm.cadence_state = lambda name, branch: "STALE"
-        cm.session_state = lambda sid: "ABSENT" if sid.startswith("dead") else "LIVE"
-        row = cm.evaluate(self.vault, "goal", "declared-goal")
+        row = cm.evaluate(self.vault, "goal", "lonely-goal")
         self.assertFalse(row["card"], row["reason"])
-        self.assertIn("fleet round", row["reason"])
+        self.assertIn("never carded", row["reason"])
 
-    def test_a_declared_execution_goal_under_a_live_topic_manager_still_cards(self):
-        """The other direction: a live topic manager keeps its own goals, so nothing here covers it."""
-        self.kept_goal("Declared Goal")
-        self.topic("Live Topic", ["Declared Goal"], sid="live0000-0000-0000-0000-000000000000")
-        cm.cadence_state = lambda name, branch: "STALE"
-        cm.session_state = lambda sid: "LIVE"
-        row = cm.evaluate(self.vault, "goal", "declared-goal")
-        self.assertTrue(row["card"], row["reason"])
+    def test_a_goal_record_is_never_carded_whatever_its_phase_or_status(self):
+        for name, phase, status in (("Todo Goal", "todo", "in_progress"),
+                                    ("Backlog Goal", "execution", "backlog")):
+            with self.subTest(name=name):
+                self.kept_goal(name, phase=phase, status=status)
+                self.stub("STALE", "LIVE")
+                row = cm.evaluate(self.vault, "goal", name.lower().replace(" ", "-"))
+                self.assertFalse(row["card"], row["reason"])
 
     def test_fleet_keeps_reads_the_four_conditions(self):
+        """The predicate survives for the census and the ownership resolver; `evaluate` no
+        longer consults it, but its contract must not rot."""
         self.kept_goal("Kept")
         self.kept_goal("No Id", sid="")
         self.kept_goal("Declared")
@@ -114,106 +103,66 @@ class EvaluateTest(unittest.TestCase):
         self.assertFalse(cm.fleet_keeps(self.vault, "Declared"))
         self.assertFalse(cm.fleet_keeps(self.vault, "Missing Page"))
 
-    def test_live_but_lapsed_and_uncovered_cards(self):
-        self.goal("Lonely Goal")
-        self.stub("STALE", "LIVE")
-        row = cm.evaluate(self.vault, "goal", "lonely-goal")
-        self.assertTrue(row["card"], row["reason"])
-        self.assertEqual(row["subject"], "Lonely Goal")
-
-    def test_covered_by_a_live_topic_manager_does_not_card(self):
-        self.goal("Covered Goal")
-        self.topic("Some Topic", ["Covered Goal"])
-        # the goal's own loop is lapsed; the topic's loop is running and will restart it
-        cm.cadence_state = lambda name, branch: "STALE" if branch == "goal" else "OK"
-        cm.session_state = lambda sid: "LIVE"
-        row = cm.evaluate(self.vault, "goal", "covered-goal")
-        self.assertFalse(row["card"], row["reason"])
-        self.assertIn("covered", row["reason"])
-
-    def test_a_stopped_topic_manager_covers_nothing(self):
-        """`/supervisor:stop` disarms the loop and leaves the session LIVE — it restarts nothing."""
-        self.goal("Orphan Goal")
-        self.topic("Stopped Topic", ["Orphan Goal"])
-        cm.cadence_state = lambda name, branch: "STALE" if branch == "goal" else "STOPPED"
-        cm.session_state = lambda sid: "LIVE"
-        row = cm.evaluate(self.vault, "goal", "orphan-goal")
-        self.assertTrue(
-            row["card"],
-            f"a STOPPED topic manager was treated as coverage: {row['reason']}",
-        )
+    # --- `declares()`: the topic→goal membership predicate --------------------
+    # `evaluate` no longer consults it (the goal branch is retired), but `declaring_topics`
+    # and the ownership resolver still do, so its link semantics are pinned directly.
 
     def test_alias_and_heading_link_forms_declare(self):
         for body in ("- [[Covered Goal|alias]]", "- [[Covered Goal#Some Heading]]",
                      "- [[covered goal]]"):
             with self.subTest(body=body):
-                for entry in os.listdir(self.topics):
-                    os.remove(os.path.join(self.topics, entry))
-                for entry in os.listdir(self.goals):
-                    os.remove(os.path.join(self.goals, entry))
-                self.goal("Covered Goal")
-                write(os.path.join(self.topics, "Some Topic.md"),
-                      "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
-                      f"## Goals\n\n{body}\n")
-                cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
-                cm.session_state = lambda s: "LIVE"
-                row = cm.evaluate(self.vault, "goal", "covered-goal")
-                self.assertFalse(row["card"], f"{body} read as not declaring: {row['reason']}")
+                self.assertTrue(cm.declares(f"## Goals\n\n{body}\n", "Covered Goal"), body)
 
     def test_prose_inside_the_goals_section_does_not_declare(self):
         """A `## Goals` section records removals in prose; that is not a declaration."""
-        self.goal("Lonely Goal")
-        write(os.path.join(self.topics, "Some Topic.md"),
-              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
-              "## Goals\n\n- [[In Scope Goal]]\n\n"
-              "Removed 2026-09-20: [[Lonely Goal]] was re-homed.\n")
-        cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
-        cm.session_state = lambda s: "LIVE"
-        row = cm.evaluate(self.vault, "goal", "lonely-goal")
-        self.assertTrue(row["card"], f"prose read as a declaration: {row['reason']}")
+        text = ("## Goals\n\n- [[In Scope Goal]]\n\n"
+                "Removed 2026-09-20: [[Lonely Goal]] was re-homed.\n")
+        self.assertFalse(cm.declares(text, "Lonely Goal"))
 
-    def test_a_topic_declaring_the_goal_in_another_case_still_covers(self):
-        """Obsidian resolves wiki links case-insensitively."""
-        self.goal("Covered Goal")
-        self.topic("Some Topic", ["covered goal"])
-        cm.cadence_state = lambda name, branch: "STALE" if branch == "goal" else "OK"
-        cm.session_state = lambda sid: "LIVE"
-        row = cm.evaluate(self.vault, "goal", "covered-goal")
-        self.assertFalse(row["card"], f"a case-different link read as not declaring: {row['reason']}")
+    def test_a_link_after_another_link_is_not_a_declaration(self):
+        """Only a bullet whose FIRST wikilink is the goal declares it — a mention in the
+        same bullet is not membership."""
+        self.assertFalse(cm.declares("## Goals\n\n- [[Other]] and [[Covered Goal]]\n",
+                                     "Covered Goal"))
 
-    def test_a_dead_topic_manager_leaves_the_goal_uncovered(self):
-        self.goal("Orphan Goal")            # sid aaaa1111-… (LIVE)
-        self.topic("Dead Topic", ["Orphan Goal"])   # sid bbbb2222-… (ABSENT)
-        cm.cadence_state = lambda name, branch: "STALE"
-        cm.session_state = lambda sid: "LIVE" if sid.startswith("aaaa") else "ABSENT"
-        row = cm.evaluate(self.vault, "goal", "orphan-goal")
-        self.assertTrue(row["card"], row["reason"])
+    def test_declaring_topics_names_every_declaring_topic_sorted(self):
+        self.topic("Zeta Topic", ["Covered Goal"])
+        self.topic("Alpha Topic", ["Covered Goal"])
+        self.topic("Unrelated Topic", ["Another Goal"])
+        self.assertEqual(cm.declaring_topics(self.vault, "Covered Goal"),
+                         ["Alpha Topic", "Zeta Topic"])
+
+    # --- the generic pipeline, on the live topic branch ----------------------
+
+    def topic_page(self, name, sid="cccc3333-0000-0000-0000-000000000000", extra=""):
+        write(os.path.join(self.topics, f"{name}.md"),
+              f"---\nclaude_session_id: {sid}\npage_type: topic\n{extra}---\n\n# Goals\n")
 
     def test_stopped_is_a_stand_down_never_a_crash(self):
-        self.goal("Stood Down")
+        self.topic_page("Stood Down")
         self.stub("STOPPED", "LIVE")
-        row = cm.evaluate(self.vault, "goal", "stood-down")
+        row = cm.evaluate(self.vault, "topic", "stood-down")
         self.assertFalse(row["card"])
         self.assertIn("STOPPED", row["reason"])
 
     def test_an_absent_session_is_an_abandoned_record(self):
-        self.goal("Abandoned")
+        self.topic_page("Abandoned")
         self.stub("STALE", "ABSENT")
-        row = cm.evaluate(self.vault, "goal", "abandoned")
+        row = cm.evaluate(self.vault, "topic", "abandoned")
         self.assertFalse(row["card"])
         self.assertIn("ABSENT", row["reason"])
 
     def test_an_undecidable_probe_is_never_a_card(self):
-        self.goal("Undecidable")
+        self.topic_page("Undecidable")
         self.stub("STALE", "UNKNOWN")
-        row = cm.evaluate(self.vault, "goal", "undecidable")
+        row = cm.evaluate(self.vault, "topic", "undecidable")
         self.assertFalse(row["card"])
         self.assertIn("UNKNOWN", row["reason"])
 
     def test_a_page_without_a_session_id_is_unverifiable(self):
-        write(os.path.join(self.goals, "No Sid.md"), "---\npage_type: goal\n---\n")
+        write(os.path.join(self.topics, "No Sid.md"), "---\npage_type: topic\n---\n")
         self.stub("STALE", "LIVE")
-        row = cm.evaluate(self.vault, "goal", "no-sid")
+        row = cm.evaluate(self.vault, "topic", "no-sid")
         self.assertFalse(row["card"])
         # The reason names no field: `claude_session_id` is the only key a page records
         # its manager in, so "no session id" is the honest phrasing rather than naming
@@ -224,21 +173,21 @@ class EvaluateTest(unittest.TestCase):
         # The retired key is gone from every page in both vaults and nothing writes it.
         # Reading it would resurrect an id no writer produces, so a page carrying only
         # the retired key must read as having no recorded manager.
-        write(os.path.join(self.goals, "Legacy.md"),
+        write(os.path.join(self.topics, "Legacy.md"),
               "---\nmanager_session_id: cccc3333-0000-0000-0000-000000000000\n"
-              "page_type: goal\n---\n\n# Impact\n")
+              "page_type: topic\n---\n\n# Goals\n")
         cm.cadence_state = lambda name, branch: "STALE"
-        row = cm.evaluate(self.vault, "goal", "legacy")
+        row = cm.evaluate(self.vault, "topic", "legacy")
         self.assertFalse(row["card"])
         self.assertIn("no session id", row["reason"])
 
     def test_a_mixed_page_resolves_to_claude_session_id(self):
         # A page left over from the tolerance window carries both keys. `claude_session_id`
         # is the one read, so the retired id can never be probed in its place.
-        write(os.path.join(self.goals, "Mixed.md"),
+        write(os.path.join(self.topics, "Mixed.md"),
               "---\nmanager_session_id: cccc3333-0000-0000-0000-000000000000\n"
               "claude_session_id: dddd4444-0000-0000-0000-000000000000\n"
-              "page_type: goal\n---\n\n# Impact\n")
+              "page_type: topic\n---\n\n# Goals\n")
         cm.cadence_state = lambda name, branch: "STALE"
         seen = []
 
@@ -247,14 +196,14 @@ class EvaluateTest(unittest.TestCase):
             return "LIVE"
 
         cm.session_state = verdict
-        cm.evaluate(self.vault, "goal", "mixed")
+        cm.evaluate(self.vault, "topic", "mixed")
         # The surviving key is the one probed; the retired id is never consulted while
         # the surviving one is present.
         self.assertEqual(seen, ["dddd4444-0000-0000-0000-000000000000"])
 
     def test_a_record_with_no_page_is_abandoned(self):
         self.stub("STALE", "LIVE")
-        row = cm.evaluate(self.vault, "goal", "no-such-goal")
+        row = cm.evaluate(self.vault, "topic", "no-such-topic")
         self.assertFalse(row["card"])
         self.assertIn("abandoned record", row["reason"])
 
@@ -264,6 +213,65 @@ class EvaluateTest(unittest.TestCase):
         self.stub("STALE", "LIVE")
         row = cm.evaluate(self.vault, "topic", "lapsed-topic")
         self.assertTrue(row["card"], row["reason"])
+
+
+class RetainedPredicateTest(unittest.TestCase):
+    """The two goal-coverage predicates survive (the keeper census and the ownership resolver
+    use the declaring-topic map); `evaluate` no longer consults them, so they are pinned here
+    directly rather than through a card that can no longer fire."""
+
+    def setUp(self):
+        cm._MEMO.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = os.path.join(self.tmp.name, "vault")
+        self.goals = os.path.join(self.vault, "24 Goals")
+        self.topics = os.path.join(self.vault, "23 Topics")
+        os.makedirs(self.goals)
+        os.makedirs(self.topics)
+        self._cadence = cm.cadence_state
+        self._verdict = cm.session_state
+        self.addCleanup(lambda: (setattr(cm, "cadence_state", self._cadence),
+                                 setattr(cm, "session_state", self._verdict)))
+
+    def topic(self, name, goals, sid="bbbb2222-0000-0000-0000-000000000000"):
+        body = "\n".join(f"- [ ] [[{g}]]" for g in goals)
+        write(os.path.join(self.topics, f"{name}.md"),
+              f"---\nclaude_session_id: {sid}\npage_type: topic\n---\n\n## Goals\n\n{body}\n")
+
+    def test_topic_manager_live_is_true_for_a_live_armed_topic_that_declares_the_goal(self):
+        self.topic("A Topic", ["A Goal"])
+        cm.session_state = lambda sid: "LIVE"
+        cm.cadence_state = lambda name, branch: "OK"
+        self.assertTrue(cm.topic_manager_live(self.vault, "A Goal"))
+
+    def test_topic_manager_live_is_false_when_the_topics_loop_is_stopped(self):
+        """A LIVE session with a STOPPED loop covers nothing — `/supervisor:stop` disarms it."""
+        self.topic("A Topic", ["A Goal"])
+        cm.session_state = lambda sid: "LIVE"
+        cm.cadence_state = lambda name, branch: "STOPPED"
+        self.assertFalse(cm.topic_manager_live(self.vault, "A Goal"))
+
+    def test_topic_manager_live_is_false_when_no_topic_declares_the_goal(self):
+        self.topic("A Topic", ["Another Goal"])
+        cm.session_state = lambda sid: "LIVE"
+        cm.cadence_state = lambda name, branch: "OK"
+        self.assertFalse(cm.topic_manager_live(self.vault, "A Goal"))
+
+    def test_unkept_topics_maps_dead_to_resume_and_undecidable_to_cannot_tell(self):
+        self.topic("Dead Topic", ["G"], sid="dead0000-0000-0000-0000-000000000000")
+        self.topic("Unknown Topic", ["G"], sid="unk00000-0000-0000-0000-000000000000")
+        self.topic("Live Topic", ["G"], sid="live0000-0000-0000-0000-000000000000")
+        cm.session_state = lambda sid: (
+            "ABSENT" if sid.startswith("dead")
+            else "UNKNOWN" if sid.startswith("unk")
+            else "LIVE")
+        self.assertEqual(cm.unkept_topics(self.vault), {
+            "Dead Topic": "resume", "Unknown Topic": "cannot-tell"})
+
+    def test_unkept_topics_skips_a_topic_with_no_session_id(self):
+        self.topic("No Sid Topic", ["G"], sid="")
+        self.assertEqual(cm.unkept_topics(self.vault), {})
 
 
 class SubjectsTest(unittest.TestCase):
@@ -339,6 +347,10 @@ class MainTest(unittest.TestCase):
         write(os.path.join(self.goals, f"{name}.md"),
               f"---\nclaude_session_id: {sid}\npage_type: goal\n---\n\n# Impact\n")
 
+    def topic_page(self, name, sid="cccc3333-0000-0000-0000-000000000000"):
+        write(os.path.join(self.topics, f"{name}.md"),
+              f"---\nclaude_session_id: {sid}\npage_type: topic\n---\n\n# Goals\n")
+
     def cadence(self, branch, base):
         write(os.path.join(self.statedir, f"{branch}--{base}.cadence"), "900\n")
 
@@ -360,8 +372,8 @@ class MainTest(unittest.TestCase):
         self.assertIn("store unreachable", str(ctx.exception))
 
     def test_a_failed_post_refuses_the_whole_round(self):
-        self.goal("Lonely Goal")
-        self.cadence("goal", "lonely-goal")
+        self.topic_page("Lonely Topic")
+        self.cadence("topic", "lonely-topic")
         self.stub()
         cm.subprocess.run = Recorder(lambda argv: Proc(stderr="store unreachable", returncode=2))
         code, out, err = self.run_main("--post", "--vault", self.vault, "--state-dir", self.statedir)
@@ -370,9 +382,9 @@ class MainTest(unittest.TestCase):
         self.assertNotIn("crashed-managers:", out)
 
     def test_one_card_per_crashed_subject_with_distinct_dedup_keys(self):
-        for name, base in (("Lonely Goal", "lonely-goal"), ("Other Crash", "other-crash")):
-            self.goal(name)
-            self.cadence("goal", base)
+        for name, base in (("Lonely Topic", "lonely-topic"), ("Other Crash", "other-crash")):
+            self.topic_page(name)
+            self.cadence("topic", base)
         self.stub()
         rec = Recorder()
         cm.subprocess.run = rec
@@ -387,18 +399,14 @@ class MainTest(unittest.TestCase):
         self.assertIn("2 card(s)", out)
 
     def test_a_goal_and_a_topic_with_one_base_get_distinct_dedup_keys(self):
-        """The branch is the only thing telling the two apart — a subject-only key collides."""
-        write(os.path.join(self.goals, "Shared Name.md"),
-              "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
-        write(os.path.join(self.topics, "Shared Name.md"),
-              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n## Goals\n")
-        self.cadence("goal", "shared-name")
-        self.cadence("topic", "shared-name")
-        self.stub()
+        """The branch is the only thing telling the two apart — a subject-only key collides.
+        A goal record is never carded now, but `post()` still keys on the branch, so the
+        builder is pinned directly."""
         rec = Recorder()
         cm.subprocess.run = rec
-        code, out, _ = self.run_main("--post", "--vault", self.vault, "--state-dir", self.statedir)
-        self.assertEqual(code, 0, out)
+        for branch in ("goal", "topic"):
+            cm.post({"branch": branch, "base": "shared-name", "subject": "Shared Name",
+                     "session": "aaaa1111-0000-0000-0000-000000000000"})
         keys = [a[a.index("--dedup-key") + 1] for a in rec.posted()]
         self.assertEqual(len(keys), 2, keys)
         self.assertTrue(any("goal--shared-name" in k for k in keys), keys)
@@ -408,8 +416,8 @@ class MainTest(unittest.TestCase):
             self.assertEqual(argv[argv.index("--producer-kind") + 1], "manager")
 
     def test_a_bare_invocation_is_a_dry_run(self):
-        self.goal("Lonely Goal")
-        self.cadence("goal", "lonely-goal")
+        self.topic_page("Lonely Topic")
+        self.cadence("topic", "lonely-topic")
         self.stub()
         rec = Recorder()
         cm.subprocess.run = rec
@@ -419,8 +427,8 @@ class MainTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["cards"], 1)
 
     def test_json_posts_nothing(self):
-        self.goal("Lonely Goal")
-        self.cadence("goal", "lonely-goal")
+        self.topic_page("Lonely Topic")
+        self.cadence("topic", "lonely-topic")
         self.stub()
         rec = Recorder()
         cm.subprocess.run = rec
@@ -443,10 +451,10 @@ class MainTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
 
     def test_an_unreadable_subject_page_does_not_escape_as_a_traceback(self):
-        self.goal("Lonely Goal")
-        self.cadence("goal", "lonely-goal")
+        self.topic_page("Lonely Topic")
+        self.cadence("topic", "lonely-topic")
         self.stub()
-        page = os.path.join(self.goals, "Lonely Goal.md")
+        page = os.path.join(self.topics, "Lonely Topic.md")
         os.chmod(page, 0o000)
         self.addCleanup(os.chmod, page, 0o644)
         code, out, err = self.run_main("--json", "--vault", self.vault, "--state-dir", self.statedir)
@@ -454,7 +462,7 @@ class MainTest(unittest.TestCase):
         self.assertIn(code, (0, 2), out)
 
     def test_an_unreadable_vault_is_not_reported_as_no_crashed_managers(self):
-        self.cadence("goal", "lonely-goal")
+        self.cadence("topic", "lonely-topic")
         self.stub()
         code, out, err = self.run_main("--json", "--vault", os.path.join(self.tmp.name, "nope"),
                                        "--state-dir", self.statedir)
@@ -555,7 +563,7 @@ class SessionStateTest(unittest.TestCase):
 
 
 class CoverageTest(unittest.TestCase):
-    """The coverage test is the operator's decision: a covered manager must never card."""
+    """The goal branch is retired (reported, never carded) and reads fail closed."""
 
     def setUp(self):
         cm._MEMO.clear()
@@ -572,7 +580,9 @@ class CoverageTest(unittest.TestCase):
         self.addCleanup(lambda: (setattr(cm, "cadence_state", orig_cadence),
                                  setattr(cm, "session_state", orig_session)))
 
-    def test_a_live_topic_manager_declaring_another_goal_does_not_cover(self):
+    def test_a_goal_record_is_never_carded_regardless_of_topic_declarations(self):
+        """Retired: whether or not a topic declares it, a goal record yields no card — the
+        declaring topic's manager drives its rows, and no goal manager exists to restart."""
         write(os.path.join(self.goals, "Orphan Goal.md"),
               "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
         write(os.path.join(self.topics, "A Topic.md"),
@@ -580,40 +590,31 @@ class CoverageTest(unittest.TestCase):
               "## Goals\n\n- [[Some Other Goal]]\n")
         cm.cadence_state = lambda n, b: "STALE"
         cm.session_state = lambda s: "LIVE"
-        self.assertTrue(cm.evaluate(self.vault, "goal", "orphan-goal")["card"])
+        row = cm.evaluate(self.vault, "goal", "orphan-goal")
+        self.assertFalse(row["card"], row["reason"])
+        self.assertIn("merged into the topic tier", row["reason"])
 
     def test_a_goal_mentioned_only_under_non_goals_is_not_declared(self):
-        write(os.path.join(self.goals, "Lonely Goal.md"),
-              "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
-        write(os.path.join(self.topics, "A Topic.md"),
-              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
-              "## Scope\n\n## Goals\n\n- [[In Scope Goal]]\n\n"
-              "## Non-goals\n\n- [[Lonely Goal]]\n\n# Progress\n\n- restarted [[Lonely Goal]]\n")
+        text = ("## Scope\n\n## Goals\n\n- [[In Scope Goal]]\n\n"
+                "## Non-goals\n\n- [[Lonely Goal]]\n\n# Progress\n\n- restarted [[Lonely Goal]]\n")
+        self.assertFalse(cm.declares(text, "Lonely Goal"))
+
+    def test_an_unreadable_topic_page_refuses_rather_than_cards(self):
+        """On the live topic branch the page IS the subject: an unreadable page must refuse,
+        never read as "no page" and produce a card. A broken symlink is used because the
+        failure is real under root too (the repo's documented test environment), where
+        `chmod 000` does not deny root."""
+        os.symlink(os.path.join(self.topics, "missing.md"),
+                   os.path.join(self.topics, "A Topic.md"))
         cm.cadence_state = lambda n, b: "STALE"
         cm.session_state = lambda s: "LIVE"
-        row = cm.evaluate(self.vault, "goal", "lonely-goal")
-        self.assertTrue(row["card"], f"a Non-goals mention read as coverage: {row['reason']}")
-
-    def test_an_unreadable_topic_page_never_yields_a_card(self):
-        write(os.path.join(self.goals, "Orphan Goal.md"),
-              "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
-        topic_page = os.path.join(self.topics, "A Topic.md")
-        write(topic_page,
-              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
-              "## Goals\n\n- [[Orphan Goal]]\n")
-        os.chmod(topic_page, 0o000)
-        self.addCleanup(os.chmod, topic_page, 0o644)
-        # ⚠️ `chmod 000` does not deny root, so in a root container the page IS readable. Stub the
-        # topic's cadence as OK, so the assertion holds whether or not the chmod takes effect.
-        cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
-        cm.session_state = lambda s: "LIVE"
         try:
-            row = cm.evaluate(self.vault, "goal", "orphan-goal")
+            row = cm.evaluate(self.vault, "topic", "a-topic")
         except cm.Refused:
             return  # refusing is the stronger form of "no card"
         self.assertFalse(
             row["card"],
-            "an unreadable topic page read as 'does not declare', carding a covered manager",
+            "an unreadable page read as 'no page', carding an unverifiable manager",
         )
 
     def test_a_fleet_subject_never_cards(self):

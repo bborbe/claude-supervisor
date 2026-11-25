@@ -916,8 +916,8 @@ def state(subject: str, branch, vault: str, now: float) -> int:
     `UNARMED` is a claim about a SUBJECT — "nothing ever armed it" — so it is printed only
     once the subject is known to exist. Two answers used to collapse into it:
 
-      * **A record on another branch** → `WRONG-BRANCH`. Measured 2026-11-07: a goal-armed,
-        stood-down subject probed with `--branch topic` read `UNARMED`, while `--branch goal`
+      * **A record on another branch** → `WRONG-BRANCH`. Measured 2026-11-07: a stood-down
+        subject probed with `--branch fleet` read `UNARMED`, while `--branch topic`
         read `STOPPED`. The record was right; the probe named the wrong tier.
       * **No record anywhere and no page** → a refusal on stderr, exit 3, nothing on stdout.
         An abbreviated label (`"No Session Sits Idle"`) slugs to a different base, finds no
