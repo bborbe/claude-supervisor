@@ -189,5 +189,43 @@ class KeepaliveReaderTest(unittest.TestCase):
                                          flag_set_at="not-a-date"))
 
 
+_FIXTURES = os.path.join(_HERE, "fixtures", "standdown-order")
+
+
+class FixturePairTest(unittest.TestCase):
+    """SC3 — the two purpose-built pages, read from disk by each reader.
+
+    They differ ONLY in which of `flag_set_at` / `stop_date` is later, and they are
+    repo files rather than vault rows because `flag: true` + `flag_set_by: operator`
+    is approval at every reader — a live row in that state would be opened by the
+    running fleet.
+    """
+
+    def read(self, name):
+        with open(os.path.join(_FIXTURES, name + ".md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def keepalive_output(self, name):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as state, \
+                mock.patch.dict(os.environ, {"MANAGER_RESUMES_STATE_DIR": state}), \
+                redirect_stdout(out):
+            keepalive.main(["--vault", os.path.dirname(_FIXTURES), "--task", name,
+                            "--dir", "standdown-order", "--now", "1795000000"])
+        return out.getvalue()
+
+    STOP_LINE = "task is stopped by the operator; a stop is not a death"
+
+    def test_open_queue_skips_the_stop_and_opens_the_reflag(self):
+        self.assertTrue(open_queue.is_stopped(
+            open_queue.frontmatter(self.read("stopped-after-flag"))))
+        self.assertFalse(open_queue.is_stopped(
+            open_queue.frontmatter(self.read("flag-after-stop"))))
+
+    def test_keepalive_skips_the_stop_and_falls_through_the_reflag(self):
+        self.assertIn(self.STOP_LINE, self.keepalive_output("stopped-after-flag"))
+        self.assertNotIn(self.STOP_LINE, self.keepalive_output("flag-after-stop"))
+
+
 if __name__ == "__main__":
     unittest.main()
