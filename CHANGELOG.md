@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.370.0
 
 - refactor: **the fleet round's keep-alive acting leg is retired; the wrapper's keeper is the sole keep-alive authority.** The router row was already gone (`0bfff171`), but `agents/fleet-keepalive-actor.md`'s description still read *"Router row 5b of /supervisor:fleet-drive"* and `commands/steps/keepalive.md` still said *"When: every tick"* / *"one of the round's three acting legs"* — so a live Fleet Manager dispatched the actor every round and it wrote the digest's `keep-alive: unactioned:` counts. Deleted `commands/steps/keepalive.md` and `agents/fleet-keepalive-actor.md` with the four sub-step files (`keepalive-topicless-goals.md`, `keepalive-stood-down.md`, `keepalive-stalled-tabs.md`, `keepalive-decision-parks.md`), removed the LEGS contract (`output-shape.md` item 12, the round tail's `--status`/`--check`, the sweep's seed), and dropped the actor from the two hand-back registries. Change set: `agents/fleet-keepalive-actor.md` (deleted), `commands/steps/keepalive*.md` (deleted), `agents/fleet-sweep-reader.md`, `commands/steps/fleet-round-tail.md`, `commands/steps/output-shape.md`, `commands/steps/sweep.md`, `scripts/check-handback-keys.py`, `scripts/check-handback-size.py`, `scripts/keeper-census.py`, `scripts/tests/test_check_handback_keys.py`, `scripts/tests/test_check_handback_size.py`, `CHANGELOG.md`.
 
