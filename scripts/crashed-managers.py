@@ -35,7 +35,7 @@ when either of these holds:
 
 A goal manager under a live topic manager is **covered** and yields no card. So is a goal no
 topic declares at all, once it sits at `status: in_progress` + `phase: execution` with a
-recorded id: `commands/steps/keepalive.md` § Restart a lapsed goal manager whose goal no
+recorded id: `the wrapper's keep-alive tick` § Restart a lapsed goal manager whose goal no
 topic declares restarts it every fleet round, and a card would duplicate that action.
 
 ⚠️ **Coverage is read from the predicate, not from a run of the leg — a deliberate trade.** In
@@ -391,7 +391,7 @@ def fleet_keeps(vault: str, goal_name: str, goals_dir: str | None = None,
     """Is this goal's manager kept by the fleet round's topic-less goal leg?
 
     True for a goal page at `status: in_progress` + `phase: execution`, carrying a
-    `claude_session_id`, that no topic page declares (`commands/steps/keepalive.md`
+    `claude_session_id`, that no topic page declares (`the wrapper's keep-alive tick`
     § Restart an unkept lapsed goal manager) — **or** that a topic
     declares while every declaring topic is named in `unkept_topics`.
 

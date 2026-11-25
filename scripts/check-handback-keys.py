@@ -11,9 +11,7 @@ permanently false, and the branch behind it silently never runs.
       trigger and its body disagree, here the trigger and the data it tests do.
   (2) **The delegated legs.** Since 2026-11-06 `commands/steps/round-readings.md` and
       `commands/steps/goal-spawn.md` each dispatch a reader agent
-      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`), since 2026-11-07
-      the fleet round's acting leg does the same (`commands/steps/keepalive.md` →
-      `agents/fleet-keepalive-actor.md`) — each returns
+      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`) — each returns
       the verdicts the step no longer computes itself. A step reverted to its pre-split text
       stops dispatching, and a reader that drops one value of a family leaves the caller a
       cell it cannot evaluate — both silently. `docs/handback-contract.md` § The shape — the

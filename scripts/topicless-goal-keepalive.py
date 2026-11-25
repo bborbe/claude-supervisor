@@ -12,7 +12,7 @@ private-personal: 29 non-terminal goals carried a manager id and were declared b
 What it does
 ------------
 Selects the population and asks `topic-keepalive.py` for each verdict. It **decides, it never
-acts**: the fleet round (`commands/steps/keepalive.md`) runs the printed command, then records
+acts**: the fleet round (`the wrapper's keep-alive tick`) runs the printed command, then records
 the resume with `topic-keepalive.py --record-resume`. Running this script performs no restart,
 no open and no cap write, which is what makes it safe for a worker to run as a read-only check.
 

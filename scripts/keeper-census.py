@@ -251,8 +251,17 @@ def cadence(subject, branch, vault):
 
 
 def legs(leg_file=None):
-    """Which keeper legs exist, read from the leg files' own text."""
+    """Which keeper legs exist, read from the leg files' own text.
+
+    ⚠️ **No round leg files means the wrapper's keeper owns every tier, not that nothing is
+    kept.** The round's keep-alive acting leg was RETIRED in v0.367.0 (`0bfff171`) and the
+    wrapper's keep-alive tick is now the sole authority for topic, goal and worker. Returning
+    all-`False` here would make every live session read `unkept` and card the whole fleet on
+    every tick — the regression this branch would otherwise ship.
+    """
     paths = [leg_file] if leg_file else LEG_FILES
+    if not paths:
+        return {name: True for name in LEG_PATTERNS}
     text = "\n".join(_read(path) for path in paths)
     return {name: bool(pattern.search(text)) for name, pattern in LEG_PATTERNS.items()}
 
