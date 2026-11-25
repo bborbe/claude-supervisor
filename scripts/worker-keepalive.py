@@ -92,23 +92,12 @@ PARKED_PHASE = {"human_review", "todo", "done"}
 #: The verdict is `scripts/standdown-order.py`'s, shared with `open-queue.is_stopped()`
 #: so the two readers cannot drift: a row the operator re-flagged after its stop is NOT
 #: stopped, and this leg may resume it.
-_STANDDOWN = None
-
-
-def _standdown():
-    """`scripts/standdown-order.py` loaded as a module — the filename is not importable."""
-    global _STANDDOWN
-    if _STANDDOWN is None:
-        path = os.path.join(REPO, "scripts", "standdown-order.py")
-        spec = importlib.util.spec_from_file_location("standdown_order", path)
-        _STANDDOWN = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_STANDDOWN)
-    return _STANDDOWN
+standdown_order = _load("standdown_order", "standdown-order.py")
 
 
 def is_stopped(fm: str) -> bool:
     """The stand-down marker's ordering verdict for this page — see `standdown-order.py`."""
-    return _standdown().is_stopped(fm, _keepalive().scalar)
+    return standdown_order.is_stopped(fm, _keepalive().scalar)
 
 
 _KEEPALIVE = None

@@ -33,6 +33,7 @@ import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -249,6 +250,15 @@ class FixturePairTest(unittest.TestCase):
     def test_keepalive_skips_the_stop_and_falls_through_the_reflag(self):
         self.assertIn(self.STOP_LINE, self.keepalive_output("stopped-after-flag"))
         self.assertNotIn(self.STOP_LINE, self.keepalive_output("flag-after-stop"))
+
+    def test_guards_report_stopped_only_for_the_stop_after_flag_row(self):
+        """The reopen must reach the SELECTION surface, not only the predicate."""
+        today = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            open_queue.guards(open_queue.frontmatter(self.read("stopped-after-flag")), today),
+            "stopped")
+        self.assertIsNone(
+            open_queue.guards(open_queue.frontmatter(self.read("flag-after-stop")), today))
 
 
 if __name__ == "__main__":
