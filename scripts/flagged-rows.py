@@ -1178,9 +1178,11 @@ def _finish_row(vault, kind, path, ctx, block, name, page_kind, role, role_sourc
     # this name". ⚠️ **`None` is not `False`:** `managers is None` means the registry probe
     # failed, and reading that as "not live" would authorise a duplicate spawn. ⚠️ **Names
     # are not ids:** two sessions can share a name, so this proves *a* live session of that
-    # name, never *this* one — which is why the guard is scoped to the ABSENT verdict only
-    # and leaves a genuinely dead row with no live namesake reading ABSENT.
-    if live == "ABSENT" and ctx["managers"] is not None and name in ctx["managers"]:
+    # name, never *this* one — which is why the guard is scoped to the ABSENT and `none`
+    # verdicts and leaves a genuinely dead row with no live namesake reading ABSENT. `none`
+    # is the sessionless row (`liveness_of(None)`): a page with no `claude_session_id` whose
+    # name a live session carries is live, and without this arm it scores `create`.
+    if live in ("ABSENT", "none") and ctx["managers"] is not None and name in ctx["managers"]:
         live = "LIVE"
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
     # 2000-line module per call — probing ABSENT rows too tripled the run time for
