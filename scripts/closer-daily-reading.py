@@ -20,10 +20,16 @@ Definitions, pinned:
     so a `⏰ Ends:` on a non-gate closer was judged too. On 2026-11-24 they were
     2 672 of 3 324 `closers=` records; excluding them would hide most of the
     population the criterion is about.
-  * `session-bound=` — **distinct sessions** among those records whose `class`
-    is non-null. Distinct, not records: a re-blocked closer re-emits its
-    original `class` under `reason: blocked-retry`, so a record count would
-    report one session twice.
+  * `session-bound=` — **distinct sessions** among those records whose session-bound
+    class is non-null. Distinct, not records: a re-blocked closer re-emits its
+    original `class` under `reason: blocked-retry`, so a record count would report
+    one session twice. ⚠️ The class is **re-derived** from each record's `ends` with
+    `closer-gate-lint.py`'s own `session_bound_class()`, not read from the stored
+    `class`: that field is a judgement made by whichever classifier the hook shipped
+    when the record was written, so a detector fix would otherwise apply only to new
+    records. A record with no `ends` (every record before 2026-11-19, and every
+    `blocked-retry`) cannot be re-judged and falls back to its stored `class` — the
+    fail-closed direction, so history is never silently cleared.
   * `sessions=` — distinct `session_id` values among the `closers=` records.
   * `coverage=<n>/<m>` — `n` is `sessions=`; `m` is the same day's census
     `sessions` value, supplied with `--census-sessions` (or read from the goal
@@ -60,6 +66,7 @@ only.
 
 import argparse
 import datetime
+import importlib.util
 import json
 import os
 import sys
@@ -144,7 +151,48 @@ def records_for(root, day):
     return kept, unreadable, unparsed, undated
 
 
-def read(records):
+def _load_classifier():
+    """The lint's own `session_bound_class`, or `None` when the sibling script is absent.
+
+    ⚠️ One source of truth, not a copy: the reading re-judges history with exactly the
+    function the live hook uses, so a detector fix reaches records already on disk. A
+    missing or broken sibling must not take the reading down — `None` falls back to each
+    record's stored `class`, which is the pre-fix behaviour.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "closer-gate-lint.py")
+    try:
+        spec = importlib.util.spec_from_file_location("closer_gate_lint", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.session_bound_class
+    except Exception:
+        return None
+
+
+def _class_of(record, classify):
+    """The record's session-bound class, re-derived from its `ends` when that is possible.
+
+    ⚠️ The stored `class` is a judgement made at write time by whichever classifier the
+    hook shipped then, and a detector fix would otherwise apply only to records written
+    after it. Re-deriving is the whole point of this reading: the observable is in `ends`,
+    so history can be re-judged without rewriting the log.
+
+    ⚠️ `ends` was added to the record on 2026-11-19, and `blocked-retry` records carry no
+    `ends` at all — 288 of 335 class-bearing records measured 2026-11-25. A record with no
+    `ends` cannot be re-judged, and its stored `class` is the only evidence there is, so
+    it is trusted. That is the fail-closed direction: an un-rejudgeable record stays red
+    rather than being silently cleared.
+    """
+    ends = record.get("ends")
+    if ends and classify is not None:
+        try:
+            return classify(ends)
+        except Exception:
+            pass
+    return record.get("class")
+
+
+def read(records, classify=None):
     """`(closers, session_bound_sessions, closer_sessions)` for one day's records.
 
     ⚠️ A null `session_id` counts as its own distinct session, never as absent.
@@ -154,7 +202,7 @@ def read(records):
     records in the count without pretending they are one session each.
     """
     closers = [r for r in records if r.get("closer")]
-    bound = {r.get("session_id") for r in closers if r.get("class")}
+    bound = {r.get("session_id") for r in closers if _class_of(r, classify)}
     # The coverage numerator keeps real ids only: a null id is not a session the
     # census counted, so counting it would inflate coverage — the opposite error.
     sessions = {r.get("session_id") for r in closers if r.get("session_id")}
@@ -269,7 +317,7 @@ def main(argv=None):
             file=sys.stderr,
         )
 
-    closers, session_bound, sessions = read(records)
+    closers, session_bound, sessions = read(records, _load_classifier())
 
     census = args.census_sessions
     if census is None and args.goal_page:

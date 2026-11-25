@@ -457,16 +457,91 @@ def ends_body(line):
     return body.replace("&nbsp;", " ").strip().strip("`").strip()
 
 
+# ⚠️ SC4's own clause — *"the in-session watcher may stay in the `(mechanism, id)` slot"* —
+# means the slot may name a mechanism WITHOUT that mechanism being the observable. A
+# classifier that reads the whole body cannot tell the two apart, so it reds a legal
+# closer whenever the watcher is a Monitor. Measured 2026-11-25 on session `de5e925c`:
+# `⏰ Ends: tag on \`bborbe/github-update-go-agent\` containing \`d0849b7a\`, observed by
+# Monitor \`bkrc2l2og\`` — the awaited thing is an external git tag and the Monitor only
+# watches it. It red the day and restarted the goal's 7-day window.
+#
+# The distinction is PRODUCER vs WATCHER, and it is "which words appear where", not "which
+# words appear":
+#
+#   * WATCHER — a Monitor, or a clause that labels itself `mechanism:` / `observed by` /
+#     `watched by` / `via`. None of these produces the awaited thing; they report on it or
+#     wake the session to look. Removed before classification.
+#   * PRODUCER — a sub-agent, a background agent, a `run_in_background` shell, a
+#     `CronCreate`, or a BARE `(ScheduleWakeup …)` slot. The awaited thing IS that
+#     mechanism's output (`the build finishes (run_in_background shell b7k2)`, `chunk
+#     completion notices (background agents)`, `next fleet round 18:26 (ScheduleWakeup,
+#     900 s)`), so it dies with the session and stays session-bound.
+#
+# ⚠️ The `mechanism:` label does not exempt a producer word: `(mechanism: harness sub-agent
+# completion notification …)` is still the sub-agent's return, so a slot naming a producer
+# word is never a watcher slot.
+#
+# Measured 2026-11-25 over the 291 records naming a session-bound word: 74 bare
+# `(Monitor …)` + 4 `(mechanism: Monitor …)` + 37 `(mechanism: ScheduleWakeup …)` are
+# watcher slots; 125 bare `(ScheduleWakeup …)` and 47 sub-agent parentheticals are
+# producers. Re-deriving the whole log through this rule moves 15 records, every one from
+# a class to clean and none the other way.
+PRODUCER = re.compile(
+    r"\b(?:background\s+(?:sub-?)?agents?|sub-?agents?|agent\s+tasks?"
+    r"|run_in_background|background\s+(?:bash|shell)s?"
+    r"|CronCreate)\b", re.IGNORECASE)
+
+# A watcher slot must name a Monitor or carry the `mechanism:` label. A bare
+# `(ScheduleWakeup …)` is a producer — that is what keeps `next fleet round 18:26
+# (ScheduleWakeup, 900 s)` red.
+WATCHER_MARK = re.compile(r"\bMonitor\b|\bmechanism\s*:", re.IGNORECASE)
+
+# The phrase forms, anchored to the clause END: text after the phrase is the session's own
+# follow-up, never the observable.
+WATCHER_PHRASE = re.compile(
+    r"(?:[,;—–-]|\s)*(?:observed|watched|polled)\s+by\b.*$"
+    r"|(?:[,;—–-]|\s)*\bvia\s+(?:an?\s+)?(?:Monitor|ScheduleWakeup|CronCreate"
+    r"|run_in_background)\b.*$",
+    re.IGNORECASE | re.DOTALL)
+
+# A slot left holding only filler is not an observable — `⏰ Ends: nothing (Monitor x)`
+# waits on the Monitor itself, so it must fall back to the full body and stay red.
+AWAITED_FILLER = re.compile(r"\bnothing\b|[^\w]", re.IGNORECASE)
+
+
+def awaited_body(body):
+    """`body` with the in-session watcher slots removed — the observable it waits on."""
+    kept, index = [], 0
+    while index < len(body):
+        if body[index] == "(":
+            close = body.find(")", index)
+            slot = body[index:close + 1] if close != -1 else ""
+            # ⚠️ An unbalanced slot is left in place: a truncated record must not have
+            # its observable cut away, which is the fail-open direction.
+            if slot and WATCHER_MARK.search(slot) and not PRODUCER.search(slot):
+                index = close + 1
+                continue
+        kept.append(body[index])
+        index += 1
+    return WATCHER_PHRASE.sub("", "".join(kept)).strip(" -—–,;\t")
+
+
 def session_bound_class(line):
     """The session-bound class an `⏰ Ends:` waits on with no durable observable, or `None`."""
     body = ends_body(line)
     if not body:
         return None
+    # ⚠️ Strip the watcher slot BEFORE the durable check: a durable observable anywhere
+    # still clears the closer, and removing the slot first keeps a watcher's own id
+    # (`Monitor b6yrejohe`) from being read as part of the observable.
+    awaited = awaited_body(body)
+    if not AWAITED_FILLER.sub("", awaited):
+        awaited = body
     for _name, pattern in DURABLE:
-        if pattern.search(body):
+        if pattern.search(awaited):
             return None
     for name, pattern in SESSION_BOUND:
-        if pattern.search(body):
+        if pattern.search(awaited):
             return name
     return None
 

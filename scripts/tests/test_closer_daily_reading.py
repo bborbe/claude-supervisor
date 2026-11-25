@@ -44,7 +44,7 @@ DAY = "2026-11-24"
 MIDDAY = f"{DAY}T12:00:00+00:00"
 
 
-def _record(session_id, reason, closer=None, cls=None, ts=MIDDAY):
+def _record(session_id, reason, closer=None, cls=None, ts=MIDDAY, ends=None):
     return {
         "ts": ts,
         "session_id": session_id,
@@ -53,7 +53,7 @@ def _record(session_id, reason, closer=None, cls=None, ts=MIDDAY):
         "verb": None,
         "matched": None,
         "closer": closer,
-        "ends": None,
+        "ends": ends,
         "class": cls,
         "phrase": None,
     }
@@ -125,6 +125,57 @@ class ReadTest(unittest.TestCase):
         ]
         _, bound, _ = cdr.read(records)
         self.assertEqual(bound, 1)
+
+
+class RederiveTest(unittest.TestCase):
+    """The reading re-judges each record's `ends`, so a detector fix reaches history.
+
+    ⚠️ These run through `main()` on purpose. `read(records)` without a classifier is the
+    PRE-FIX path — it trusts the stored `class` — so the SC1 test fails on the pre-fix
+    code and passes only when the sibling classifier is loaded and applied.
+    """
+
+    def test_the_classifier_is_loaded_from_the_sibling_lint(self):
+        # A missing sibling must not take the reading down, but it must not pass silently
+        # in CI either: the whole point is that this reading and the hook agree.
+        self.assertIsNotNone(cdr._load_classifier())
+
+    def test_an_external_observable_with_a_monitor_watcher_reads_clean(self):
+        # ⚠️ The recorded 2026-11-25 shape (session de5e925c), stored with `class: monitor`
+        # because the hook read the whole body. The awaited thing is an external git tag;
+        # the Monitor only watches it, which SC4 permits in the `(mechanism, id)` slot.
+        # Pre-fix this reads `session-bound=1` and reds the day.
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "s1", [_record(
+                "de5e925c", "session-bound-ends",
+                closer="👤 You: nothing — I continue when the tag lands.",
+                cls="monitor",
+                ends="⏰ Ends: tag on `bborbe/github-update-go-agent` containing "
+                     "`d0849b7a`, observed by Monitor `bkrc2l2og`.")])
+            code, out, _ = _run(["--date", DAY, "--root", root, "--census-sessions", "1"])
+            self.assertEqual(cdr.EXIT_CLEAN, code)
+            self.assertIn("session-bound=0", out)
+
+    def test_a_session_bound_awaited_thing_still_reds(self):
+        # The regression guard against over-exemption: the Monitor IS the observable here.
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "s2", [_record(
+                "sess2", "session-bound-ends", closer="👤 You: nothing", cls="monitor",
+                ends="⏰ Ends: Monitor bgtbwa5go reports the generator exited")])
+            code, out, _ = _run(["--date", DAY, "--root", root, "--census-sessions", "1"])
+            self.assertEqual(cdr.EXIT_SESSION_BOUND, code)
+            self.assertIn("session-bound=1", out)
+
+    def test_a_record_with_no_ends_keeps_its_stored_class(self):
+        # Every record before 2026-11-19 carries no `ends`, and `blocked-retry` carries
+        # none either. Those cannot be re-judged, so the stored class stands — the
+        # fail-closed direction: history is never silently cleared.
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "s3", [_record(
+                "sess3", "session-bound-ends", closer="👤 You: nothing", cls="monitor")])
+            code, out, _ = _run(["--date", DAY, "--root", root, "--census-sessions", "1"])
+            self.assertEqual(cdr.EXIT_SESSION_BOUND, code)
+            self.assertIn("session-bound=1", out)
 
 
 class DayFilterTest(unittest.TestCase):
