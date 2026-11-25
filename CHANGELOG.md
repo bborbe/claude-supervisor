@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.368.0
 
 - feat: **the goal-manager tier is merged into the topic manager.** The four-tier tree (fleet → topic → goal → worker) becomes three (fleet → topic → worker): a topic manager now drives each goal it declares directly, so there is no goal-manager session. `scripts/owner.py` resolves a goal to its declaring topic's manager (a goal declared by a topic is owned by that topic; a goal in no topic still falls to the fleet manager); the keep-alive chain drops from 7 rows to 5; `docs/session-tiers.md`, `docs/fleet-surface.md`, `CLAUDE.md` and `commands/read-guides.md` state three tiers, and the `goal-*` commands are the topic tier's goal scope. Change set: the full PR (44 files) — `scripts/owner.py`, `scripts/topic-spawn.py`, `scripts/topic-keepalive.py`, `scripts/topicless-goal-keepalive.py`, `scripts/crashed-managers.py`, `scripts/fleet-board.py`, `scripts/manager-receipt.py`, `scripts/manager-liveness.py`, the topic/goal/keepalive command and step files, `docs/session-tiers.md`, `docs/fleet-surface.md`, `docs/subject-resolution.md`, `CLAUDE.md`, `commands/read-guides.md`, `CHANGELOG.md`, and the matching tests.
 
