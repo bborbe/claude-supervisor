@@ -16,7 +16,7 @@ argument-hint: "[topic] (detected when omitted)"
 
 Topic-status — the **read-only, one-shot** twin of `/fleet-status` for **one topic**. It
 answers *"what is this topic's goal set doing right now?"*: one row per declared goal, with
-its status, phase, success-criterion count and the state of the goal manager running on it.
+its status, phase, success-criterion count and the state of the topic manager driving it.
 
 ⚠️ **It lists GOALS, never tasks.** A goal's task set belongs to `/supervisor:goal-status
 "<goal>"` — the goal tier's own snapshot. This command reads goal pages and nothing else,
@@ -84,17 +84,18 @@ cross-session state for every later tick.
 
    - `status` and `phase` from the frontmatter;
    - the `# Success Criteria` tally — `n` ticked of `m` total;
-   - `claude_session_id`, probed with `session-liveness.py --check <id>` →
-     `LIVE` / `ABSENT` / `UNKNOWN`;
-   - the loop cadence — `manager-liveness.py --state --subject "<goal>" --branch goal --vault "<vault-root>"` →
+   - ⚠️ **The goal-manager tier is retired** — a goal page's `claude_session_id` is a retired
+     record and is not probed; the topic manager's own state is the loop cadence below;
+   - the loop cadence — `manager-liveness.py --state --subject "<topic>" --branch topic --vault "<vault-root>"` →
      `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID` / `WRONG-BRANCH`; a non-zero
      exit (exit 3: the name resolves no page and no record) renders `UNVERIFIED`, never `UNARMED`.
      ⚠️ **`--vault` is not optional** — without it the page test runs against the process cwd, and a
-     goal whose page lives in another vault is refused instead of read as a never-armed loop.
+     topic whose page lives in another vault is refused instead of read as a never-armed loop.
 
    ⚠️ **`UNKNOWN` is not `ABSENT`** — an unreadable source cannot prove a session dead, so
-   the row renders `UNVERIFIED`, never `dead`. ⚠️ **`--branch goal` is not optional** — the
-   state slug carries the tier.
+   the row renders `UNVERIFIED`, never `dead`. ⚠️ **`--branch topic` is not optional** — the
+   state slug carries the tier. ⚠️ **The goal-manager tier is retired** — there is no per-goal
+   manager to probe; the topic manager drives each declared goal's rows directly.
 
 4. **Render the table.**
 
@@ -128,4 +129,4 @@ cross-session state for every later tick.
    I do about this topic", that is `/supervisor:topic-loop`, not this snapshot.
 
 ⚠️ **A goal that no manager owns is a row, not an error.** It renders `—` in the Manager
-cell. Starting one is `topic-spawn`'s act and this command's advice is only the table.
+cell. There is no goal-manager session to start (merged into the topic tier 2026-11-24); a goal no manager owns is a row.

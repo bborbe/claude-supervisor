@@ -292,11 +292,17 @@ class VaultIndex:
         return self.task_managed_by.get((task_title or "").lower())
 
     def topics_of(self, goal_title):
-        """The topics whose `## Goals` lists this goal, in order."""
-        return self.goal_topics.get((goal_title or "").lower(), [])
+        """The topics whose `## Goals` lists this goal, alphabetically.
+
+        ⚠️ **Sorted — one rule with `owner.declaring_topic`.** The ownership resolver takes the
+        first declaring topic; this board takes the first declaring topic that has a live
+        manager. An unsorted list (filesystem order) made both answers machine-dependent, so a
+        goal declared by two topics could parent differently on two hosts.
+        """
+        return sorted(self.goal_topics.get((goal_title or "").lower(), []))
 
     def topics_of_task(self, task_title):
-        """The topics whose `## Goals` lists this TASK directly, in order.
+        """The topics whose `## Goals` lists this TASK directly, alphabetically.
 
         The design's "a task whose task has no goal is managed by the nearest
         existing ancestor — its topic's manager if the task sits directly under a
@@ -304,7 +310,7 @@ class VaultIndex:
         entries that resolve to a goal page, so a task entry was dropped and the
         task fell through to the fleet manager.
         """
-        return self.task_topics.get((task_title or "").lower(), [])
+        return sorted(self.task_topics.get((task_title or "").lower(), []))
 
     def _normalized_titles(self):
         """`{normalized title: title}`, built once — the index is read-only.
@@ -416,13 +422,32 @@ def _read(path, limit=None):
         return ""
 
 
+_CRASHED = None
+
+
+def _crashed():
+    """`scripts/crashed-managers.py` loaded lazily — the one home of the `## Goals` region walk.
+
+    Lazy because it loads `topic-keepalive.py`, which loads `owner.py`; a module-level load
+    would put that chain in this module's import path. `fleet-board` keeps its own link
+    extraction, but the section boundary must be the same one the card and the ownership
+    verdict use, or a link in a later heading counts as membership for one and not the others.
+    """
+    global _CRASHED
+    if _CRASHED is None:
+        _CRASHED = _load("crashed_managers_for_board", "crashed-managers.py")
+    return _CRASHED
+
+
 def _goals_section_links(text):
     """The wikilinks under a page's `## Goals` heading, one per list item.
 
     Three narrowings, each closing a measured false positive:
 
-    * **Stops at the next `## ` heading** — the section is the declaration, so a
-      link in a later section cannot claim membership.
+    * **Stops at the next heading, any level** — the section is the declaration, so a
+      link in a later section (including a `# Progress` entry) cannot claim membership.
+      ⚠️ **The region walk is `crashed-managers.goals_section`** — one home, so the
+      board, the crash card and the ownership verdict cannot disagree on the boundary.
     * **List items only** — the section carries prose notes too, and a paragraph
       recording that a goal was *removed* from the list names it. Read whole,
       `a page in 23 Topics`'s removal note claimed that goal as a
@@ -431,12 +456,9 @@ def _goals_section_links(text):
       and the annotation after the dash routinely links other goals and tasks.
       The entry admits one member; the rest are provenance.
     """
-    out, inside = [], False
-    for line in text.splitlines():
-        if line.startswith("## "):
-            inside = line.strip().lower() == "## goals"
-            continue
-        if inside and _LIST_ITEM.match(line):
+    out = []
+    for line in _crashed().goals_section(text):
+        if _LIST_ITEM.match(line):
             links = _WIKILINK.findall(line)
             if links:
                 out.append(links[0])
@@ -1006,13 +1028,13 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None, task_
     `goals:`. The field is hand-authored — nothing writes it automatically — so an absent
     or unresolvable value is not an error; it falls through to `goals:`.
 
-    A worker is parented only to a manager whose subject IS one of its declared
-    subjects (`managed_by`, then each goal). ⚠️ **The goal's topic is not a rung
-    for a worker.** `docs/fleet-surface.md` tier 4 makes the topic manager the
-    owner of an unmanaged GOAL so it can start that goal's manager; it does not
-    parent the worker to the topic manager, which a topic manager never manages
-    (`commands/topic-loop.md`). With no live goal manager the worker falls to the
-    root (the fleet manager) as a holding row.
+    A worker is parented to a manager whose subject IS one of its declared
+    subjects (`managed_by`, then each goal), and — since the goal tier merged
+    into the topic tier (2026-11-24) — to the **declaring topic manager** of a
+    goal the task declares. With no goal-manager tier, the topic manager that
+    declares the goal is its only manager, so the worker parents to it; a goal in
+    no topic, or a task that declares no goal, still falls to the task's own topic
+    or the root (the fleet manager) as a holding row.
 
     ⚠️ **The goal chain is not the whole order — the task's OWN topic is the last
     rung.** The design says a task with no goal is managed by the nearest existing
@@ -1027,6 +1049,16 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None, task_
                 continue
             if found[1].lower() == subject.lower():
                 return sid
+    # The goal's DECLARING TOPIC is a rung now the goal tier is gone (2026-11-24): the
+    # topic manager that declares the goal is its only manager, so a worker whose task
+    # declares the goal parents to it rather than falling to the root.
+    for goal in goal_titles:
+        for subject in index.topics_of(goal):
+            for sid, found in subjects.items():
+                if roles.get(sid) != ROLE_MANAGER or not found:
+                    continue
+                if found[1].lower() == subject.lower():
+                    return sid
     for subject in index.topics_of_task(task_title):
         for sid, found in subjects.items():
             if roles.get(sid) != ROLE_MANAGER or not found:

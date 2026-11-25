@@ -64,25 +64,23 @@ EMPTY_CELLS = ("", "—", "–", "-")
 SUBAGENT_DECISION = "no keeper, by decision 2026-11-08"
 SUBAGENT_TIER = "Background sub-agent"
 
-TIER_COUNT = 7
+TIER_COUNT = 5
 
 TIER_NAMES = {
     "Fleet manager",
     "Topic manager",
-    "Goal manager — goal declared by a topic",
-    "Goal manager — goal in no topic",
     "Worker — task with a goal",
     "Worker — task with no goal",
     "Background sub-agent",
 }
 
-#: Measured distinct artifacts at v0.264.1. A floor, not an equality: adding an artifact to a
-#: row must not break a passing test, but an extractor that returns almost nothing must not
+#: Measured distinct artifacts after the goal-manager tier was removed (2026-11-24: the chain is
+#: 5 rows, not 7 — both goal-manager rows retired). A floor, not an equality: adding an artifact
+#: to a row must not break a passing test, but an extractor that returns almost nothing must not
 #: read as a clean table either.
-# The keep-alive leg's retirement (v0.367.0, `0bfff171`) removed two distinct artifacts from
-# the chain table (`commands/steps/keepalive.md`, `keepalive-topicless-goals.md`); the floor
-# drops 9 → 8 so the extractor-sanity guard still fires on a real break, not on the retirement.
-MIN_DISTINCT_ARTIFACTS = 8
+# The keep-alive leg's retirement removed one more distinct artifact (`commands/steps/keepalive.md`)
+# from the chain, on top of the goal-tier merge; the floor is 6.
+MIN_DISTINCT_ARTIFACTS = 6
 
 BACKTICK = re.compile(r"`([^`]+)`")
 

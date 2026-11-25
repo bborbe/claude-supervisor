@@ -23,27 +23,18 @@ keep-alive covers the manager.**
 
 The uncovered population
 ------------------------
-`topic-keepalive.py` is invoked from exactly two places — `commands/topic-drive.md` and
-`agents/topic-drive.md` — i.e. by a **topic manager, on its goal managers only** (`--branch
-goal`, `goal--<slug>.json`). `docs/subject-resolution.md` states the other half outright:
-*nothing restarts a topic manager from a `topic--<slug>` cadence*. So a subject is uncovered
-when either of these holds:
+⚠️ **The goal-manager tier is merged into the topic tier (2026-11-24).** There is no
+goal-manager session, so a `goal--<slug>` record is reported for the census and **never
+carded**: a card would ask the operator to resurrect the retired tier. A goal's rows are
+driven by its declaring topic's manager, through `agents/goal-drive.md`. The `fleet_keeps`,
+`unkept_topics`, `declaring_topics` and `topic_manager_live` predicates are retained for the
+keeper census and the ownership resolver; `evaluate` no longer consults them.
 
-  * `branch == "topic"` — no keep-alive reaches a topic manager at all;
-  * `branch == "goal"` and **no live topic manager** declares the goal, **and** the fleet
-    round's topic-less goal leg does not keep it (`fleet_keeps`).
+So a subject is uncovered when:
 
-A goal manager under a live topic manager is **covered** and yields no card. So is a goal no
-topic declares at all, once it sits at `status: in_progress` + `phase: execution` with a
-recorded id: `the wrapper's keep-alive tick` § Restart a lapsed goal manager whose goal no
-topic declares restarts it every fleet round, and a card would duplicate that action.
-
-⚠️ **Coverage is read from the predicate, not from a run of the leg — a deliberate trade.** In
-a round whose keep-alive leg was debt-gated or refused, a kept goal's lapsed manager gets
-neither a restart nor a card that round. The same holds for a declared goal under a live
-topic manager, whose own round may be debt-gated too. The leg records its skip in the
-digest's `LEGS` section (`keep-alive: not run — <reason>`), which is where that round's gap
-is visible; a card per manager would duplicate the restart on every round the leg does run.
+  * `branch == "topic"` — nothing keeps a topic manager alive from a `topic--<slug>` cadence,
+    so a LIVE-but-lapsed topic manager is the one crash this script still cards;
+  * `branch == "goal"` — retired: reported, never carded (see above).
 
 ⚠️ **`branch == "fleet"` is counted and reported but never carded, and that is not a gap.**
 Nothing sits above a fleet manager, so it is uncovered in the keep-alive sense — but the
@@ -345,8 +336,8 @@ def topic_declares(vault: str, goal_name: str, topics_dir: str | None = None) ->
     return bool(declaring_topics(vault, goal_name, topics_dir))
 
 
-#: The goal state the fleet keep-alive leg keeps. One home: `scripts/topicless-goal-keepalive.py`
-#: selects with `fleet_keeps`, and `evaluate` below treats the same set as covered.
+#: The goal state the retired fleet keep-alive leg selected (`topicless-goal-keepalive.py` is
+#: now a refusing stub). Retained because `fleet_keeps` is still used by the keeper census.
 FLEET_KEPT_STATUS = "in_progress"
 FLEET_KEPT_PHASE = "execution"
 
@@ -391,7 +382,7 @@ def fleet_keeps(vault: str, goal_name: str, goals_dir: str | None = None,
     """Is this goal's manager kept by the fleet round's topic-less goal leg?
 
     True for a goal page at `status: in_progress` + `phase: execution`, carrying a
-    `claude_session_id`, that no topic page declares (`the wrapper's keep-alive tick`
+    `claude_session_id`, that no topic page declares (`commands/steps/keepalive.md`
     § Restart an unkept lapsed goal manager) — **or** that a topic
     declares while every declaring topic is named in `unkept_topics`.
 
@@ -543,6 +534,18 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
         )
         return row
 
+    if branch == "goal":
+        # The goal-manager tier is merged into the topic tier (2026-11-24). There is no
+        # goal-manager session to restart, so a goal record is reported for the census but
+        # NEVER carded: a card here would ask the operator to resurrect the retired tier.
+        # A goal's rows are driven by its declaring topic's manager (agents/goal-drive.md).
+        row["reason"] = (
+            "goal record — the goal-manager tier is merged into the topic tier, so there is "
+            "no goal manager to restart; a goal's rows are driven by its declaring topic's "
+            "manager, and a stale goal record is reported, never carded"
+        )
+        return row
+
     directory = os.path.join(vault, TOPICS_DIR if branch == "topic" else GOALS_DIR)
     subject_page = page(directory, base)
     if not subject_page:
@@ -572,15 +575,6 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
     verdict = session_state(sid)
     if verdict != "LIVE":
         row["reason"] = f"session {verdict} — not a live-but-lapsed manager"
-        return row
-
-    if branch == "goal" and topic_manager_live(vault, name):
-        row["reason"] = "covered — a live topic manager's keep-alive restarts it"
-        return row
-
-    if branch == "goal" and fleet_keeps(vault, name, unkept_topics=set(unkept_topics(vault))):
-        row["reason"] = ("covered — no topic declares this execution goal, or only an unkept one "
-                         "does, so the fleet round's keep-alive leg restarts it")
         return row
 
     row["card"] = True

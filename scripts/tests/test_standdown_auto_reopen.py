@@ -413,24 +413,24 @@ class KeepaliveStillLeavesTest(Base):
     a `restart`-shaped fixture would pass for the wrong reason.
     """
 
-    GOAL_PAGE = """---
-page_type: goal
+    TOPIC_PAGE = """---
+page_type: topic
 status: in_progress
 phase: execution
 claude_session_id: sid-1
 ---
-# Success Criteria
-- [ ] one
+## Goals
+- [[A Goal]]
 """
 
     def setUp(self):
         super().setUp()
         self.vault = pathlib.Path(self.root) / "vault"
-        (self.vault / "24 Goals").mkdir(parents=True)
-        (self.vault / "24 Goals" / "A Goal.md").write_text(self.GOAL_PAGE, encoding="utf-8")
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(self.TOPIC_PAGE, encoding="utf-8")
         # A cadence record aged past the stale limit: the manager reads as LAPSED, which is
         # what makes `restart` the verdict once the marker is gone.
-        cadence = os.path.join(self.state, "goal--a-goal.cadence")
+        cadence = os.path.join(self.state, "topic--a-topic.cadence")
         with open(cadence, "w", encoding="utf-8") as handle:
             handle.write("300\n")
         old = time.time() - 86_400
@@ -452,20 +452,20 @@ claude_session_id: sid-1
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(
-                ["--vault", str(self.vault), "--subject", "A Goal", "--branch", "goal",
+                ["--vault", str(self.vault), "--subject", "A Topic", "--branch", "topic",
                  "--now", str(time.time())]
             )
         self.assertEqual(0, rc)
         return out.getvalue().splitlines()[0]
 
     def test_a_stood_down_subject_is_left_alone(self):
-        self.marker("goal--a-goal.stopped")
+        self.marker("topic--a-topic.stopped")
 
         self.assertEqual("leave", self.verdict())
 
     def test_clearing_the_marker_lets_the_lapse_be_restarted(self):
-        self.marker("goal--a-goal.stopped")
-        self.clear("goal--a-goal.stopped")
+        self.marker("topic--a-topic.stopped")
+        self.clear("topic--a-topic.stopped")
 
         self.assertEqual("restart", self.verdict())
 
