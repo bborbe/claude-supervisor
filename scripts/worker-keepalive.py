@@ -89,9 +89,15 @@ PARKED_PHASE = {"human_review", "todo", "done"}
 #: distinction, and without it the marker only closed the *reopen* path.** Before this read
 #: existed, a worker the operator stopped and whose process then died was resumed on the
 #: next keepalive sweep — the marker was on the page and nothing here looked at it.
-#: Truthiness matches `open-queue.is_stopped()`'s set so the two readers agree.
-STOPPED_KEY = "stopped"
-TRUTHY = {"true", "yes", "on"}
+#: The verdict is `scripts/standdown-order.py`'s, shared with `open-queue.is_stopped()`
+#: so the two readers cannot drift: a row the operator re-flagged after its stop is NOT
+#: stopped, and this leg may resume it.
+standdown_order = _load("standdown_order", "standdown-order.py")
+
+
+def is_stopped(fm: str) -> bool:
+    """The stand-down marker's ordering verdict for this page — see `standdown-order.py`."""
+    return standdown_order.is_stopped(fm, _keepalive().scalar)
 
 
 _KEEPALIVE = None
@@ -422,7 +428,7 @@ def main(argv: list[str]) -> int:
     # death to recover from. Placed before `defer_date` for the reason `guards()` places it
     # before `blocked` — a stop outranks a derived state, and a row that is both stopped
     # and deferred must read `stopped` rather than reappear when the defer expires.
-    if k.scalar(fm, STOPPED_KEY).strip().lower() in TRUTHY:
+    if is_stopped(fm):
         print("jump")
         print("task is stopped by the operator; a stop is not a death")
         return 0
