@@ -203,6 +203,33 @@ class ExitCodeTest(unittest.TestCase):
         self.assertIn("YYYY-MM-DD", err)
 
 
+class DefaultRootTest(unittest.TestCase):
+    def test_the_hooks_own_override_is_honoured(self):
+        # closer-gate-lint.py resolves its directory from this variable first, so a
+        # reading that ignored it would read an empty default and exit 3 every day.
+        self.assertEqual(
+            cdr.default_root({cdr.DEFAULT_ROOT_ENV: "/somewhere/else"}), "/somewhere/else"
+        )
+
+    def test_the_default_applies_when_the_override_is_unset_or_empty(self):
+        self.assertEqual(cdr.default_root({}), cdr.DEFAULT_ROOT)
+        self.assertEqual(cdr.default_root({cdr.DEFAULT_ROOT_ENV: ""}), cdr.DEFAULT_ROOT)
+
+    def test_an_explicit_root_wins_over_the_override(self):
+        with tempfile.TemporaryDirectory() as root:
+            _write(root, "a", [_record("a", "allow-listed", closer="x")])
+            previous = os.environ.get(cdr.DEFAULT_ROOT_ENV)
+            os.environ[cdr.DEFAULT_ROOT_ENV] = "/nonexistent/override"
+            try:
+                code, _, _ = _run(["--date", DAY, "--root", root, "--census-sessions", "1"])
+            finally:
+                if previous is None:
+                    del os.environ[cdr.DEFAULT_ROOT_ENV]
+                else:
+                    os.environ[cdr.DEFAULT_ROOT_ENV] = previous
+        self.assertEqual(code, cdr.EXIT_CLEAN)
+
+
 class SnapshotTest(unittest.TestCase):
     def test_two_roots_with_the_same_content_read_identically(self):
         records = [

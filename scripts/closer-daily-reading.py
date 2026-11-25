@@ -60,6 +60,12 @@ import os
 import sys
 
 DEFAULT_ROOT = "~/.claude/state/closer-gate-lint"
+#: ⚠️ The hook's own override, honoured here too. `closer-gate-lint.py` resolves its
+#: record directory from this variable first (line 587), so a host that sets it
+#: writes somewhere else — and a reading that ignored it would look in the default
+#: directory, find nothing, and exit 3 on every day. Reading the wrong directory
+#: fails loudly, but it fails on the wrong question.
+DEFAULT_ROOT_ENV = "SUPERVISOR_CLOSER_GATE_LINT_STATE_DIR"
 #: The census population floor. Below this fraction the hook's own coverage is
 #: unproven and the day cannot be certified, whatever it read.
 COVERAGE_FLOOR = 0.9
@@ -85,6 +91,12 @@ def _local_date(raw):
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=datetime.timezone.utc)
     return stamp.astimezone().date()
+
+
+def default_root(environ=None):
+    """The hook's record directory: its own override if set, else the default."""
+    environ = os.environ if environ is None else environ
+    return environ.get(DEFAULT_ROOT_ENV) or DEFAULT_ROOT
 
 
 def record_paths(root):
@@ -171,8 +183,9 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--root",
-        default=DEFAULT_ROOT,
-        help=f"directory of <session>.jsonl records (default: {DEFAULT_ROOT})",
+        default=None,
+        help=f"directory of <session>.jsonl records "
+        f"(default: ${DEFAULT_ROOT_ENV} or {DEFAULT_ROOT})",
     )
     parser.add_argument(
         "--census-sessions",
@@ -203,7 +216,7 @@ def main(argv=None):
     else:
         day = datetime.datetime.now().astimezone().date()
 
-    root = os.path.expanduser(args.root)
+    root = os.path.expanduser(args.root or default_root())
     if not os.path.isdir(root):
         print(f"closer-daily-reading: no such directory: {root}", file=sys.stderr)
         return EXIT_USAGE
