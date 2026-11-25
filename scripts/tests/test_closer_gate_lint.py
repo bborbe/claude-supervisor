@@ -129,6 +129,18 @@ EXPECTED = {
     "52-ends-pr-no-number.jsonl": 2,
     "53-ends-pr-word-sha-only.jsonl": 2,
     "54-ends-bare-hash-no-pr-word.jsonl": 0,
+    # ⚠️ The watcher-slot pair. SC4 permits the in-session watcher in the `(mechanism, id)`
+    # slot, so the awaited thing — not the slot — decides. 55 is the recorded 2026-11-25
+    # line verbatim (session de5e925c); 56 and 57 are the parenthetical and `via` forms.
+    # 58 and 59 are the boundary: a bare `(ScheduleWakeup …)` slot is the wake-up that
+    # PRODUCES the awaited round (125 records measured 2026-11-25), and a slot holding
+    # only filler waits on the Monitor itself — both stay red, so a future widening of the
+    # strip cannot quietly clear the largest producer group.
+    "55-ends-monitor-watcher-observed-by.jsonl": 0,
+    "56-ends-monitor-watcher-slot.jsonl": 0,
+    "57-ends-monitor-watcher-via.jsonl": 0,
+    "58-ends-schedule-wakeup-producer.jsonl": 2,
+    "59-ends-filler-only-slot.jsonl": 2,
 }
 
 PANELESS_ENV = {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
@@ -779,6 +791,43 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertEqual("chunk 7a and 7c completion notices (background agents)",
                          record["phrase"])
         self.assertIn("nothing", record["closer"])
+
+    def test_a_monitor_watcher_does_not_make_the_observable_session_bound(self):
+        # ⚠️ SC4's own clause — *"the in-session watcher may stay in the `(mechanism, id)`
+        # slot"*. Measured 2026-11-25 on session de5e925c: the awaited thing is an external
+        # git tag and the Monitor only watches it, but a whole-body read classed it
+        # `monitor` — reding the day and restarting the goal's 7-day window.
+        for line in (
+            "⏰ Ends: tag on `bborbe/github-update-go-agent` containing `d0849b7a`, "
+            "observed by Monitor `bkrc2l2og`.",
+            "⏰ Ends: the next push to `bborbe/trading-lib` master (Monitor b6yrejohe, 15 min)",
+            "⏰ Ends: `bborbe/claude-supervisor` master gains a commit via Monitor `bq7xk2m1a`",
+            "⏰ Ends: the review lands (mechanism: Monitor bgrk3kjv1)",
+            "⏰ Ends: the worker exits, or the task page turns terminal "
+            "(mechanism: ScheduleWakeup 17:56)",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(self.mod.session_bound_class(line))
+
+    def test_the_awaited_thing_itself_still_reds(self):
+        # The other half of the same clause: a watcher slot is legal only when something
+        # else is awaited. These name a mechanism AS the observable, so they stay red —
+        # the producer rule is what keeps the largest real population (125 bare
+        # `(ScheduleWakeup …)` slots) from being cleared by the strip.
+        cases = {
+            "⏰ Ends: Monitor bgtbwa5go reports the generator exited": "monitor",
+            "⏰ Ends: nothing (Monitor bgtbwa5go)": "monitor",
+            "⏰ Ends: next fleet round 18:26 (ScheduleWakeup, 900 s)": "schedule-wakeup",
+            "⏰ Ends: the build finishes (run_in_background shell b7k2)":
+                "run-in-background-shell",
+            "⏰ Ends: chunk 7a and 7c completion notices (background agents)":
+                "background-sub-agent",
+            "⏰ Ends: the readiness audit returns "
+            "(mechanism: harness sub-agent completion notification)": "background-sub-agent",
+        }
+        for line, cls in cases.items():
+            with self.subTest(line=line):
+                self.assertEqual(cls, self.mod.session_bound_class(line))
 
     def test_a_durable_observable_clears_a_watcher_in_the_slot(self):
         # The operator's "observable only" scope: the watcher may stay in the slot.

@@ -44,6 +44,31 @@ clock, external-probe). That ordering is the whole point: a closer naming a
 file mtime is durable even if it also mentions a background agent, so a
 `session-bound-ends` record means the observable had **no** durable anchor.
 
+## The watcher slot is not the observable
+
+SC4's own clause — *"the in-session watcher may stay in the `(mechanism, id)`
+slot"* — means a mechanism named in the slot is legal when something **else**
+is awaited. `session_bound_class()` therefore strips the watcher slot before it
+classifies, and only the remaining text — the awaited thing — can red the day.
+
+| the slot is | example | verdict |
+|---|---|---|
+| **watcher** — a `Monitor`, or a clause labelled `mechanism:` / `observed by` / `watched by` / `via` | `tag on \`bborbe/github-update-go-agent\` containing \`d0849b7a\`, observed by Monitor \`bkrc2l2og\`` | clean — the tag is the observable |
+| **producer** — a sub-agent, a background agent, a `run_in_background` shell, a `CronCreate`, or a BARE `(ScheduleWakeup …)` | `the build finishes (run_in_background shell b7k2)`, `next fleet round 18:26 (ScheduleWakeup, 900 s)` | still session-bound — the awaited thing IS that mechanism's output |
+
+⚠️ The `mechanism:` label does not exempt a producer word: `(mechanism: harness
+sub-agent completion notification …)` is still the sub-agent's return. A slot
+holding only filler (`⏰ Ends: nothing (Monitor x)`) falls back to the full body,
+so a closer that waits on the Monitor itself stays red.
+
+Measured 2026-11-25 on session `de5e925c`: before this discrimination the
+closer above was recorded `class: monitor` and red the day, because the
+classifier read the whole body and the git tag matched no `DURABLE` arm
+(`external-probe` requires `tag v<N>`). `scripts/closer-daily-reading.py`
+re-derives each record's class from its stored `ends` with this same function,
+so the fix applies to records already on disk; a record with no `ends` (every
+record before 2026-11-19, and every `blocked-retry`) keeps its stored class.
+
 ## Every other reason is not
 
 | reason | emitting line(s) | what it means |
