@@ -12,9 +12,14 @@ wrote and prints one line.
 
 Definitions, pinned:
 
-  * `closers=` — records carrying a non-null `closer`. A record with
-    `reason: not-a-gate` or `no-closer` has `closer: null` and is not a closer
-    the hook judged.
+  * `closers=` — records carrying a non-null `closer`: every line the hook
+    found a `👤 You:` closer on. ⚠️ `no-closer` is the only reason that leaves
+    it null. `not-a-gate` DOES carry it — the hook found a closer line and then
+    ruled it is not an ask — and those records are counted, because the
+    session-bound check runs *before* the gate checks (line 821 precedes 895),
+    so a `⏰ Ends:` on a non-gate closer was judged too. On 2026-11-24 they were
+    2 672 of 3 324 `closers=` records; excluding them would hide most of the
+    population the criterion is about.
   * `session-bound=` — **distinct sessions** among those records whose `class`
     is non-null. Distinct, not records: a re-blocked closer re-emits its
     original `class` under `reason: blocked-retry`, so a record count would
@@ -164,7 +169,10 @@ def census_from_goal_page(path, day):
     Falls back to index 3 only when no header row is found at all.
     """
     try:
-        handle = open(path, encoding="utf-8")
+        # `errors="replace"`: a goal page with one bad byte must not crash the
+        # reading. The row is parsed by ASCII anchors (the date, the header name),
+        # so a replacement character in prose costs nothing.
+        handle = open(path, encoding="utf-8", errors="replace")
     except OSError:
         return None
     index = 3

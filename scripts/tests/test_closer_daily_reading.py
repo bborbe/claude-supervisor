@@ -5,9 +5,11 @@ The reading replaces a vacuous `exit 0`: a bare `closer-gate-lint.py` run has no
 closer on stdin, so it lints nothing and exits 0. Every property below exists to
 keep the replacement from certifying something it did not look at:
 
-  * **`closers=` excludes the records that judged nothing.** `not-a-gate` and
-    `no-closer` carry `closer: null`; counting them would inflate the population
-    with the very lines the hook declined to lint.
+  * **`closers=` counts every line the hook found a `👤 You:` on.** Only
+    `no-closer` leaves `closer` null. `not-a-gate` carries the text and is
+    counted — the session-bound check runs before the gate checks, so its
+    `⏰ Ends:` was judged too, and dropping it would hide most of the population
+    (2 672 of 3 324 records on 2026-11-24).
   * **`session-bound=` counts sessions, not records.** A re-blocked closer
     re-emits its original `class` under `blocked-retry`, so a record count
     reports one session twice (measured 2026-11-24: 3 records, 2 sessions).
@@ -74,13 +76,16 @@ def _run(argv):
 
 
 class ReadTest(unittest.TestCase):
-    def test_closers_excludes_records_that_judged_nothing(self):
+    def test_closers_counts_a_not_a_gate_line_and_drops_a_null_closer(self):
+        # `not-a-gate` means "a closer line, but not an ask" — the session-bound
+        # check already ran on it, so it belongs in the population. `no-closer` is
+        # the only reason with a null `closer`, and it is the one that drops out.
         records = [
-            _record("a", "not-a-gate"),
+            _record("a", "not-a-gate", closer="👤 You: nothing"),
             _record("b", "no-closer"),
             _record("c", "allow-listed", closer="👤 You: approve: x"),
         ]
-        self.assertEqual(cdr.read(records), (1, 0, 1))
+        self.assertEqual(cdr.read(records), (2, 0, 2))
 
     def test_session_bound_counts_distinct_sessions_not_records(self):
         records = [
@@ -100,6 +105,16 @@ class ReadTest(unittest.TestCase):
         _, bound, sessions = cdr.read(records)
         self.assertEqual(bound, 1)
         self.assertEqual(sessions, 0)
+
+    def test_many_null_session_ids_count_as_one_unknown_session(self):
+        # The sentinel is shared, so an id-less population is one unknown session
+        # rather than N — the bound count stays a count of sessions.
+        records = [
+            _record(None, "session-bound-ends", closer="x", cls="monitor"),
+            _record(None, "session-bound-ends", closer="y", cls="cron-create"),
+        ]
+        _, bound, _ = cdr.read(records)
+        self.assertEqual(bound, 1)
 
     def test_blocked_retry_alone_does_not_make_a_session_bound_session(self):
         # A retry record re-emits the original class; without the session dedupe a
@@ -124,6 +139,20 @@ class DayFilterTest(unittest.TestCase):
             code, out, _ = _run(["--date", DAY, "--root", root, "--census-sessions", "1"])
         self.assertEqual(code, cdr.EXIT_CLEAN)
         self.assertIn("closers=1 ", out)
+
+    def test_unparsable_and_unreadable_inputs_are_reported_not_silent(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "a.jsonl"), "w", encoding="utf-8") as handle:
+                handle.write("{not json\n")
+                handle.write(json.dumps(_record("a", "allow-listed", closer="x")) + "\n")
+            # A directory named like a record file: open() raises, and the read
+            # must say so rather than reporting a clean day.
+            os.makedirs(os.path.join(root, "b.jsonl"))
+            code, out, err = _run(["--date", DAY, "--root", root, "--census-sessions", "1"])
+        self.assertEqual(code, cdr.EXIT_CLEAN)
+        self.assertIn("closers=1", out)
+        self.assertIn("1 unreadable", err)
+        self.assertIn("1 unparsable", err)
 
     def test_missing_and_unparsable_ts_are_skipped_not_counted(self):
         with tempfile.TemporaryDirectory() as root:
@@ -330,6 +359,31 @@ class GoalPageTest(unittest.TestCase):
                 handle.write("| Date | census unkept | sessions | note |\n")
                 handle.write("|---|---|---|---|\n")
                 handle.write(f"| {DAY} | 9 | 44 | extra |\n")
+            self.assertEqual(
+                cdr.census_from_goal_page(path, cdr.datetime.date.fromisoformat(DAY)), 44
+            )
+
+    def test_a_row_under_a_second_header_uses_that_header(self):
+        # The column index is re-read per table, so a page whose first table has no
+        # row for the day still resolves the second table's row correctly.
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "goal.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("| Date | sessions |\n|---|---|\n")
+                handle.write("| 2026-11-20 | 7 |\n\n")
+                handle.write("| Date | census unkept | sessions |\n|---|---|---|\n")
+                handle.write(f"| {DAY} | 9 | 44 |\n")
+            self.assertEqual(
+                cdr.census_from_goal_page(path, cdr.datetime.date.fromisoformat(DAY)), 44
+            )
+
+    def test_a_bad_byte_in_the_goal_page_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "goal.md")
+            with open(path, "wb") as handle:
+                handle.write(b"| Date | sessions |\n|---|---|\n")
+                handle.write(b"| " + DAY.encode() + b" | 44 |\n")
+                handle.write(b"\xff\xfe broken prose\n")
             self.assertEqual(
                 cdr.census_from_goal_page(path, cdr.datetime.date.fromisoformat(DAY)), 44
             )

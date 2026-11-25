@@ -48,8 +48,8 @@ file mtime is durable even if it also mentions a background agent, so a
 
 | reason | emitting line(s) | what it means |
 |---|---|---|
-| `not-a-gate` | 895 | the last turn's `👤 You:` is not an ask; nothing to judge |
-| `no-closer` | 814 | no `👤 You:` line found at all |
+| `not-a-gate` | 895 | the last turn's `👤 You:` is not an ask. ⚠️ It still carries the `closer` text and is counted in the daily reading's `closers=`: the session-bound check (821) runs before this one (895), so its `⏰ Ends:` was judged. Measured 2026-11-24: 2 672 of 3 324 |
+| `no-closer` | 814 | no `👤 You:` line found at all — the only reason whose `closer` is null |
 | `not-allow-listed` | 899 | the verb is outside the allowed set |
 | `allow-listed` | 900 | the closer passed every check (the only clean outcome) |
 | `stop-hook-active` | 735, 738, 742, 744, 752 | a continued turn; allows so the bound stays finite |
