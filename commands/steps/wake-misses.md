@@ -7,7 +7,7 @@ user-invocable: false
 # Wake misses: the subjects a session-based check never enumerates
 
 Read by `/supervisor:fleet-triage` § 3.6 (`commands/steps/fleet-triage-state.md`) and by the
-fleet keep-alive leg (`agents/fleet-keepalive-actor.md` § 4c). Both used to start from live
+fleet keep-alive leg (`the wrapper's keep-alive tick` § 4c). Both used to start from live
 manager sessions. So a subject whose manager is dead, or running headless, was never checked,
 and the sweep gate kept waking nothing for it every hour while both read green. Measured
 2026-11-14/15: 58 of 126 wakes read `NO-PANE`, and six subjects had no `WOKEN` in more than
@@ -37,7 +37,7 @@ wake-misses=<n> stale=<n> measured=<n> unmeasured=<n>
 | `unmeasured=<n>` | ledgers written before the gate recorded wake outcomes, which cannot show a miss | printed beside the result. `measured=0` means no wake was checked, and the line says so rather than reading green | `wake-unmeasured=<n>` |
 | exit **2** | the state directory could not be read | the wake check is **unread**, never zero misses | `wake-misses=not-run` |
 
-**Keep-alive hand-back** — append these lines to the leg's hand-back (`agents/fleet-keepalive-actor.md` `<output_format>`):
+**Keep-alive hand-back** — append these lines to the leg's hand-back (`the wrapper's keep-alive tick` `<output_format>`):
 
 ```text
 wake-misses=<n>|not-run · wake-measured=<n> · wake-unmeasured=<n>

@@ -12,7 +12,7 @@ every other state — including `no-session`, which is what a handed-over page r
 candidate the action ladder decides. `claude_session_id` is never consulted: a page that
 carries none is exactly the page this leg exists to recover.
 
-Output matches the shape `agents/fleet-keepalive-actor.md` § 1 renders: one line per
+Output matches the shape `the wrapper's keep-alive tick` § 1 renders: one line per
 candidate, `name<TAB>` followed by the ladder's first two lines, each tab-terminated.
 """
 

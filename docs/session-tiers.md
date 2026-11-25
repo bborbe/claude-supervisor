@@ -113,7 +113,7 @@ subject is the canonical statement of that fallback.
 **This section is the single home of the keep-alive contract:** which tier keeps which session
 alive, what counts as an owner, and what happens to a session nobody keeps. Every other file
 that touches it points here and carries only its own commands, flags and thresholds —
-`commands/steps/keepalive.md`, `agents/topic-drive.md`, `agents/goal-drive.md`,
+`agents/topic-drive.md`, `agents/goal-drive.md`,
 `commands/topic-drive.md`, `commands/topic-loop.md`, `commands/open.md`,
 `docs/fleet-surface.md` § Which manager owns a subject, `scripts/topic-spawn.py`, and the
 docstrings of `scripts/fleet-keepalive.py`, `scripts/topic-keepalive.py`,
@@ -128,9 +128,9 @@ subject — two sessions on one subject are a double writer.
 | Level | Opened by | Kept alive by | Mechanism | Guard |
 |---|---|---|---|---|
 | **Fleet manager** | the operator | **the operator** | `scripts/fleet-keepalive.py` reads the digest, never the heartbeat; `scripts/fleet-keeper.py` posts one card after 40 min `stale`, and resumes only on the operator's `resume it` answer | report-only — rule 1's one exception (§ The three tiers) |
-| **Topic manager** | the fleet manager, on the operator's initiative | the **fleet round** | `commands/steps/keepalive.md` § Restart a lapsed topic manager → `scripts/topic-keepalive.py --branch topic`, for every topic page `scripts/topic-candidates.py` selects — every verdict but `loop-stopped`, never filtered on `claude_session_id` | 3 resumes in 30 min → `crash-loop`, escalate once |
-| **Worker** — task with a goal | its declaring topic's manager, or the fleet manager when the goal has no topic | its **declaring topic manager's round**; otherwise the **fleet round** | `agents/goal-drive.md` auto-resume gate, run inside the topic round; the fallback is `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `last_auto_resume` cap on the topic tier, `worker--<slug>` cap on the fleet tier; `worker-keepalive.py` returns `jump` for a row the topic tier owns, so the two never resume one row |
-| **Worker** — task with no goal | the fleet manager, or the topic manager listing the task | the **fleet round** | `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `worker--<slug>` cap; a task with no recorded id is reported, never opened |
+| **Topic manager** | the fleet manager, on the operator's initiative | the **wrapper's keep-alive tick** (the round's leg retired in v0.367.0, `0bfff171`) | `scripts/topic-keepalive.py --branch topic`, for every topic page `scripts/topic-candidates.py` selects — every verdict but `loop-stopped`, never filtered on `claude_session_id` | 3 resumes in 30 min → `crash-loop`, escalate once |
+| **Worker** — task with a goal | its declaring topic's manager, or the fleet manager when the goal has no topic | its **declaring topic manager's round**; otherwise the **fleet round** | `agents/goal-drive.md` auto-resume gate, run inside the topic round; the fallback is `scripts/worker-keepalive.py` (the wrapper's keep-alive tick) | `last_auto_resume` cap on the topic tier, `worker--<slug>` cap on the fleet tier; `worker-keepalive.py` returns `jump` for a row the topic tier owns, so the two never resume one row |
+| **Worker** — task with no goal | the fleet manager, or the topic manager listing the task | the **wrapper's keep-alive tick** | `scripts/worker-keepalive.py` | `worker--<slug>` cap; a task with no recorded id is reported, never opened |
 | **Background sub-agent** | its worker | **no keeper, by decision 2026-11-08** | — | it dies with its parent session, so a worker never parks a wait on one |
 
 ⚠️ **A worker crash loop is a manager decision, and no card reaches the operator.** A crash
@@ -185,7 +185,7 @@ or that was stood down while its session lives, is closed so its workers fall to
 
 **The stood-down half is implemented, in the fleet keep-alive leg.** `manager-liveness.py
 --stood-down-past <MINUTES>` selects a manager whose loop has read `STOPPED` past the bound
-(60 min — a fixed bound, no longer "4× the round's cadence": the goal tier arms no cadence now), and `agents/fleet-keepalive-actor.md` § 4b joins each row to
+(60 min — a fixed bound, no longer "4× the round's cadence": the goal tier arms no cadence now), and the wrapper's keep-alive tick joins each row to
 session liveness, hands the page over, proves the handover through `close-worker.py`'s own
 `page_verdict`, and closes. ⚠️ **The marker outlives the session it describes** — measured
 2026-11-09, 83 `.stopped` markers against 2 whose session was still `LIVE` — so the liveness

@@ -22,35 +22,12 @@ It prints `INCOMPLETE ROUND — skipped: <step> — <why>` for every field that 
 
 ⚠️ **The line is positive on purpose.** The rounds measured on 2026-10-31 that skipped their digest had *already* dropped `Snapshot written` from their render, so an absence-based signal would have passed on exactly the rounds this exists to catch. Only a string that cannot exist at the pre-change revision discriminates — which is why the sentinel comes from the script rather than from a sentence a model is asked to remember.
 
-## The acting legs' verdict — the check item 12 names and nothing called
+## The acting legs' verdict — RETIRED
 
-`commands/steps/output-shape.md` item 12 names `scripts/fleet-legs.py --check` as *"the mechanical guard"* for the acting legs. Nothing invoked it — no router row, no leg, no tail — so the guard was correct and its verdict never reached a render, and a round whose legs never spoke still printed the sweep's seed `not run — no reading recorded this round` as if it were a reading.
-
-Measured 2026-11-07 on `~/.claude/state/fleet-handback/2026-11-06T23-46Z.digest`: its `LEGS` section still held the sweep's seed, carried no `unactioned:` line, and `--check` exited **1** naming all three keys. A correct verdict nobody read.
-
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --status --digest "<this round's digest>"
-```
-
-⚠️ **This tail runs BEFORE the manager prints the render, and that ordering is the point.** Row 20 is the delegate's: it writes `<round>.render` and returns. **This tail (row 19) then runs in the manager**, judging its own `re-arm` epoch and the receipt it wrote, and only then does the manager print `<round>.render`. ⚠️ **So nothing here "carries to row 20"** — row 20 has already finished. What this tail produces is appended to the print that follows it, which is the only way its receipt check and `fleet-legs --status` verdict can reach the operator's block. Before 2026-11-19 this file said the opposite and the ordering was unsatisfiable.
-
-⚠️ **`--status` is the verdict the round copies; `--check` is the guard behind it.** Run `--status` here, capture its one line and its exit code, and carry both to the render the manager prints **after this tail** — that print is row 20's file, `<round>.render`, and it carries this line **verbatim**, because a verdict a model paraphrases is a verdict it can soften, and a softened verdict is how a failed round reads as a clean one. `--check` remains the mechanical guard and is what the shape item's exit-code branch describes; `--status` is the same computation in one copyable string.
-
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --check --digest "<this round's digest>" 2>&1
-```
-
-⚠️ **A round whose verdict is `legs: INCOMPLETE` is a FAILED round, not a quiet one.** The operator's ruling is that the flagged check runs every round and that a skipped check is a defect. So an `INCOMPLETE` verdict must reach the round's own closer — the line that names the next tick — not only the `Legs` block. A round that prints `legs: INCOMPLETE` and then closes as if it had done its work has replaced one silence with another, which is the failure this whole section exists to end.
-
-⚠️ **Still never a brake on the arm.** Failing the round in its render and re-arming are not in tension: `fleet-keeper.py` resumes a lapsed round, so a refused arm becomes a crash loop rather than a recovery. The verdict is loud, the arm proceeds, and the next round is the one that can fix it.
-
-⚠️ **Run it here and carry the exit code to the render the manager prints after this tail.** This section owns the call and the branch; `commands/steps/output-shape.md` item 12 owns what each exit code renders and every format string — read it there and never restate it here.
-
-⚠️ **Branch on the exit code, never on the output — and capture stderr.** Every `--check` message is written to stderr while only `legs ok: …` goes to stdout, so a read that captures stdout alone hands item 12 an empty `<reason>`.
-
-⚠️ **Run it before the output-shape row**, for the same reason the receipt check runs here: a verdict discovered after the render cannot reach the block the operator reads. Like that check it is a report, not a brake — it never blocks the arm.
-
-⚠️ **What it does not catch.** A hand-typed count passes, and so does a leg-authored `not run — <reason>` written without the leg running; of the lines that are present, only the sweep's seed reads as unspoken. Nor can it tell this round's digest from a stale one — a round that passes a previous round's path, whose keys are all recorded, reads green while its own legs never spoke. The check proves a digest *carries a reading*, never that the reading is this round's or true.
+The fleet round's keep-alive acting leg was RETIRED in v0.367.0 (`0bfff171`): the wrapper's
+keeper is the sole keep-alive authority. There is no `LEGS` section in the digest and this tail
+no longer runs `scripts/fleet-legs.py --status` / `--check`. The receipt check above and the debt
+below are unchanged.
 
 ## The debt — what makes the verdict outlive its round
 
@@ -62,7 +39,7 @@ So `--check` also writes the skipped steps to `<slug>.debt` beside the receipt, 
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet
 ```
 
-It prints `debt: <step>` per open step and exits **12** while any step is owed, **0** when clear. ⚠️ **It also exits 2, and that is a third state — not a clear one.** `--debt` returns 2 when it cannot read the debt file or cannot write the verdict (`debt()`, `scripts/manager-receipt.py`), and it prints **nothing to stdout** in that case, only a reason to stderr. The `--debt && <leg>` chain fail-closes either way, but the render must not: see `commands/steps/output-shape.md` item 11, which branches on the exit code rather than on empty output for exactly this reason. The two non-sweep legs chain it — `--debt && <leg>` in `commands/steps/drive.md`, and `--debt --only re-arm && <leg>` in `commands/steps/keepalive.md` — so a round that owes a sweep cannot spend itself on the drive leg instead. ⚠️ **The keepalive leg is scoped to `re-arm` on purpose:** its procedures never read the digest, and gated on the whole round it was skipped whenever the sweep reader was still in flight (2 of 25 gate calls, measured 2026-11-05; rationale in `keepalive.md`). `--only` scopes the exit code, never the record, so this check still sees the full debt. The debt is rewritten on every evaluation, so a round that does its work pays it simply by passing.
+It prints `debt: <step>` per open step and exits **12** while any step is owed, **0** when clear. ⚠️ **It also exits 2, and that is a third state — not a clear one.** `--debt` returns 2 when it cannot read the debt file or cannot write the verdict (`debt()`, `scripts/manager-receipt.py`), and it prints **nothing to stdout** in that case, only a reason to stderr. The `--debt && <leg>` chain fail-closes either way, but the render must not: see `commands/steps/output-shape.md` item 11, which branches on the exit code rather than on empty output for exactly this reason. The non-sweep drive leg chains it — `--debt && <leg>` in `commands/steps/drive.md` — so a round that owes a sweep cannot spend itself on the drive leg instead. (The keep-alive leg that also chained it was retired in v0.367.0, `0bfff171`.) `--only` scopes the exit code, never the record, so this check still sees the full debt. The debt is rewritten on every evaluation, so a round that does its work pays it simply by passing.
 
 ⚠️ **`--debt` RE-EVALUATES the round in progress; it is not a read of the file alone.** This is load-bearing and it was a defect in the first cut. The gate sits at router rows 5 / 5b / 5c and the tail's `--check` at row 19, so a file-only read judges every round on the *previous* round's verdict: a round that had already swept would still be blocked by a debt it had paid, and the round that actually skipped would never be blocked at all — the exact inversion of what the gate is for. `--debt` therefore recomputes the skip set from the current receipt and the `.arms` ring (the same `_skips()` `--check` uses), rewrites the file with it, and only falls back to reading the file when the round cannot be judged at all — no receipt, or its window lapsed. Two consequences worth naming: a round that skips is blocked **on its own receipt**, which is the prevention; and a round that runs its legs but never its tail still records its own skip, because the gate is a writer too.
 
