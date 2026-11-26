@@ -59,6 +59,34 @@ def entry(sid, **over):
     return rec
 
 
+class TestLiveSpawnedWorkers(unittest.TestCase):
+    """The manager-close guard's join: live workers whose spawn edge points at the manager."""
+
+    def test_returns_only_live_children_of_the_manager(self):
+        ledger = {
+            "w-live": {"spawner_session_id": SID},
+            "w-dead": {"spawner_session_id": SID},
+            "other": {"spawner_session_id": "someone-else"},
+            "w-old-field": {"parent_session": SID},
+        }
+        live = {"w-live", "other", "w-old-field"}
+        self.assertEqual(
+            cw.live_spawned_workers(SID, ledger, live),
+            ["w-live", "w-old-field"],
+        )
+
+    def test_no_children_is_empty_not_none(self):
+        self.assertEqual(cw.live_spawned_workers(SID, {}, set()), [])
+
+    def test_unreadable_ledger_is_none(self):
+        """`None` (unreadable) must stay distinct from `[]` (no children)."""
+        with mock.patch.object(cw, "load_sibling") as ls:
+            so = mock.Mock()
+            so.load_ledger_checked.return_value = None
+            ls.return_value = so
+            self.assertIsNone(cw.read_live_spawned_workers(SID))
+
+
 class TestFrontmatter(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -462,6 +490,8 @@ class _StubStore:
                     body = case.store_attempts.get(path[len(prefix) + 1:-len("/attempt")])
                 elif path.startswith(prefix + "/"):
                     body = case.store_items.get(path[len(prefix) + 1:])
+                elif path == "/api/1.0/session-ledger":
+                    body = case.store_ledger
                 if body is None:
                     self.send_response(404)
                     self.end_headers()
@@ -516,6 +546,9 @@ class TestCliRefusals(unittest.TestCase):
         self.store_open = []
         self.store_items = {}
         self.store_attempts = {}
+        # The spawn ledger the live-worker guard reads. `[]` is a readable, empty ledger
+        # (no workers); `None` makes the stub answer 404, which is "unreadable".
+        self.store_ledger = []
         self.store = _StubStore(self)
         self.addCleanup(self.store.close)
         self.store_url = self.store.url
@@ -554,6 +587,9 @@ class TestCliRefusals(unittest.TestCase):
         env["ATTENTION_STATE_DIR"] = self.attention
         env["ATTENTION_STORE_URL"] = self.store_url
         env["PROJECTS_DIR"] = self.projects
+        # The live-worker guard reads the heartbeat store too; point it at an empty temp
+        # dir so the verdict never depends on the operator's real store.
+        env["SUPERVISOR_HEARTBEAT_DIR"] = os.path.join(self.tmp, "heartbeat")
         env.pop("ATTENTION_STORE_TOKEN", None)
         if bin_dir:
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
@@ -588,6 +624,44 @@ class TestCliRefusals(unittest.TestCase):
         done = self._run("--dry-run")
         self.assertEqual(done.returncode, 0)
         self.assertIn("would close", done.stdout)
+
+    def test_a_live_worker_blocks_a_manager_close(self):
+        """A manager with a live spawned worker refuses, naming the worker.
+
+        The defect: a manager closed while a worker it spawned was live, leaving the
+        worker's permission gates with no answer path. Runs the whole CLI, so a regression
+        to a `claude_session_id` check (which a dead worker keeps) fails here.
+        """
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("t.md", **{"claude_session_id": SID, "status": "completed"})
+        worker = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
+        with open(os.path.join(self.sessions, "4242.json"), "w", encoding="utf-8") as handle:
+            json.dump(entry(worker, pid=4242), handle)
+        self.store_ledger = [{"session_id": worker, "spawner_session_id": SID}]
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "live-workers")
+        self.assertIn(worker[:8], done.stdout)
+
+    def test_a_dead_worker_does_not_block_the_close(self):
+        """Negative control: a ledger row for a worker that is NOT live does not refuse."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("t.md", **{"claude_session_id": SID, "status": "completed"})
+        dead = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
+        # No registry entry for `dead`, no heartbeat -> not live.
+        self.store_ledger = [{"session_id": dead, "spawner_session_id": SID}]
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("would close", done.stdout)
+
+    def test_an_unreadable_ledger_refuses(self):
+        """An unreadable ledger is not "no workers": refuse rather than close blind."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("t.md", **{"claude_session_id": SID, "status": "completed"})
+        self.store_ledger = None  # the stub answers 404 -> load_ledger_checked -> None
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "liveness-unknown")
 
     def test_unknown_session_id(self):
         done = self._run()
