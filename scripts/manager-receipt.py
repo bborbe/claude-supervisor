@@ -25,7 +25,10 @@ topic round, `fleet` is the fleet round, whose slug carries the branch exactly a
 
   --start  --topic T            begin a round: writes `round_started_at` and clears
                                 every field, so a receipt can only ever describe the
-                                round that wrote it. Run at the tick's head.
+                                round that wrote it. Run at the tick's head. It also
+                                records `window_started_at` — the PREVIOUS round's end,
+                                read from the receipt before this write replaces it —
+                                which is the artifact window's floor.
   --record --topic T --step S --path P
                                 step S produced artifact P. Steps are `needs-you`
                                 (the file the round persisted
@@ -83,6 +86,19 @@ shape: a `touch`ed empty file, an arbitrary non-empty string and a round-written
 stub all fail. Existence-plus-recency is satisfied by the very shortcut this check
 exists to catch — measured by audit 2026-10-18, where a probe keyed on mtime passed
 against a round that never ran the read.
+
+**The window is `previous round's end → now`, not `round_started_at → now`.** A
+round's steps run in whatever order the round runs them, and `--start` is one more
+event in that order rather than a guarantee that it came first. Judging artifacts
+from `round_started_at` alone reported a round that ran every step as `INCOMPLETE`
+whenever a leg wrote before `--start` — measured 2026-11-26 (session 1bce19d2):
+readings 11:37, sweep 11:41, `--start` 11:44, all three named "not produced this
+round". `--start` therefore records the previous round's end (the explicit
+`round_ended_at` when there is one, else the receipt's own last write, captured
+before the new write) and the floor is that value. The floor is exclusive, so an
+artifact re-recorded after a `--start` still fails — `--start` clearing `fields` is
+what keeps a round from being judged on a previous round's paths, and the window
+keeps it from being judged on a previous round's bytes.
 
 **The honest bound.** The receipt is written by the round, so no probe here can tell
 a fabricated receipt from a real one — only raise what fabrication costs. What the
@@ -1306,7 +1322,36 @@ def start(topic: str, branch: str = "") -> int:
                   f"\"<why>\"; if it may still be running, keep absorbing and raise it "
                   f"to the operator")
         return EXIT_IN_FLIGHT
+    # ⚠️ **The artifact window's lower bound is the PREVIOUS round's end, captured before
+    # this write overwrites the receipt.** A round produces its artifacts in whatever order
+    # it happens to run them, and the `--start` call is one more event in that order — not
+    # necessarily the first. Judging every artifact against `round_started_at` alone
+    # therefore reports a round that ran all its steps as INCOMPLETE whenever a leg wrote
+    # before `--start` ran: measured 2026-11-26 (goal manager session 1bce19d2), readings
+    # 11:37, sweep 11:41, `--start` 11:44, and `--check` named all three "not produced this
+    # round". Widening the window's floor to the previous round's end makes the verdict
+    # independent of that order while `--start` still clears `fields`, so a round is still
+    # judged only on artifacts it recorded itself.
+    #
+    # The end is the explicit `round_ended_at` when one exists (`--finish`, or the fleet
+    # delegate's hand-back). A goal/topic round is never `--finish`ed, so there the
+    # receipt's own last write IS the previous round's end — every act that outlives the
+    # round's head stamps the receipt (`--record`). Reading the mtime HERE, before
+    # `write_atomic` replaces the file, is what keeps it the previous round's.
+    previous_end = previous.get("round_ended_at")
+    if previous_end is None and started is not None:
+        if branch == "fleet" and handback_present(started):
+            previous_end = os.path.getmtime(handback_path(started))
+        else:
+            try:
+                previous_end = os.path.getmtime(path(s))
+            except OSError:
+                previous_end = None
     d = {"topic": topic, "round_started_at": time.time(), "fields": {}}
+    # Carried only when a previous round existed. A first round has no earlier end, so
+    # `_skips` falls back to `round_started_at` and the first round is judged as before.
+    if previous_end is not None:
+        d["window_started_at"] = previous_end
     if previous.get("round_ended_at") and started is not None:
         # the round that just finished is the window to carry
         d["previous_round_started_at"] = started
@@ -1519,9 +1564,25 @@ def window(s: str, now: float) -> tuple:
     return started, interval + ml.SLACK, f"period={interval}s(reported,1x+{ml.SLACK})"
 
 
-def in_window(mtime: float, started: float, now: float, limit: float) -> bool:
-    """Produced THIS round, and not so long ago that the round itself lapsed."""
-    return started <= mtime <= now and (now - started) <= limit
+def in_window(mtime: float, started: float, now: float, limit: float,
+              window_start: float = None) -> bool:
+    """Produced THIS round, and not so long ago that the round itself lapsed.
+
+    `window_start` is the previous round's END when the receipt recorded one; the artifact
+    window then opens there, not at `round_started_at`, so a leg that wrote before the
+    `--start` call is still this round's work. The comparison at that floor is STRICT
+    (`>`): the previous round's own last artifact is written before its final `--record`,
+    which is the receipt write that supplies this floor — so only an artifact written
+    strictly after the previous round stopped can be this round's. A previous-round artifact
+    re-recorded after a `--start` therefore stays out, which is the property that keeps
+    `--start`'s field-clearing from being undone by the wider window.
+
+    `window_start` absent means no previous round (a first round), and the floor stays
+    `round_started_at` exactly as before. The lapsed term stays on `started` either way: it
+    bounds how long the round may run, not which artifacts belong to it.
+    """
+    lower = started <= mtime if window_start is None else float(window_start) < mtime
+    return lower and mtime <= now and (now - started) <= limit
 
 
 def needs_you_shape(text: str) -> bool:
@@ -1784,6 +1845,14 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     # applies to the round that took the verdict, never to a later round that must
     # re-evaluate the predicate for itself.
     gated = {step for ts, step in read_gated(s) if int(started) <= ts <= now + 1}
+    # The artifact window's floor: the previous round's end, when `--start` recorded one.
+    # Validated like every other value read back from the receipt — a string or a non-finite
+    # number must not reach the comparison, and falling back to `round_started_at` is the
+    # pre-change behaviour rather than a crash.
+    window_start = d.get("window_started_at")
+    if (isinstance(window_start, bool) or not isinstance(window_start, (int, float))
+            or not math.isfinite(float(window_start))):
+        window_start = None
     fields = d.get("fields") or {}
     skipped = []
     for step in steps_for(branch, tier):
@@ -1802,7 +1871,7 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
         except OSError:
             skipped.append((step, f"missing ({artifact})"))
             continue
-        if not in_window(mtime, started, now, limit):
+        if not in_window(mtime, started, now, limit, window_start):
             skipped.append((step, f"not produced this round ({artifact})"))
             continue
         try:
@@ -1982,7 +2051,9 @@ def main() -> int:
         ),
     )
     mode = ap.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--start", action="store_true", help="begin a round (manager, tick head)")
+    mode.add_argument("--start", action="store_true",
+                      help="begin a round (manager, tick head); opens the artifact window "
+                           "at the previous round's end")
     mode.add_argument("--finish", action="store_true",
                       help="close the round: stamp round_ended_at (manager, round tail); "
                            "refuses with exit 13 while the round is in flight (no "

@@ -64,11 +64,12 @@ EMPTY_CELLS = ("", "—", "–", "-")
 SUBAGENT_DECISION = "no keeper, by decision 2026-11-08"
 SUBAGENT_TIER = "Background sub-agent"
 
-TIER_COUNT = 5
+TIER_COUNT = 6
 
 TIER_NAMES = {
     "Fleet manager",
     "Topic manager",
+    "Goal",
     "Worker — task with a goal",
     "Worker — task with no goal",
     "Background sub-agent",
