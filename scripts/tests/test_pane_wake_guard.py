@@ -162,6 +162,33 @@ class VerdictTest(unittest.TestCase):
     def test_idle_empty_composer_wakes(self):
         self.assertEqual(guard.verdict(IDLE), "wake")
 
+    def test_future_date_reason_skips(self):
+        # Every open row date-deferred: idle BY DESIGN, and no screen check can tell it
+        # from a lapse — the reason is read from the rows, not the screen.
+        self.assertEqual(
+            guard.verdict(IDLE, blocked_reason="future-date:2026-11-30"), "skip:blocked")
+
+    def test_stood_down_reason_skips(self):
+        self.assertEqual(guard.verdict(IDLE, blocked_reason="stood-down"), "skip:blocked")
+
+    def test_self_close_reason_skips(self):
+        self.assertEqual(guard.verdict(IDLE, blocked_reason="self-close"), "skip:blocked")
+
+    def test_operator_card_reason_still_wakes(self):
+        # A card is answered in minutes; refusing here would suppress the one wake that
+        # unblocks the subject.
+        self.assertEqual(
+            guard.verdict(IDLE, blocked_reason="operator-card:6b8322a3"), "wake")
+
+    def test_no_reason_keeps_the_screen_verdict(self):
+        self.assertEqual(guard.verdict(IDLE, blocked_reason=None), "wake")
+
+    def test_an_unreadable_reason_skips_before_the_screen(self):
+        # An unreadable reason could be hiding a date-deferred subject — fail closed.
+        self.assertEqual(
+            guard.verdict(IDLE, blocked_reason=guard.STATE_UNREADABLE),
+            "skip:state-unreadable")
+
     def test_spinner_with_interrupt_hint_skips(self):
         self.assertEqual(guard.verdict(SPINNER), "skip:spinner")
 

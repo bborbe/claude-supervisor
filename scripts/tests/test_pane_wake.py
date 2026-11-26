@@ -7,6 +7,7 @@ composer without a spinner is `unverified`, never `delivered` — and that the g
 after activation, so a modal that opened since the plan read is not typed into.
 """
 import importlib.util
+import os
 import pathlib
 import subprocess
 import types
@@ -98,21 +99,21 @@ class SubjectStateTest(unittest.TestCase):
         def run(cmd, **kw):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
         self.assertEqual(
-            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
             wake.guard.STATE_UNREADABLE)
 
     def test_empty_output_is_the_unreadable_sentinel(self):
         def run(cmd, **kw):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         self.assertEqual(
-            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
             wake.guard.STATE_UNREADABLE)
 
     def test_timeout_is_the_unreadable_sentinel(self):
         def run(cmd, **kw):
             raise subprocess.SubprocessError("timed out")
         self.assertEqual(
-            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
             wake.guard.STATE_UNREADABLE)
 
     def test_unresolvable_subject_is_none(self):
@@ -122,7 +123,7 @@ class SubjectStateTest(unittest.TestCase):
         def run(cmd, **kw):
             return types.SimpleNamespace(returncode=0, stdout="SLEEPING\tslug\tuntil X\n", stderr="")
         self.assertEqual(
-            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run), "SLEEPING")
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", "v"), run=run), "SLEEPING")
 
     def test_record_without_subject_or_branch_is_none(self):
         import tempfile
@@ -131,12 +132,181 @@ class SubjectStateTest(unittest.TestCase):
             p.write_text('{"subject": "T"}', encoding="utf-8")
             self.assertIsNone(wake.subject_of("a", state_dir=tmp))
             p.write_text('{"subject": "T", "branch": "goal"}', encoding="utf-8")
-            self.assertEqual(wake.subject_of("a", state_dir=tmp), ("T", "goal"))
+            self.assertEqual(wake.subject_of("a", state_dir=tmp), ("T", "goal", ""))
 
     def test_missing_record_is_none(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(wake.subject_of("nobody", state_dir=tmp))
+
+    def test_vault_reaches_the_state_read(self):
+        # The record carries `vault`; dropping it made `--vault` default to "." and the
+        # page test read the cwd's tree. Measured 2026-11-26 on three live records.
+        seen = {}
+
+        def run(cmd, **kw):
+            seen["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout="OK\t\n", stderr="")
+
+        # Pin OBSIDIAN_DIR: CI sets it to a temp tree, so an ambient-dependent
+        # assertion passes locally and fails there.
+        old = os.environ.get("OBSIDIAN_DIR")
+        os.environ["OBSIDIAN_DIR"] = "/tmp/obs-root"
+        try:
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", "private-personal"),
+                                    run=run)
+        finally:
+            if old is None:
+                os.environ.pop("OBSIDIAN_DIR", None)
+            else:
+                os.environ["OBSIDIAN_DIR"] = old
+        self.assertIn("--vault", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("--vault") + 1],
+                         "/tmp/obs-root/private-personal")
+
+    def test_no_vault_omits_the_flag_rather_than_passing_a_dot(self):
+        seen = {}
+
+        def run(cmd, **kw):
+            seen["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout="OK\t\n", stderr="")
+
+        wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", ""), run=run)
+        self.assertNotIn("--vault", seen["cmd"])
+
+
+class VaultRootTest(unittest.TestCase):
+    """The record stores a vault NAME; both `--vault` consumers want a path.
+
+    Measured 2026-11-26: `manager-quiet.py` refuses a bare name outright ("a relative
+    path (a vault NAME included) resolves against the caller's cwd"). Passing the record's
+    value through unchanged would make every read fail and every wake refuse.
+    """
+
+    def test_a_bare_name_resolves_under_the_obsidian_root(self):
+        # Pinned: CI sets OBSIDIAN_DIR to a temp tree, so the DEFAULT root is only
+        # observable with the variable removed.
+        old = os.environ.pop("OBSIDIAN_DIR", None)
+        try:
+            self.assertEqual(wake.vault_root("private-personal"),
+                             os.path.expanduser("~/Documents/Obsidian/private-personal"))
+        finally:
+            if old is not None:
+                os.environ["OBSIDIAN_DIR"] = old
+
+    def test_an_absolute_path_is_used_as_is(self):
+        self.assertEqual(wake.vault_root("/vaults/x"), "/vaults/x")
+
+    def test_empty_is_empty(self):
+        self.assertEqual(wake.vault_root(""), "")
+
+    def test_obsidian_dir_overrides_the_root(self):
+        old = os.environ.get("OBSIDIAN_DIR")
+        os.environ["OBSIDIAN_DIR"] = "/tmp/obs"
+        try:
+            self.assertEqual(wake.vault_root("v"), "/tmp/obs/v")
+        finally:
+            if old is None:
+                os.environ.pop("OBSIDIAN_DIR", None)
+            else:
+                os.environ["OBSIDIAN_DIR"] = old
+
+
+class BlockedReasonTest(unittest.TestCase):
+    """`read_blocked_reason` — the reason the wake decides on, read from the ROWS."""
+
+    @staticmethod
+    def _run(stdout, rc=0):
+        def run(cmd, **kw):
+            return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
+        return run
+
+    def test_sleep_until_names_the_future_date(self):
+        run = self._run("sleep-until\t0\t2\t0\nSleep until 2026-11-30\n")
+        self.assertEqual(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
+            "future-date:2026-11-30")
+
+    def test_stood_down_is_named(self):
+        run = self._run("stood-down\t0\t3\t2\n"
+                        "Stood down: zero runnable tasks; reopen on no named trigger\n")
+        self.assertEqual(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
+            "stood-down")
+
+    def test_self_close_is_named(self):
+        # Every tracked row terminal, no live worker: nothing to drive, so a wake would
+        # be a false "you have open work".
+        run = self._run("self-close\t0\t0\t2\n")
+        self.assertEqual(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
+            "self-close")
+
+    def test_armed_with_runnable_rows_has_no_reason(self):
+        run = self._run("armed\t3\t2\t0\n")
+        self.assertIsNone(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run))
+
+    def test_sleep_verdict_without_an_instant_is_unreadable(self):
+        # Suppressing a wake on an unnamed date is exactly what this sentinel prevents.
+        run = self._run("sleep-until\t0\t2\t0\n")
+        self.assertEqual(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
+            wake.guard.STATE_UNREADABLE)
+
+    def test_missing_vault_is_unreadable_never_the_cwd(self):
+        # A fallback to "." would answer about a different vault and read plausibly.
+        self.assertEqual(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "")),
+            wake.guard.STATE_UNREADABLE)
+
+    def test_failed_read_is_unreadable(self):
+        run = self._run("", rc=1)
+        self.assertEqual(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
+            wake.guard.STATE_UNREADABLE)
+
+    def test_unresolvable_subject_is_none(self):
+        self.assertIsNone(wake.read_blocked_reason("a", subject_of=lambda s: None))
+
+    def test_the_classification_is_read_only(self):
+        # `manager-quiet.py` records a tick and moves the stand-down counter on every
+        # ordinary call; a wake that did so would stand a live manager down.
+        seen = {}
+
+        def run(cmd, **kw):
+            seen["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout="armed\t1\t0\t0\n", stderr="")
+
+        wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "/v"), run=run)
+        self.assertIn("--read-only", seen["cmd"])
+
+
+class MemoReasonTest(unittest.TestCase):
+    """One classification per SUBJECT, not per session — `manager-quiet.py` walks the tree."""
+
+    def test_one_classification_per_subject(self):
+        calls = []
+
+        def reason(sid):
+            calls.append(sid)
+            return "future-date:X"
+
+        read = wake.memo_reason(subject_of=lambda s: ("T", "goal", "v"), reason=reason)
+        self.assertEqual(read("a"), "future-date:X")
+        self.assertEqual(read("b"), "future-date:X")
+        self.assertEqual(calls, ["a"], "the second session shares the subject's answer")
+
+    def test_no_subject_is_neither_cached_nor_classified(self):
+        calls = []
+
+        def reason(sid):
+            calls.append(sid)
+            return "x"
+
+        read = wake.memo_reason(subject_of=lambda s: None, reason=reason)
+        self.assertIsNone(read("a"))
+        self.assertEqual(calls, [])
 
 
 class OpenCardTest(unittest.TestCase):

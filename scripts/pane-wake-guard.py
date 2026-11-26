@@ -22,6 +22,7 @@ Verdicts (one line on stdout):
   skip:no-composer         no `❯` prompt on screen, so idleness is unproven
   skip:machine-wait        the last turn declared a machine wait (`🟡 WAITING` / `⏰ Ends:`)
   skip:sleeping            the subject is date-gated asleep (`manager-liveness.py --state`)
+  skip:blocked             the subject's every open row is date-deferred, or it was stood down / self-closing
   skip:state-unreadable    a subject resolved but its state could not be read — fail closed
   error:<reason>           the pane could not be read
 
@@ -90,7 +91,7 @@ def _lead_stripped(line):
     return line.lstrip(LEAD)
 
 
-def verdict(text, allow_machine_wait=False, subject_state=None):
+def verdict(text, allow_machine_wait=False, subject_state=None, blocked_reason=None):
     """Return the verdict string for one captured screen. Pure — no I/O.
 
     `allow_machine_wait` carves out the one caller a declared machine wait is
@@ -113,6 +114,15 @@ def verdict(text, allow_machine_wait=False, subject_state=None):
     a wake is exactly what it is waiting for. `IDLE` therefore falls through to the screen
     verdict, like `OK`: only `SLEEPING` and an unreadable state suppress the wake.
 
+    `blocked_reason` is the subject's own answer to "why is nothing moving", read from its
+    ROWS by the caller (`pane-wake.py` `read_blocked_reason`) — `future-date:<instant>`,
+    `stood-down`, `operator-card:<id>`, or `None` when there is runnable work. A subject
+    whose every open row is date-deferred is idle BY DESIGN: its screen is an empty
+    composer and `--state` reads `OK`/`IDLE`, so no screen check can tell it from a lapse.
+    Only a reason that names its own reopen — an instant, or an explicit stand-down —
+    suppresses the wake; an operator card must still wake the manager that is waiting on
+    it, which is why that reason falls through rather than refusing.
+
     `STATE_UNREADABLE` means a subject RESOLVED but its state could not be read — a
     non-zero exit, an unparsable line, a timeout. That is refused too, and it is the
     one place this guard fails closed: a missed wake costs a manager nothing (its gate
@@ -128,6 +138,13 @@ def verdict(text, allow_machine_wait=False, subject_state=None):
         return "skip:sleeping"
     if subject_state == STATE_UNREADABLE:
         return "skip:state-unreadable"
+    if blocked_reason == STATE_UNREADABLE:
+        # Same direction as the state read above, and for the same reason: an unreadable
+        # reason could be hiding a date-deferred subject, and a spurious wake types into a
+        # pane whose session then closes it for good.
+        return "skip:state-unreadable"
+    if blocked_reason and blocked_reason.startswith(("future-date:", "stood-down", "self-close")):
+        return "skip:blocked"
     if text is None:
         return "error:unreadable"
     if not text.strip():
@@ -202,6 +219,10 @@ def main(argv=None):
     ap.add_argument("--subject-state", default=None,
                     help="`manager-liveness.py --state`'s first field for the subject; "
                          "`SLEEPING` refuses the wake")
+    ap.add_argument("--blocked-reason", default=None,
+                    help="the subject's own blocked reason (`future-date:<instant>`, "
+                         "`stood-down`, `operator-card:<id>`); a reason carrying a reopen "
+                         "instant refuses the wake")
     args = ap.parse_args(argv)
 
     if args.pane_id is not None:
@@ -214,7 +235,8 @@ def main(argv=None):
             text = None
 
     v = verdict(text, allow_machine_wait=args.allow_machine_wait,
-                subject_state=args.subject_state)
+                subject_state=args.subject_state,
+                blocked_reason=args.blocked_reason)
     print(v)
     if v.startswith("wake"):
         return 0
