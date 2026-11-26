@@ -191,8 +191,32 @@ def disposition(entry, probe_fn=probe):
     }
 
 
-def retained_entries(ledger):
-    return [e for e in ledger.get("entries") or [] if e.get("verdict") in RETAINED]
+def retained_entries(ledger, alive_fn=None):
+    """The retained rows this leg can still act on: a task file AND a live session.
+
+    A row with no `task_file` cannot be probed -- `probe()` returns "no task file
+    recorded" every round -- and a row whose session is not live has nobody to nudge.
+    Both stay in the ledger (`drive-ledger.py` owns the store) but neither is this
+    leg's to carry. Measured 2026-11-26: 737 retained, 410 without a `task_file`, and
+    19 LIVE among the 323 with one; retaining all 737 made the round's header number
+    track the ledger's total size rather than the round's work.
+
+    `alive_fn` is a seam so the test can stub liveness; it is resolved at call time so
+    a module-level stub takes effect. Only an explicit `True` (LIVE) admits a row:
+    ABSENT and UNKNOWN both drop, because neither licenses a nudge.
+    """
+    if alive_fn is None:
+        alive_fn = session_alive
+    rows = []
+    for entry in ledger.get("entries") or []:
+        if entry.get("verdict") not in RETAINED:
+            continue
+        if not (entry.get("task_file") or "").strip():
+            continue
+        if alive_fn(entry.get("session_id") or "") is not True:
+            continue
+        rows.append(entry)
+    return rows
 
 
 def render_retained(rows, round_tag):
