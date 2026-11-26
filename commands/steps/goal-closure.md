@@ -78,7 +78,8 @@ inline citation on the same line. Never change the box's own text.
 Step 0b runs on the goal branch's **subject** goal when its closure boxes are all `[x]` after
 Step 0, **or** when it is *linked-tasks-only* (defined below). Every task still linked to the goal that is not `completed`
 or `aborted` (`next`, `todo`, `in_progress`, `hold`, `backlog`) is aborted with a recorded reason
-before the verb runs. Run it after the tracked set has been examined (see *What to do*), so a
+before the verb runs — unless it also serves **another** goal, in which case it is unlinked from
+this goal only (aborting it would kill the other goal's work). Run it after the tracked set has been examined (see *What to do*), so a
 tracked task that itself closed this round is closed under the goal, not aborted. The topic tier never runs 0b: a
 member goal with open linked tasks is left to its goal manager.
 
@@ -116,12 +117,7 @@ exactly as an unlinked one did — the link survives, and the task stays findabl
    this tick. A task with no `claude_session_id` was never started and does not hold. A live
    session is never aborted mid-run: aborting it would kill work in flight, so it holds the
    close until it is quiet.
-3. Abort each remaining one, recording the reason: run
-   `vault-cli task set "<task>" status aborted --vault "<vault>"` and append
-   `- YYYY-MM-DD (loop): aborted — goal criteria met — <goal>` to the task's `# Progress`. The
-   task keeps its `goals:` link (the reason is the record; the link is how it stays findable),
-   and its `status` becomes `aborted`. **If any abort fails**, report it verbatim, still run
-   step 4 for the tasks already aborted, and close nothing this tick.
+3. **Abort only a task this goal alone holds; unlink one that also serves another goal.** Step 1 already fetched the task's `goals:` list. When that list carries **another** goal besides this one, the task is not a leftover of this goal — aborting it would kill the other goal's work — so **unlink it from this goal only** with the string step 1 resolved: `vault-cli task remove "<task>" goals "<this-goal-string>"`, leaving its `status` untouched. For every remaining task whose only goal is this one, abort it, recording the reason: run `vault-cli task set "<task>" status aborted --vault "<vault>"` and append `- YYYY-MM-DD (loop): aborted — goal criteria met — <goal>` to the task's `# Progress`. An aborted task keeps its `goals:` link (the reason is the record; the link is how it stays findable), and its `status` becomes `aborted`. **If any abort or unlink fails**, report it verbatim, still run step 4 for the tasks already handled, and close nothing this tick.
 4. When step 3 aborted at least one task, append one line to the goal's `# Progress`:
    `- YYYY-MM-DD (loop): aborted at close, goal criteria met — [[t1]] (aborted), [[t2]] (aborted) …`.
    It records the reason, and every task stays findable from the goal it stays linked to. Skip
