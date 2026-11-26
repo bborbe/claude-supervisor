@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **a goal/topic manager self-closes its session after its last worker closes (wait-then-close).** `manager-quiet.py`'s verdict gains `self-close`: when every tracked task is terminal (no runnable, no quiet-but-blocked/unapproved/deferred row) and no worker of this session is live, the round's tail runs `close-worker.py --self` after the round is recorded, so a finished manager closes itself instead of standing down and lingering. A live worker keeps the verdict `armed` (wait for it); an unreadable count keeps the existing `stood-down` (a marker; the session stays alive) — never a close on an unconfirmed count. `--self` exempts `busy-target` only, so any other guard refusal is obeyed. Change set: `scripts/manager-quiet.py`, `scripts/tests/test_round_tail_quiet.py`, `scripts/tests/test_manager_quiet.py`, `commands/steps/round-quiet.md`, `commands/steps/round-tail.md`, `CHANGELOG.md`.
+
 ## v0.371.0
 
 - feat: **`close-worker.py --self` lets a session close itself past `busy-target`.** A manager that has decided it is done must close its own session, but `busy-target` fires because it is mid-round. `--self` exempts `busy-target` **only**, and only when the target id equals this session's own `CLAUDE_CODE_SESSION_ID` (a divergence from the registry refuses visibly as `not-self`, never silently); every other guard (`live-workers`, `liveness-unknown`, `gate-held`, `dirty-worktree`, `task-terminal`, `task-unresolved`) still runs, and a self-close prints a `self-close` token. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
