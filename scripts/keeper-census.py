@@ -19,6 +19,7 @@ stopped round runs no census.
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import importlib.util
 import json
@@ -84,6 +85,13 @@ PRODUCER_ID = "keeper-census"
 
 #: `fleet-keeper.py` — the one home for the fleet manager's registration read.
 FLEET_KEEPER = _load("fleet_keeper", "fleet-keeper.py")
+
+#: The wrapper's flagged tick decides what it opens with these two, and this module asks the
+#: same two rather than restating either: `flagged-rows.py`'s `eligible()` (the consumer's
+#: gate) and `flag_provenance.py`'s `flag_admits()` (the one rule for whether a SET flag opens
+#: anything). A second copy of either drifts the moment the tick's own gate changes.
+FLAGGED = _load("flagged_rows", "flagged-rows.py")
+FLAG = _load("flag_provenance", "flag_provenance.py")
 
 PROBE_TIMEOUT = 30  # seconds; a hung probe must not wedge the round
 
@@ -366,6 +374,37 @@ def _page_for(sid, by_session):
     return sorted(pages, key=lambda p: PRECEDENCE[p["kind"]])[0]
 
 
+def flagged_tick_keeps(page, world):
+    """Does the wrapper's flagged tick keep this goal?
+
+    The tick opens a manager for every eligible operator-flagged page — `flagged-rows.py`
+    emits `open-manager` for it and `bborbe/claude-wrapper` acts on that row — so the
+    operator's own flag IS a resumer. Measured 2026-11-26: goal `Periodic Nuke Workloads
+    Hold Resources Only While They Run` reads `flag: true` / `flag_set_by: operator`, its
+    session reads `LIVE`, and `flagged-rows-cache.json` carries
+    `{"kind": "goal", …, "branch": "open-manager"}` for it while its declaring topic
+    `Nuke Cluster Capacity` reads `open-unflagged`.
+
+    ⚠️ **Eligibility and provenance are two gates and both are required.** `eligible()`
+    asks only whether the flag is SET — its docstring says so deliberately, so an
+    agent-set flag stays visible to `refusals()` instead of being relabelled "not flagged".
+    `flag_admits()` is the one place that decides whether a SET flag opens anything
+    (operator ruling 2026-11-10). Reading only the first would report an agent-flagged goal
+    as kept by a tick that skips it.
+    """
+    if not world["legs"]["goal"]:
+        return False
+    block = page["fm"]
+    # ⚠️ The CURRENT INSTANT, not today's date. `flagged-rows.py` passes the same to the same
+    # gate, and its own comment says why: a date reads as local midnight, which would park a
+    # defer that already came due today for another full day. A bare date here would disagree
+    # with the tick about whether the row is due.
+    now = datetime.datetime.now().astimezone()
+    if FLAGGED.eligible(block, "goal", now) is not None:
+        return False
+    return FLAG.flag_admits(block, "goal")
+
+
 def keepers_of(page, world):
     """`(keepers, why, cannot)` — who keeps this page's session alive, and whether the answer
     is a definite one. `cannot` means a keeper read failed: report it, never count it red."""
@@ -383,9 +422,9 @@ def keepers_of(page, world):
         if claimants:
             return claimants, "", False
         # ⚠️ The fleet goal leg covers goals in NO topic, and only those
-        # (`keepalive-topicless-goals.md`) — a declared goal whose topic manager is stood
-        # down is kept by nobody, and calling it fleet-kept is the false green this exists
-        # to remove.
+        # (`keepalive-topicless-goals.md`) — calling a topic-declared goal fleet-kept is the
+        # false green this exists to remove. The one keeper that DOES reach it is the
+        # wrapper's flagged tick, handled below.
         if not verdicts:
             if not world["legs"]["goal"]:
                 return [], ("goal is in no topic and the fleet round has no goal keep-alive "
@@ -397,6 +436,20 @@ def keepers_of(page, world):
                         f"(status {page['status'] or '—'}, phase {page['phase'] or '—'})",
                         False)
             return ["fleet round"], "", False
+        # ⚠️ **One keeper does reach a topic-declared goal: the wrapper's flagged tick.**
+        # The goal tier is merged into the topic tier (2026-11-24), so a goal page's own
+        # `claude_session_id` is opened and re-opened by the flagged tick, not by a goal
+        # round. Two guards keep this from becoming a false green:
+        #   * a `cannot-tell` topic keeps the answer below — the second-writer guard;
+        #   * a declaring topic whose SESSION is live keeps it too, because the tick's own
+        #     `open-manager` branch fires only when the subject has no live manager
+        #     (`flagged-rows.py` `chain_live`). A LIVE topic with a `STOPPED` loop is a
+        #     definite `not-owner` here, but the tick would skip the goal — so reporting it
+        #     kept would name a resumer that does not act.
+        if (not any(v["cannot"] for _, v in verdicts)
+                and not any(v["live"] for _, v in verdicts)
+                and flagged_tick_keeps(page, world)):
+            return ["wrapper flagged tick"], "", False
         states = ", ".join(f"{t} [{v['cadence']}]" for t, v in verdicts)
         return ([], f"declaring topic(s) have no live armed manager: {states}",
                 any(v["cannot"] for _, v in verdicts))
