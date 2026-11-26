@@ -48,12 +48,14 @@ def iso(stamp):
 
 
 def anchor_text(sc=("[ ] SC1: first criterion", "[ ] SC2: second criterion"),
-                dod=("[ ] make precommit green",), progress=(), summary="Summary line."):
+                dod=("[ ] make precommit green",), progress=(), summary="Summary line.",
+                out_of_scope=(), tasks=("- [ ] do the work",)):
     return "\n".join([
         "---", "goals:", "    - '[[The Goal]]'", "---", "Tags: [[Task]]", "", "---", "",
         summary, "", "# Success Criteria", "",
         *["- " + line for line in sc], "", "# Definition of Done", "",
-        *["- " + line for line in dod], "", "# Tasks", "", "- [ ] do the work", "",
+        *["- " + line for line in dod], "", "# Tasks", "", *tasks, "",
+        "# Out of Scope", "", *["- " + line for line in out_of_scope], "",
         "# Progress", "", *progress, "",
     ])
 
@@ -256,6 +258,62 @@ class TestWaiting(Case):
         self.env.wait("CI finishes", when=SINCE)
         report = self.ok(self.env.run())
         self.assertEqual(report["verdict"], "PROGRESSING")
+
+
+class TestDrift(Case):
+    """A/B movement the anchor's `# Out of Scope` rules out is DRIFT, never PROGRESSING.
+
+    The scope read is mechanical on purpose: only paths the anchor names count, so an
+    anchor that names none can never produce DRIFT (that is the second fixture).
+    """
+
+    def legacy(self, when):
+        (self.env.code / "src" / "legacy").mkdir(parents=True, exist_ok=True)
+        return self.env.commit_code("src/legacy/old.py", "def old():\n    pass\n", when, "legacy work")
+
+    def test_movement_under_a_ruled_out_path_is_drift(self):
+        self.env.commit_anchor(
+            anchor_text(out_of_scope=("- `src/legacy/` — not this task",)), at(-100), "initial")
+        self.legacy(at(2))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "BUSY-NO-MOVE")
+        self.assertEqual(report["subtype"], "DRIFT")
+        self.assertEqual(len(report["drift"]), 1)
+        self.assertEqual(report["moved"], [])
+
+    def test_an_anchor_naming_no_paths_never_drifts(self):
+        # Same movement, no path named in the scope: it counts as movement, because
+        # there is no evidence of a ruled-out path to rule it out with.
+        self.legacy(at(2))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "PROGRESSING")
+        self.assertEqual(report["drift"], [])
+
+
+class TestBlockedOperator(Case):
+    """The anchor's own operator-gate markers, read without a pane."""
+
+    def test_an_open_production_touching_task_line_is_blocked_operator(self):
+        self.env.commit_anchor(anchor_text(
+            tasks=("- [ ] ⚠️ production-touching — `launchctl kickstart -k gui/$UID/x`",)),
+            at(-100), "initial")
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "BLOCKED-OPERATOR")
+        self.assertEqual(report["blocked"]["class"], "D")
+
+    def test_a_pick_in_the_last_progress_line_is_blocked_operator(self):
+        self.env.commit_anchor(anchor_text(
+            progress=("- 2026-10-18: awaiting pick — 1. ship it 2. leave it",)), at(-100), "initial")
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "BLOCKED-OPERATOR")
+        self.assertEqual(report["blocked"]["class"], "C")
+
+    def test_a_ticked_production_line_is_not_blocked(self):
+        # The marker only counts while the line is OPEN -- a finished gate is not a wait.
+        self.env.commit_anchor(anchor_text(
+            tasks=("- [x] ⚠️ production-touching — done",)), at(-100), "initial")
+        report = self.ok(self.env.run())
+        self.assertNotEqual(report["verdict"], "BLOCKED-OPERATOR")
 
 
 class TestBusyNoMove(Case):

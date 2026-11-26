@@ -78,6 +78,10 @@ READ_LOOP_MIN = 10
 #: A declared wait is OK until it passes 2x its own expected duration (spec § Verdicts).
 WAIT_SLACK = 2.0
 
+#: The anchor's own operator-gate markers -- see `blocked_state`.
+PRODUCTION_TOUCHING = re.compile(r"production-touching", re.I)
+OPERATOR_MARKER = re.compile(r"(?:\bpick\s*[—–-]|\bapprove:|\b40 Decisions/TDR)", re.I)
+
 WRITE_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 ASSERTED_KINDS = {"pr", "test", "phase"}
 CLAIM_KINDS = {"tick", "commit", "progress-entry"}
@@ -513,6 +517,7 @@ def code_observations(root, since, until, written):
         _, message = git(root, "show", "-s", "--format=%B", sha)
         found.append({"grade": "B" if changed else "C", "kind": "commit", "ref": sha, "ts": iso(when),
                       "repo": root, "boxes": sorted(set(BOX_TOKEN.findall(message))),
+                      "paths": touched,
                       "text": "%s %s +%d −%d" % (os.path.basename(root), sha[:7], plus, minus)
                       if changed else "%s %s empty or whitespace-only" % (os.path.basename(root), sha[:7])})
     return found
@@ -521,11 +526,13 @@ def code_observations(root, since, until, written):
 def worktree_observation(root, written, last_write):
     _, stat = git(root, "diff", "-w", "--numstat", "HEAD")
     plus = minus = files = 0
+    paths = []
     for row in stat.splitlines():
         cells = row.split("\t")
         if (len(cells) >= 3 and cells[0].isdigit() and cells[1].isdigit()
                 and int(cells[0]) + int(cells[1]) and mine(root, cells[2], written)):
             plus, minus, files = plus + int(cells[0]), minus + int(cells[1]), files + 1
+            paths.append(cells[2])
     _, untracked = git(root, "ls-files", "--others", "--exclude-standard")
     for rel in untracked.splitlines():
         if mine(root, rel, written):
@@ -533,12 +540,13 @@ def worktree_observation(root, written, last_write):
                 with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as handle:
                     plus += sum(1 for _ in handle)
                 files += 1
+                paths.append(rel)
             except OSError:
                 pass
     if not files:
         return None
     return {"grade": "B", "kind": "diff", "ref": "worktree", "ts": iso(last_write), "repo": root,
-            "boxes": [], "text": "%s uncommitted +%d −%d across %d file(s) (persists to window end)"
+            "boxes": [], "paths": paths, "text": "%s uncommitted +%d −%d across %d file(s) (persists to window end)"
             % (os.path.basename(root), plus, minus, files)}
 
 
@@ -700,7 +708,12 @@ def measure(args):
                 if diff:
                     obs.append(diff)
     obs.sort(key=lambda o: o["ts"])
-    moved = [o for o in obs if o["grade"] in ("A", "B")]
+    ruled = scope_paths(end_text or working)
+    moved, drift = [], []
+    for o in obs:
+        if o["grade"] not in ("A", "B"):
+            continue
+        (drift if ruled_out(o.get("paths"), ruled) else moved).append(o)
 
     # Activity: repeats are the same normalized call with the same result.
     groups = {}
@@ -727,6 +740,7 @@ def measure(args):
     open_boxes = [k for k, v in end_boxes.items() if not v["checked"]]
 
     wait = wait_state(args.session, now)
+    blocked = blocked_state(end_text or working)
 
     subtype = None
     # A call in flight only shields the no-move verdicts: a productive session is
@@ -737,6 +751,8 @@ def measure(args):
         verdict = "PROGRESSING"
     elif pending and pending["age_s"] < pending["bound_s"]:
         verdict = "TOOL-RUNNING"
+    elif blocked:
+        verdict = "BLOCKED-OPERATOR"
     elif wait and wait["state"] == "WAITING-OK":
         verdict = "WAITING-OK"
     elif wait:
@@ -747,7 +763,7 @@ def measure(args):
         verdict = "IDLE"
     else:
         verdict = "BUSY-NO-MOVE"
-        subtype = classify_busy(groups, window, wrote)
+        subtype = "DRIFT" if drift else classify_busy(groups, window, wrote)
 
     claim = evaluate_claim(args.claim, obs, start_boxes, set(start_boxes) | set(end_boxes), ratings,
                            roots, vault, since,
@@ -773,7 +789,7 @@ def measure(args):
         "observations": obs, "moved": moved, "toward": toward,
         "activity": activity, "pending": pending,
         "session_started": iso(started) if started else None,
-        "claim": claim, "wait": wait,
+        "claim": claim, "wait": wait, "drift": drift, "blocked": blocked,
     })
     report["block"] = render(report)
     return report
@@ -841,6 +857,82 @@ def wait_state(sid, now):
     }
 
 
+def scope_paths(text):
+    """Path-like tokens named in the anchor's `# Out of Scope` section.
+
+    A task that names no path has no mechanical scope to rule movement out, so `DRIFT`
+    cannot fire for it: there is no evidence of a ruled-out path, and inventing one
+    would label ordinary untagged work as drift (which the spec permits).
+    """
+    if not text:
+        return []
+    lines = text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().lower() == "# out of scope":
+            start = i + 1
+            break
+    if start is None:
+        return []
+    found = []
+    for line in lines[start:]:
+        if line.startswith("#"):
+            break
+        found.extend(PATH_TOKEN.findall(line))
+    return found
+
+
+def ruled_out(paths, ruled):
+    """True when every changed path sits under a path the anchor's scope rules out."""
+    if not paths or not ruled:
+        return False
+
+    def under(path):
+        return any(path == r or path.startswith(r.rstrip("/") + "/") for r in ruled)
+
+    return all(under(p) for p in paths)
+
+
+def blocked_state(text):
+    """The anchor's own operator-gate markers, or None. Two arms, both read from disk.
+
+    - an OPEN `# Tasks` line carrying `production-touching` -- gate class D, the operator
+      runs it in the pane;
+    - a `pick —` / `approve:` / `40 Decisions/TDR` marker in the LAST non-empty
+      `# Progress` line -- gate class C/E, a decision or ack only the operator can give.
+
+    ⚠️ The attention-store card arm is deliberately NOT here: the store is an HTTP
+    service and this script reads disk only. A session blocked solely by a card still
+    reads BUSY-NO-MOVE until that read lands -- the spec's "card **or** pane" is
+    satisfied by the pane-side markers this covers.
+    """
+    if not text:
+        return None
+    section, open_task = None, False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            section = stripped.lower()
+            continue
+        if (section == "# tasks" and PRODUCTION_TOUCHING.search(stripped)
+                and re.match(r"^- \[( |/)\]", stripped)):
+            open_task = True
+    progress, in_progress = [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            in_progress = stripped.lower() == "# progress"
+            continue
+        if in_progress and stripped:
+            progress.append(stripped)
+    marker = OPERATOR_MARKER.search(progress[-1]) if progress else None
+    if open_task:
+        return {"class": "D", "reason": "an open production-touching task line"}
+    if marker:
+        return {"class": "C", "reason": "the last Progress line carries `%s`" % marker.group(0).strip()}
+    return None
+
+
 def local_hm(stamp):
     return parse_ts(stamp).astimezone().strftime("%H:%M")
 
@@ -861,6 +953,10 @@ def render(report):
             text = o["text"].splitlines()[0][:100]
             lines.append(tag + "%s  %s%s" % (o["grade"], text, ref))
     lines.append("  Toward:    " + (" · ".join(report["toward"]) or "none"))
+    for o in report.get("drift") or []:
+        lines.append("  Drift:     %s  %s (out of scope)" % (o["grade"], o["text"].splitlines()[0][:80]))
+    if report.get("blocked"):
+        lines.append("  Blocked:   class %s — %s" % (report["blocked"]["class"], report["blocked"]["reason"]))
     act = report["activity"]
     activity = "%d tool calls · %d wrote" % (act["tool_calls"], act["wrote"])
     if act["top_repeat"]:
