@@ -59,7 +59,7 @@ class TestProbeInvocation(unittest.TestCase):
 
         rows = [
             drive_retained.disposition(e, probe_fn=stub)
-            for e in drive_retained.retained_entries(ledger)
+            for e in drive_retained.retained_entries(ledger, alive_fn=lambda sid: True)
         ]
 
         self.assertEqual(calls, ["aaaa", "bbbb"])
@@ -78,7 +78,7 @@ class TestProbeInvocation(unittest.TestCase):
             return copy(row)
 
         ledger = {"round": "r1", "entries": [entry("aaaa", "blocked", probe="old")]}
-        for e in drive_retained.retained_entries(ledger):
+        for e in drive_retained.retained_entries(ledger, alive_fn=lambda sid: True):
             drive_retained.disposition(e, probe_fn=counting)
 
         self.assertEqual(calls, ["aaaa"], "the probe must run, not be skipped")
@@ -88,7 +88,32 @@ class TestProbeInvocation(unittest.TestCase):
             "round": "r1",
             "entries": [entry("aaaa", "revive"), entry("bbbb", "finished")],
         }
-        self.assertEqual(drive_retained.retained_entries(ledger), [])
+        self.assertEqual(drive_retained.retained_entries(ledger, alive_fn=lambda sid: True), [])
+
+    def test_a_row_without_a_task_file_is_not_retained(self):
+        ledger = {
+            "round": "r1",
+            "entries": [entry("aaaa", "unverifiable", task_file=""), entry("bbbb", "blocked")],
+        }
+        rows = drive_retained.retained_entries(ledger, alive_fn=lambda sid: True)
+        self.assertEqual([r["session_id"] for r in rows], ["bbbb"])
+
+    def test_a_row_whose_session_is_not_live_is_not_retained(self):
+        ledger = {
+            "round": "r1",
+            "entries": [
+                entry("aaaa", "blocked"),
+                entry("bbbb", "blocked"),
+                entry("cccc", "blocked"),
+            ],
+        }
+        live = {"aaaa": True, "bbbb": False, "cccc": None}
+        rows = drive_retained.retained_entries(ledger, alive_fn=lambda sid: live[sid])
+        self.assertEqual(
+            [r["session_id"] for r in rows],
+            ["aaaa"],
+            "only an explicit LIVE keeps a row; ABSENT and UNKNOWN both drop",
+        )
 
 
 class TestDispositions(unittest.TestCase):
@@ -361,6 +386,7 @@ class TestRender(unittest.TestCase):
             drive_retained.read_ledger,
             drive_retained.disposition,
             drive_retained.render_reprobed,
+            drive_retained.session_alive,
         )
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -370,6 +396,7 @@ class TestRender(unittest.TestCase):
                 {"round": "R-1", "entries": entries}, None)
             drive_retained.disposition = lambda e: (
                 probed.append(e) or rows[len(probed) - 1])
+            drive_retained.session_alive = lambda sid: True
             # The join shells out to `declared-wait.py`; stub it so this test measures
             # the probe-per-row count, not a live store read.
             drive_retained.render_reprobed = lambda *a, **k: "REPROBED — stubbed"
@@ -381,6 +408,7 @@ class TestRender(unittest.TestCase):
                 drive_retained.read_ledger,
                 drive_retained.disposition,
                 drive_retained.render_reprobed,
+                drive_retained.session_alive,
             ) = saved
         self.assertEqual(rc, 0)
         self.assertEqual(len(probed), 2, "exactly one probe per retained row")

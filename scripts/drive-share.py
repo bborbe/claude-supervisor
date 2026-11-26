@@ -367,6 +367,11 @@ def measure(
     for sid, entry in by_sid.items():
         if (entry.get("verdict") or "") != "unverifiable":
             continue
+        # Step 0's retained rows carry `reprobe_verdict`; this round's fresh rows do
+        # not. Counting the retained ones made the denominator track the ledger's size
+        # (1/281 -> 1/11 -> 0/280 across three consecutive rounds).
+        if "reprobe_verdict" in entry:
+            continue
         key = (sid or "")[:8] or entry.get("name") or "?"
         row = detected.setdefault(
             key,
