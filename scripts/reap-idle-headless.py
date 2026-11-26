@@ -803,8 +803,12 @@ def main(argv=None):
                     verdict = ("task-unresolved", bad[1])
                 else:
                     unanchored = True
-            elif bad is not None and bad[0] != "task-not-terminal":
-                # Defensive: any future token keeps failing closed.
+            elif bad is not None and bad[0] not in close_worker.LIVE_TASK_REFUSALS:
+                # Defensive: any future token keeps failing closed. The live-task set is
+                # read from close-worker.py rather than compared against a literal —
+                # `gate-uncarded` joined it, and a literal here would have reclassified
+                # every gated row as `task-unresolved` instead of leaving it in this
+                # verb's population.
                 verdict = ("task-unresolved", bad[1])
 
         if verdict is not None:
