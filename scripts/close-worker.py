@@ -1099,6 +1099,41 @@ def tab_kill(jump, session_id, pane, runner=None):
     return 0
 
 
+def live_spawned_workers(sid, ledger, live):
+    """Live sessions whose spawn edge points at `sid` — the workers it must not abandon.
+
+    Pure: the caller supplies the ledger (`{session_id: row}`) and the live set, so the
+    join is unit-testable without a store. Two spellings of the spawn edge are read —
+    `spawner_session_id` on the wire, `parent_session` in the old file record — matching
+    `adopt-orphans.py`: a wrong name reads as `None`, which would silently find nothing.
+    """
+    children = []
+    for child, record in (ledger or {}).items():
+        if child not in live:
+            continue
+        parent = record.get("spawner_session_id") or record.get("parent_session")
+        if parent == sid:
+            children.append(child)
+    return sorted(children)
+
+
+def read_live_spawned_workers(sid, registry_dir=None, heartbeat_dir=None):
+    """The live workers `sid` spawned, or None when the ledger/liveness is unreadable.
+
+    None is not "none live": an unreadable ledger or registry means the count could not be
+    taken, and a close decided on it would be a close on no evidence. The caller refuses.
+    """
+    so = load_sibling("session-ownership.py")
+    adopt = load_sibling("adopt-orphans.py")
+    ledger = so.load_ledger_checked(None)
+    if ledger is None:
+        return None
+    live = adopt.live_session_ids(registry_dir, heartbeat_dir)
+    if live is None:
+        return None
+    return live_spawned_workers(sid, ledger, live)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Close one finished session's pane — registry-guarded.",
@@ -1232,6 +1267,30 @@ def main():
             "gate-held",
             f"session {sid} holds an unanswered operator gate ({closer}); closing it "
             "discards a question the operator never answered",
+        )
+
+    # A goal/topic manager must not close while it still has live workers: a headless
+    # worker's permission prompts park with the session that spawned it, and only that
+    # session can release them. Closing it leaves the worker with no answer path and its
+    # gates time out after 15 minutes. Liveness comes from the same sources the wrapper
+    # uses — the spawn ledger, the identity registry and the heartbeat store — never from a
+    # task's `claude_session_id`, which a dead worker keeps. An unreadable source refuses
+    # rather than closing on no evidence. Placed after `gate-held` so a dead store still
+    # reports `gate-held` (the existing fail-closed verdict) rather than this one.
+    children = read_live_spawned_workers(sid, args.sessions_dir or SESSIONS_DIR)
+    if children is None:
+        return refuse(
+            "liveness-unknown",
+            f"the spawn ledger or session registry is unreadable, so {sid}'s live workers "
+            "cannot be counted — refusing to close a session that may still be a manager "
+            "on no evidence",
+        )
+    if children:
+        return refuse(
+            "live-workers",
+            f"session {sid} still has {len(children)} live worker(s) "
+            f"({', '.join(w[:8] for w in children)}); closing it would leave them without "
+            "an answer path for their permission gates",
         )
 
     held_tasks, handed_tasks, task_error = find_tasks(sid, cwd, VAULTS_ROOT)
