@@ -129,6 +129,7 @@ subject — two sessions on one subject are a double writer.
 |---|---|---|---|---|
 | **Fleet manager** | the operator | **the operator** | `scripts/fleet-keepalive.py` reads the digest, never the heartbeat; `scripts/fleet-keeper.py` posts one card after 40 min `stale`, and resumes only on the operator's `resume it` answer | report-only — rule 1's one exception (§ The three tiers) |
 | **Topic manager** | the fleet manager, on the operator's initiative | the **wrapper's keep-alive tick** (the round's leg retired in v0.367.0, `0bfff171`) | `scripts/topic-keepalive.py --branch topic`, for every topic page `scripts/topic-candidates.py` selects — every verdict but `loop-stopped`, never filtered on `claude_session_id` | 3 resumes in 30 min → `crash-loop`, escalate once |
+| **Goal** | its declaring topic's manager | its **declaring topic manager's round**; otherwise the **wrapper's flagged tick**, when the goal is operator-flagged and eligible | `scripts/flagged-rows.py` emits an `open-manager` row for an eligible operator-flagged page and the wrapper opens or resumes the goal's manager; `scripts/keeper-census.py` reports that keeper | the goal tier is merged into the topic tier (2026-11-24), so a goal page's `claude_session_id` is a manager the flagged tick opens, never a goal round; an agent-set flag opens nothing (`scripts/flag_provenance.py`) |
 | **Worker** — task with a goal | its declaring topic's manager, or the fleet manager when the goal has no topic | its **declaring topic manager's round**; otherwise the **fleet round** | `agents/goal-drive.md` auto-resume gate, run inside the topic round; the fallback is `scripts/worker-keepalive.py` (the wrapper's keep-alive tick) | `last_auto_resume` cap on the topic tier, `worker--<slug>` cap on the fleet tier; `worker-keepalive.py` returns `jump` for a row the topic tier owns, so the two never resume one row |
 | **Worker** — task with no goal | the fleet manager, or the topic manager listing the task | the **wrapper's keep-alive tick** | `scripts/worker-keepalive.py` | `worker--<slug>` cap; a task with no recorded id is reported, never opened |
 | **Background sub-agent** | its worker | **no keeper, by decision 2026-11-08** | — | it dies with its parent session, so a worker never parks a wait on one |
@@ -193,7 +194,14 @@ join, not the marker, is what makes a row a close candidate. ⚠️ **Closing a 
 manager is the first step of a chain, not a single-step fix**: the topic page becomes
 `fleet round` but its goals stay unkept, because a goal whose declaring topic has no live
 armed manager reads `"declaring topic(s) have no live armed manager"`
-(`scripts/keeper-census.py:396-397`).
+(`scripts/keeper-census.py` `keepers_of()`). **One keeper does reach such a goal: the
+wrapper's flagged tick.** When the goal page is operator-flagged and eligible
+(`scripts/flag_provenance.py` `flag_admits()` **and** `scripts/flagged-rows.py` `eligible()`),
+the tick emits `open-manager` for it and opens or resumes the goal's manager, so the census
+reports `wrapper flagged tick` and the row is kept. An unflagged or agent-flagged goal has no
+such resumer and stays unkept; a `cannot-tell` declaring topic, and a declaring topic whose
+session is live, are never handed on — the first is the second-writer guard, the second is the
+tick's own `open-manager` condition.
 
 ⚠️ **The handover no longer strands the page — the `STOPPED` rule is what keeps the chain
 open.** § 1 selects on `scripts/owner.py`'s verdict through `scripts/topic-candidates.py` and
@@ -201,7 +209,10 @@ refuses only `loop-stopped`, so a page this leg has handed over **stays in the p
 unless it still carries its `.stopped` marker, and a re-manageable topic gets a replacement
 manager. A `STOPPED` topic is still never re-opened,
 so for one of those the goals stay unkept — a round must not report them kept after a close on
-the assumption that it follows.
+the assumption that it follows. The one exception is the flagged tick above: a goal the operator
+flagged is kept when its declaring topics are a definite `not-owner` **and** none of them records
+a live session — the tick's own `open-manager` branch fires only when the subject has no live
+manager, so a live topic that merely stopped its round is not a resumer.
 
 ### Three invariants
 
