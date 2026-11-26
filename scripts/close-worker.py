@@ -1021,6 +1021,21 @@ def read_live_spawned_workers(sid, registry_dir=None, heartbeat_dir=None):
     return live_spawned_workers(sid, ledger, live)
 
 
+def _own_session_id():
+    """This session's own id, as the shell sees it (`CLAUDE_CODE_SESSION_ID`).
+
+    A Bash tool cannot spoof another session's env, so `--self` is safe keyed on it: only
+    the session whose own env id equals the target can exempt `busy-target`. A divergence
+    from the registry refuses **visibly** as `not-self` rather than silently never matching,
+    so a self-close that cannot verify says so instead of no-oping.
+    """
+    return (
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or ""
+    ).strip() or None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Close one finished session's pane — registry-guarded.",
@@ -1028,6 +1043,10 @@ def main():
     parser.add_argument("session_id")
     parser.add_argument("--dry-run", action="store_true", help="check everything, close nothing")
     parser.add_argument("--sessions-dir", default=None)
+    parser.add_argument(
+        "--self", action="store_true",
+        help="the caller is closing ITS OWN session (exempts busy-target only)",
+    )
     args = parser.parse_args()
 
     sid = (args.session_id or "").strip()
@@ -1092,8 +1111,23 @@ def main():
     if not isinstance(pid, int):
         return refuse("ambiguous-pid", f"registry entry {path} carries no integer pid")
 
+    # `--self`: the caller is closing its own session, so `busy-target` must not block it — a
+    # session that has just decided it is done has no in-flight work to strand. Verify the
+    # target really is this session (from the registry's own id, not the env var, which can
+    # diverge) and exempt busy-target ONLY; every other guard below still runs and refuses.
+    self_close = False
+    if args.self:
+        own = _own_session_id()
+        if own is None or own != sid:
+            return refuse(
+                "not-self",
+                f"--self target {sid} is not this session's own registry id "
+                f"({own or 'unresolved'}); --self exempts only a session closing itself",
+            )
+        self_close = True
+
     status = (rec.get("status") or "").strip().lower()
-    if status != "idle":
+    if status != "idle" and not self_close:
         return refuse(
             "busy-target",
             f"session {sid} is {status or 'in an unknown state'}, not idle; a close loses "
@@ -1127,7 +1161,7 @@ def main():
     # covers it and a second check would only add delay. A pane-less one parked on the
     # supervisor's permission channel does not move its `status` and writes no `👤 You:` line,
     # so neither guard above sees it — the tool marker is the only record left.
-    if headless:
+    if headless and not self_close:
         in_flight = in_flight_tool(sid)
         if in_flight is not None:
             label, age = in_flight
@@ -1286,6 +1320,8 @@ def main():
     print(f"   classification: {branch} · {where}")
 
     if args.dry_run:
+        if self_close:
+            print("self-close")
         print(f"   ✅ would close {where}")
         return 0
 
@@ -1345,6 +1381,8 @@ def main():
         except OSError as error:
             print(f"   ⚠️ registry entry {path} survived pid {pid} and could not be removed: {error}")
 
+    if self_close:
+        print("self-close")
     print(
         f"   {'✅' if not alive and not entry_present else '⚠️'} closed {closed_target} · "
         f"pid {pid} {'dead' if not alive else 'STILL ALIVE'} · registry entry "

@@ -87,6 +87,20 @@ class TestLiveSpawnedWorkers(unittest.TestCase):
             self.assertIsNone(cw.read_live_spawned_workers(SID))
 
 
+class TestOwnSessionId(unittest.TestCase):
+    """`--self` keys on the shell's own session id (`CLAUDE_CODE_SESSION_ID`)."""
+
+    def test_reads_the_env_session_id(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-abc"}, clear=False):
+            self.assertEqual(cw._own_session_id(), "sess-abc")
+
+    def test_none_when_unset(self):
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_CODE_SESSION_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False
+        ):
+            self.assertIsNone(cw._own_session_id())
+
+
 class TestFrontmatter(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -662,6 +676,14 @@ class TestCliRefusals(unittest.TestCase):
         done = self._run("--dry-run")
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.splitlines()[0], "liveness-unknown")
+
+    def test_self_flag_with_a_foreign_target_refuses_not_self(self):
+        """`--self` only exempts a session closing itself; a foreign id refuses `not-self`."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("t.md", **{"claude_session_id": SID, "status": "completed"})
+        done = self._run("--self", "--dry-run")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "not-self")
 
     def test_unknown_session_id(self):
         done = self._run()
