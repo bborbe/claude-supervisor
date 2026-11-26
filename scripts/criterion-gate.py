@@ -66,7 +66,10 @@ import sys
 # A checkbox bullet, the only shape a Success Criterion, DoD item or traced task row
 # takes on a goal page. Prose bullets (`1. [[X]] — done; delivers SC1's …`) are skipped
 # on purpose: they are history, not rows.
-BOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(.*)$")
+# ⚠️ `[/]` (in progress) is a box, and it is NOT ticked. Omit it and a goal whose only
+# non-`[x]` criterion is `[/]` reads criteria-met — suppressing every open — while the
+# closure verb refuses on `[/]`. Ticked means `[x]`/`[X]` and nothing else.
+BOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX/])\]\s*(.*)$")
 LINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 # The trace the gate reads. Em dash (—), en dash (–) or hyphen tolerated; `closes SC<n>` or
 # `closes DoD<n>`. Never a bare "SC1" mention — only the explicit `closes` construct.

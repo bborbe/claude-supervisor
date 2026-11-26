@@ -174,6 +174,30 @@ class CriterionGateTest(unittest.TestCase):
         self.assertEqual(verdict(result, "Running Row")["verdict"], "open")
         self.assertEqual(verdict(result, "Waiting Row")["verdict"], "covered")
 
+    def test_in_progress_criterion_is_open_not_met(self):
+        # `[/]` is a box and is NOT ticked. A goal whose only open criterion is `[/]` must
+        # not read criteria-met — the closure verb refuses on `[/]`, so the gate must too.
+        body = """# Success Criteria
+
+- [x] SC1: done
+- [/] SC2: in progress
+
+# Definition of Done
+
+- [x] DoD done
+
+# Tasks
+
+- [ ] [[Closes SC2]] — closes SC2: still open
+"""
+        result = decide({"goal": GOAL, "goal_text": body, "rows": [
+            {"task": "Closes SC2", "phase": "planning", "approved": True, "live": False},
+        ]})
+        self.assertFalse(result["criteria_met"])
+        self.assertEqual(result["next_criterion"], "SC2")
+        self.assertEqual(verdict(result, "Closes SC2")["verdict"], "open")
+        self.assertEqual(result["to_abort"], [])
+
     def test_malformed_payload_exits_two(self):
         out = subprocess.run(
             [sys.executable, SCRIPT, "decide"],
