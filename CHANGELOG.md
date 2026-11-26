@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.373.0
 
 - fix: **a subject asleep by design now renders `asleep-until:<instant>` at all three points that classify it, instead of `lapsed` / `unverifiable` / `waiting-on-human`.** The label differed each time because no point carried a reason for *why* a row is not moving. Measured 2026-11-26 over three subjects in one night: *Every Row That Should Be Open…* reads `SLEEPING until 2026-11-27` — which the fleet sweep already maps correctly to `sleeping` — and was rendered `unverifiable`, because the drive leg treats an empty `task_file` as unverifiable and a manager subject owns a goal page, not a task file; *Merge the Goal Manager Tier…* reads `UNARMED`, a state the sweep's `--state` row had **no cell for**, so it fell through to `lapsed`; *Manager Token Overhead Falls…* reads `OK` and was rendered `waiting-on-human` with nothing waiting. Change set: `agents/fleet-sweep-reader.md` (`SLEEPING` → `asleep-until:<instant>` carrying the state line's own instant, plus a new `UNARMED` cell), `agents/fleet-drive.md` (a manager subject is no longer `unverifiable` for an absent `task_file`, and `CLOSERS class=none` on a date-gated subject is `asleep-until`, not `unverifiable`), `agents/goal-sweep-reader.md` (a new `asleep-until:<instant>` cell evaluated before `waiting-on-human`), `CHANGELOG.md`.
 
