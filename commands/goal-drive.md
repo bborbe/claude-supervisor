@@ -83,13 +83,24 @@ that stale bucket.
 
 ⚠️ **A round assumes no context left over from the previous round.** State lives on disk (the tracked-set file, the snapshot, the verdicts cache); re-read what a step needs rather than carrying it forward.
 
+## The window — what moved, measured
+
+Every tick, after the readings and before the sweep, take the window per live worker and for the subject:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/progress-window.py \
+  --session "<sid>" --anchor "<its task file>" --json
+```
+
+Render one row per live worker (verdict, open boxes, the box that moved), one subject row (boxes moved, tasks opened/closed, cards answered), and one acts row per act taken, naming whether A/B followed on its box. A by-hand gate at exit 0 reports `IDLE subject` and drives.
+
 ## Arguments
 
-- **`$1` (optional — resolved from the session when omitted):** the **subject** — a goal name matching a page in `24 Goals/`, or a topic name matching a topic page in `23 Topics/` *(operator's vault; not shipped with this plugin)*. The branch is detected from whichever page resolves (step 1); this command never assumes one.
+- **`$1` (optional — resolved from the session when omitted):** the **subject** — a goal name in `24 Goals/`, or a topic name in `23 Topics/`. The branch is detected from whichever page resolves (step 1); this command never assumes one.
   - `/goal-drive "Sample Task"` → explicit subject
   - `/goal-drive` (bare) → resolve the subject from § Subject resolution in the arm, which points at `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the same rule `/goal-loop` and `/goal-status` use, so a manager session's bare drive acts on the subject it is already watching.
   - ⚠️ **A topic subject's round is `commands/topic-drive.md`** — this command no longer grants the wakeup tools.
-- **`--interval <N>m`** is carried on the wake prompt, not set by this command. The goal loop arms no wakeup: the detached sweep gate types the round prompt with this interval on an actionable change, and `/supervisor:goal-loop` § step 3 no longer arms a `ScheduleWakeup`. ⚠️ **This command arms nothing either** — step 12 re-arms only the three `Monitor` channels that expire mid-tick. ⚠️ **Row 0a reads it too** — it passes the clamped seconds to `manager-liveness.py --arm`, which requires `--interval > 0`.
+- **`--interval <N>m`** is carried on the wake prompt, not set here. Row 0a passes its clamped seconds to `manager-liveness.py --arm`, which requires `--interval > 0`; step 12 re-arms only the three `Monitor` channels.
 
 ## Pre-dispatch gate — by-hand rounds only
 
@@ -103,7 +114,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 - **exit 10 — something changed, the gate could not tell, OR the stored classification places a row in an actionable bucket.** Run the round, persist the fresh snapshot at the sweep. ⚠️ **That third reason is why a round runs on an untouched tree** — ready-to-start is a steady state; print the gate's own reason line (`N actionable row(s) waiting: …`), never "the tree moved".
 - **exit 2 — usage error.** A malformed invocation (missing `--vault`, bad flag), not a verdict. Fix the call; do not read it as "changed".
 
-⚠️ **The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py` — digest inputs, why liveness is in them and mtime is not, and the fail-open cases. Read it there; **not** restated here. ⚠️ **Fail-open is the contract** — every unreadable or unresolvable input exits 10; never route around a non-zero exit, and never hand-roll a second classifier: this gate is the only pre-dispatch decision.
+⚠️ **The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py`. Read it there; fail-open is its contract — every unreadable input exits 10, and this gate is the only pre-dispatch decision.
 
 ## What this command must never do
 

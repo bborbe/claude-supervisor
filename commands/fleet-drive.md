@@ -81,6 +81,10 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 
 **Split:** rows 0, 2–3, 5, 7–10, 12, 15, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
 
+## The window — the stuck list, measured
+
+Read it for every stuck row: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/progress-window.py --session "<sid>" --anchor "<its task file>" --json`. Order the list with `drive_stuck_order(rows)` — prod gate first, then closest to closure. `progressing` needs A/B movement.
+
 ## INLINE — the hard rules
 
 Full text and the `⚠️` clauses live in `steps/rules.md`.

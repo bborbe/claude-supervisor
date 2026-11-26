@@ -48,12 +48,14 @@ def iso(stamp):
 
 
 def anchor_text(sc=("[ ] SC1: first criterion", "[ ] SC2: second criterion"),
-                dod=("[ ] make precommit green",), progress=(), summary="Summary line."):
+                dod=("[ ] make precommit green",), progress=(), summary="Summary line.",
+                out_of_scope=(), tasks=("- [ ] do the work",)):
     return "\n".join([
         "---", "goals:", "    - '[[The Goal]]'", "---", "Tags: [[Task]]", "", "---", "",
         summary, "", "# Success Criteria", "",
         *["- " + line for line in sc], "", "# Definition of Done", "",
-        *["- " + line for line in dod], "", "# Tasks", "", "- [ ] do the work", "",
+        *["- " + line for line in dod], "", "# Tasks", "", *tasks, "",
+        "# Out of Scope", "", *["- " + line for line in out_of_scope], "",
         "# Progress", "", *progress, "",
     ])
 
@@ -68,7 +70,8 @@ class Env:
         self.projects = root / "projects"
         self.sessions = root / "sessions"
         self.state = root / "state"
-        for d in (self.projects / "proj", self.sessions, self.state):
+        self.attention = root / "attention"
+        for d in (self.projects / "proj", self.sessions, self.state, self.attention):
             d.mkdir(parents=True)
         self.vault = self.repo("vault")
         (self.vault / "25 Tasks").mkdir()
@@ -146,6 +149,24 @@ class Env:
         self.records.append({"type": "assistant", "timestamp": iso(when), "message": {
             "role": "assistant", "content": [{"type": "text", "text": text}]}})
 
+    def wait(self, ends, when, session=SID, began=None):
+        """A declared wait: a `Stop` record whose closer panel carries `⏰ Ends:`.
+
+        `began` writes the FIRST `Stop` of the run naming the same observable, so `ts`
+        (when the wait started) and `last_ts` (its newest render) differ -- the shape a
+        re-parked wait has, and the one the 2x rule measures from.
+        """
+        records = []
+        if began is not None:
+            records.append({"event": "Stop", "ts": began.timestamp(),
+                            "detail": "panel\n⏰ Ends: " + ends})
+        records.append({"event": "Stop", "ts": when.timestamp(),
+                        "detail": "panel\n⏰ Ends: " + ends})
+        path = self.attention / (session + ".events.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+
     def registered(self, started, status="busy", updated=None):
         stamp = lambda d: int(d.timestamp() * 1000)
         (self.sessions / "4242.json").write_text(json.dumps({
@@ -180,7 +201,8 @@ class Env:
         if coverage is not None:
             args += ["--coverage", str(coverage)]
         env = dict(os.environ, SUPERVISOR_PROJECTS_DIR=str(self.projects),
-                   SUPERVISOR_SESSIONS_DIR=str(self.sessions), SUPERVISOR_STATE_DIR=str(self.state))
+                   SUPERVISOR_SESSIONS_DIR=str(self.sessions), SUPERVISOR_STATE_DIR=str(self.state),
+                   ATTENTION_STATE_DIR=str(self.attention))
         proc = subprocess.run([sys.executable, str(SCRIPT), *args, *extra],
                               capture_output=True, text=True, env=env)
         report = json.loads(proc.stdout) if proc.stdout.strip() else None
@@ -199,6 +221,130 @@ class Case(unittest.TestCase):
         code, report, err = result
         self.assertEqual(code, 0, err)
         return report
+
+
+class TestWaiting(Case):
+    """The two waiting verdicts, and that they outrank IDLE but never a Moved window.
+
+    Before this class a waiting session read `BUSY-NO-MOVE` (or `IDLE`), which takes the
+    full drive at a worker that is correctly parked -- the defect the waiting verdicts
+    exist to remove (`docs/session-progress.md` § Verdicts rows 6-7).
+    """
+
+    def test_a_declared_wait_is_waiting_ok_not_idle(self):
+        self.env.wait("CI run 42 finishes (GitHub Actions)", when=SINCE)
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "WAITING-OK")
+        self.assertEqual(report["wait"]["mechanism"], "external")
+
+    def test_an_expired_wait_is_waiting_stale(self):
+        # No clock in the slot and no re-render for over an hour: `declared-wait.py`
+        # reads it `expired`, so the window must not call it BUSY-NO-MOVE either.
+        self.env.wait("CI finishes (no date named)", when=SINCE - datetime.timedelta(hours=2))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "WAITING-STALE")
+
+    def test_a_wait_past_twice_its_expected_duration_is_stale(self):
+        # Began 10:45, named 10:55 (10 min expected), re-rendered at 11:45 -- the reader
+        # still says `declared` (a fresh render), and 60 min elapsed is 6x expected.
+        self.env.wait("CI run 42 finishes by 2026-10-18T10:55:00Z", when=SINCE,
+                      began=SINCE - datetime.timedelta(minutes=60))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "WAITING-STALE")
+        self.assertEqual(report["wait"]["expected_s"], 600)
+
+    def test_a_wait_never_hides_a_moved_window(self):
+        self.tick(at(1))
+        self.env.wait("CI finishes", when=SINCE)
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "PROGRESSING")
+
+
+class TestDrift(Case):
+    """A/B movement the anchor's `# Out of Scope` rules out is DRIFT, never PROGRESSING.
+
+    The scope read is mechanical on purpose: only paths the anchor names count, so an
+    anchor that names none can never produce DRIFT (that is the second fixture).
+    """
+
+    def legacy(self, when):
+        (self.env.code / "src" / "legacy").mkdir(parents=True, exist_ok=True)
+        return self.env.commit_code("src/legacy/old.py", "def old():\n    pass\n", when, "legacy work")
+
+    def test_movement_under_a_ruled_out_path_is_drift(self):
+        self.env.commit_anchor(
+            anchor_text(out_of_scope=("- `src/legacy/` — not this task",)), at(-100), "initial")
+        self.legacy(at(2))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "BUSY-NO-MOVE")
+        self.assertEqual(report["subtype"], "DRIFT")
+        self.assertEqual(len(report["drift"]), 1)
+        self.assertEqual(report["moved"], [])
+
+    def test_an_anchor_naming_no_paths_never_drifts(self):
+        # Same movement, no path named in the scope: it counts as movement, because
+        # there is no evidence of a ruled-out path to rule it out with.
+        self.legacy(at(2))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "PROGRESSING")
+        self.assertEqual(report["drift"], [])
+
+
+class TestBlockedOperator(Case):
+    """The anchor's own operator-gate markers, read without a pane."""
+
+    def test_an_open_production_touching_task_line_is_blocked_operator(self):
+        self.env.commit_anchor(anchor_text(
+            tasks=("- [ ] ⚠️ production-touching — `launchctl kickstart -k gui/$UID/x`",)),
+            at(-100), "initial")
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "BLOCKED-OPERATOR")
+        self.assertEqual(report["blocked"]["class"], "D")
+
+    def test_a_pick_in_the_last_progress_line_is_blocked_operator(self):
+        self.env.commit_anchor(anchor_text(
+            progress=("- 2026-10-18: awaiting pick — 1. ship it 2. leave it",)), at(-100), "initial")
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "BLOCKED-OPERATOR")
+        self.assertEqual(report["blocked"]["class"], "C")
+
+    def test_a_ticked_production_line_is_not_blocked(self):
+        # The marker only counts while the line is OPEN -- a finished gate is not a wait.
+        self.env.commit_anchor(anchor_text(
+            tasks=("- [x] ⚠️ production-touching — done",)), at(-100), "initial")
+        report = self.ok(self.env.run())
+        self.assertNotEqual(report["verdict"], "BLOCKED-OPERATOR")
+
+
+class TestStuckOrder(Case):
+    """The stuck list is an ordered key, not a score -- four rows, exact order."""
+
+    def test_the_sort_puts_the_prod_gate_first_then_closest_to_closure(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pw", SCRIPT)
+        pw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pw)
+        rows = [
+            {"name": "blocked-most", "gate_class": "C", "open_boxes": 2, "blocks": 5, "minutes_since_ab": 90},
+            {"name": "prod-gate", "gate_class": "D", "open_boxes": 4, "blocks": 0, "minutes_since_ab": 10},
+            {"name": "closest", "gate_class": "C", "open_boxes": 1, "blocks": 0, "minutes_since_ab": 30},
+            {"name": "oldest", "gate_class": "C", "open_boxes": 2, "blocks": 5, "minutes_since_ab": 120},
+        ]
+        self.assertEqual([r["name"] for r in pw.drive_stuck_order(rows)],
+                         ["prod-gate", "closest", "oldest", "blocked-most"])
+
+
+class TestRowShape(Case):
+    """SC1's three rows are built from this block -- pin the fields they read."""
+
+    def test_the_block_carries_the_fields_the_manager_rows_are_built_from(self):
+        self.tick(at(1))
+        code, report, err = self.env.run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["verdict"], "PROGRESSING")
+        block = report["block"]
+        for field in ("⏱ Window", "Moved:", "Toward:", "Activity:"):
+            self.assertIn(field, block)
 
 
 class TestBusyNoMove(Case):
