@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.373.0
 
 - feat: **a goal round opens an approved task only when it closes an open Success Criterion or DoD item, and aborts a criteria-met goal's leftovers instead of unlinking them.** `agents/goal-drive.md` clause (6) now runs the criterion gate (`scripts/criterion-gate.py decide`) before handing a row over as `To open`: a row whose goal trace names a ticked criterion is held, one already covered by a live task is held, one with no `— closes SC<n>` trace is reported `untraced — run /unblock`, and a row of a goal whose every SC and DoD box is ticked is never opened. Clause (7) narrows the approval card to the producers of the goal's next open criterion in page order, each line naming its criterion, deduped on the goal plus the set of task names. `commands/steps/goal-closure.md` Step 0b aborts a criteria-met goal's leftover tasks with the reason `goal criteria met — <goal>` (keeping the link) instead of unlinking them; a live or unknown session still holds the close rather than being aborted mid-run, and a task that also serves **another** goal is unlinked from the closing goal only, so the other goal's work survives. The rule is stated once in `docs/session-progress.md` § Open only what closes a criterion. Change set: `scripts/criterion-gate.py` (new), `scripts/tests/test_criterion_gate.py` (new), `agents/goal-drive.md`, `commands/steps/goal-closure.md`, `docs/session-progress.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
