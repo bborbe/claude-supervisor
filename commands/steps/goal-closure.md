@@ -77,9 +77,10 @@ inline citation on the same line. Never change the box's own text.
 
 Step 0b runs on the goal branch's **subject** goal when its closure boxes are all `[x]` after
 Step 0, **or** when it is *linked-tasks-only* (defined below). Every task still linked to the goal that is not `completed`
-or `aborted` (`next`, `todo`, `in_progress`, `hold`, `backlog`) is moved out before the verb runs.
-Run it after the tracked set has been examined (see *What to do*), so a tracked task that itself
-closed this round is closed under the goal, not moved out. The topic tier never runs 0b: a
+or `aborted` (`next`, `todo`, `in_progress`, `hold`, `backlog`) is aborted with a recorded reason
+before the verb runs — unless it also serves **another** goal, in which case it is unlinked from
+this goal only (aborting it would kill the other goal's work). Run it after the tracked set has been examined (see *What to do*), so a
+tracked task that itself closed this round is closed under the goal, not aborted. The topic tier never runs 0b: a
 member goal with open linked tasks is left to its goal manager.
 
 ⚠️ **Linked-tasks-only.** The goal template's DoD carries *"All linked tasks completed or moved
@@ -91,16 +92,18 @@ exactly one open box whose text contains `linked tasks completed or moved out` (
 not a whole-page count. For such a goal, run steps 1–4 below. Then, **only if none of them held
 or failed**, re-run step 1's scan this tick. When it finds nothing non-terminal still linked, tick
 the box as a `linked-task scan` (Step 0 table), with one of:
-- `— evidence: linked-task scan, moved out YYYY-MM-DD (loop, YYYY-MM-DD)` when step 3 moved tasks
-- `— evidence: linked-task scan, none open (loop, YYYY-MM-DD)` when there was nothing to move
+- `— evidence: linked-task scan, aborted YYYY-MM-DD (loop, YYYY-MM-DD)` when step 3 aborted tasks
+- `— evidence: linked-task scan, none open (loop, YYYY-MM-DD)` when there was nothing to abort
 
 Then run Step 1's verb — its exit is the verdict.
 
 ⚠️ **The verb refuses on a non-terminal linked task, which is why Step 0b runs first.** `vault-cli
 goal complete` reads each task's `goals:` entry (`pkg/ops/goal_complete.go` `taskLinkedToGoal`,
 normalising `[[<goal>]]` to the bare name) and `closureMemberItems` refuses while any linked task
-is `next`, `todo` or `in_progress`. Step 0b unlinks the open ones before the verb runs, so the
-goal can close; the verb itself is the gate that would otherwise refuse on them.
+is `next`, `todo` or `in_progress`. Step 0b aborts the open ones before the verb runs, so the
+goal can close; the verb itself is the gate that would otherwise refuse on them. `aborted` is a
+terminal status, so an aborted-but-still-linked task passes the verb's `closureMemberItems` check
+exactly as an unlinked one did — the link survives, and the task stays findable from the goal.
 
 1. List the linked tasks yourself. Run every task name through `closure-name-safe.py`
    (single-quoted, Step 1 below). A name that fails holds the close: report it and close
@@ -109,18 +112,16 @@ goal can close; the verb itself is the gate that would otherwise refuse on them.
    list **comma-joined**, and goal names can contain commas, so never split it. Instead check
    which exact string — `[[<goal>]]` or `<goal>` — occurs in `value`, and use that string.
 2. **A worker that may be on the task holds the close.** If a linked task has a
-   `claude_session_id` and this round's liveness reading for it is `LIVE` or `UNKNOWN`, unlink
+   `claude_session_id` and this round's liveness reading for it is `LIVE` or `UNKNOWN`, abort
    nothing, report `closure: <goal> — CLOSE held by live/unknown [[<task>]]`, and close nothing
-   this tick. A task with no `claude_session_id` was never started and does not hold.
-3. Unlink each remaining one with the string found in step 1:
-   `vault-cli task remove "<task>" goals "<that string>" --vault "<vault>"`. The remove verb
-   matches the raw string, so `[[<goal>]]` and `<goal>` are different values. The task's own
-   `status` is untouched; it is unlinked, not closed. **If any remove fails**, report it
-   verbatim, still run step 4 for the tasks already removed, and close nothing this tick.
-4. When step 3 moved at least one task, append one line to the goal's `# Progress`:
-   `- YYYY-MM-DD (loop): moved out at close, goal criteria met — [[t1]] (<status>), [[t2]] (<status>) …`.
-   It records the reason, and every task stays findable from the goal it left. Skip this step
-   when nothing was moved.
+   this tick. A task with no `claude_session_id` was never started and does not hold. A live
+   session is never aborted mid-run: aborting it would kill work in flight, so it holds the
+   close until it is quiet.
+3. **Abort only a task this goal alone holds; unlink one that also serves another goal.** Step 1 already fetched the task's `goals:` list. When that list carries **another** goal besides this one, the task is not a leftover of this goal — aborting it would kill the other goal's work — so **unlink it from this goal only** with the string step 1 resolved: `vault-cli task remove "<task>" goals "<this-goal-string>"`, leaving its `status` untouched. For every remaining task whose only goal is this one, abort it, recording the reason: run `vault-cli task set "<task>" status aborted --vault "<vault>"` and append `- YYYY-MM-DD (loop): aborted — goal criteria met — <goal>` to the task's `# Progress`. An aborted task keeps its `goals:` link (the reason is the record; the link is how it stays findable), and its `status` becomes `aborted`. **If any abort or unlink fails**, report it verbatim, still run step 4 for the tasks already handled, and close nothing this tick.
+4. When step 3 aborted at least one task, append one line to the goal's `# Progress`:
+   `- YYYY-MM-DD (loop): aborted at close, goal criteria met — [[t1]] (aborted), [[t2]] (aborted) …`.
+   It records the reason, and every task stays findable from the goal it stays linked to. Skip
+   this step when nothing was aborted.
 5. Then run the verb (Step 1 below). Never `--force`.
 
 ## What to do
