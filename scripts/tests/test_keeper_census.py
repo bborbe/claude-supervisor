@@ -54,6 +54,13 @@ def page(kind, name, sid="", status="in_progress", phase="execution", goals=(), 
     return "\n".join(lines) + "\n\n" + body
 
 
+def flagged(kind, name, flag="true", flag_set_by="operator", **kwargs):
+    """`page()` plus the two flag fields — the gate the wrapper's flagged tick reads."""
+    text = page(kind, name, **kwargs)
+    head, rest = text.split("\n---\n", 1)
+    return head + f"\nflag: {flag}\nflag_set_by: {flag_set_by}\n---\n" + rest
+
+
 class CensusTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -90,6 +97,10 @@ class CensusTest(unittest.TestCase):
         (self.vault / directory / f"{name}.md").write_text(
             page(kind, name, **kwargs), encoding="utf-8"
         )
+
+    def write_text(self, kind, name, text):
+        directory = {"topic": "23 Topics", "goal": "24 Goals", "task": "25 Tasks"}[kind]
+        (self.vault / directory / f"{name}.md").write_text(text, encoding="utf-8")
 
     def alive(self, sid, name="session"):
         self.live[sid] = {"sessionId": sid, "name": name}
@@ -202,6 +213,61 @@ class CensusTest(unittest.TestCase):
         code, text = self.run_census("--no-card")
         self.assertEqual(1, code)
         self.assertIn("outside the fleet leg's population", text)
+
+    def test_a_flagged_goal_under_an_unkept_topic_reads_kept_by_the_flagged_tick(self):
+        """SC1 — the flagged tick re-opens the goal's manager, so the goal IS kept."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "T")
+        self.write_text("goal", "G", flagged("goal", "G", sid="g-sid", topics=["T"]))
+        self.alive("g-sid", "manager")
+        self.states[("topic", "T")] = "UNARMED"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertIn("keeper: wrapper flagged tick", text)
+        self.assertIn("keeper-census: unkept=0 double-kept=0 sessions=1", text)
+
+    def test_an_unflagged_goal_under_an_unkept_topic_still_reads_unkept(self):
+        """SC2 — no admitting flag, no keeper: the false-green guard holds."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "T")
+        self.write("goal", "G", sid="g-sid", topics=["T"])
+        self.alive("g-sid", "manager")
+        self.states[("topic", "T")] = "UNARMED"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(1, code)
+        self.assertIn("RED unkept", text)
+        self.assertIn("declaring topic(s) have no live armed manager", text)
+        self.assertNotIn("wrapper flagged tick", text)
+
+    def test_an_agent_flagged_goal_is_not_kept_by_the_tick(self):
+        """SC2 — `eligible()` asks only that the flag is SET; provenance is the second gate."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "T")
+        self.write_text("goal", "G",
+                        flagged("goal", "G", flag_set_by="agent", sid="g-sid", topics=["T"]))
+        self.alive("g-sid", "manager")
+        self.states[("topic", "T")] = "UNARMED"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(1, code)
+        self.assertIn("RED unkept", text)
+        self.assertNotIn("wrapper flagged tick", text)
+
+    def test_a_cannot_tell_topic_still_hands_nothing_to_the_tick(self):
+        """SC2 — the second-writer guard: an unmeasurable topic is never handed on."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "T", sid="topic-sid")
+        self.write_text("goal", "G", flagged("goal", "G", sid="g-sid", topics=["T"]))
+        self.alive("g-sid", "manager")
+        self.alive("topic-sid", "manager")
+        self.states[("topic", "T")] = "UNARMED"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertIn("declaring topic(s) have no live armed manager", text)
+        self.assertNotIn("wrapper flagged tick", text)
 
     def test_live_stopped_goal_manager_leaves_its_worker_unkept(self):
         """Fixture 2 — goal manager LIVE, loop STOPPED, worker with no other keeper."""
