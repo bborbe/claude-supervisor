@@ -130,12 +130,19 @@ def open_card(session_id, attention_dir=ATTENTION_DIR, poll=_poll):
 
 
 def subject_of(session_id, state_dir=WORKER_MANAGER_DIR):
-    """`(subject, branch)` from the session's worker-manager record, or None.
+    """`(subject, branch, vault)` from the session's worker-manager record, or None.
 
     The record is written when a worker is dispatched (`~/.claude/state/worker-manager/
     <session-id>.json`). A session without one resolves no subject — a fleet-manager tab
     opened by hand, or one dispatched before the record existed — and `None` here is an
     honest "unknown", never a claim that it is not asleep.
+
+    ⚠️ **`vault` is written by BOTH registration paths** — the subject-resolution block
+    (`docs/subject-resolution.md` § Recording) and `scripts/fleet-register.py` — and this
+    function dropped it. Every `--vault` consumer downstream therefore fell back to its
+    own `"."` default, so `manager-liveness.py`'s page test and the row classification
+    below read the **cwd's** tree rather than the subject's. Measured 2026-11-26 on three
+    live records: every one carried `vault`.
     """
     try:
         with open(os.path.join(state_dir, f"{session_id}.json"), encoding="utf-8") as fh:
@@ -145,7 +152,29 @@ def subject_of(session_id, state_dir=WORKER_MANAGER_DIR):
     subject, branch = rec.get("subject"), rec.get("branch")
     if not subject or not branch:
         return None
-    return subject, branch
+    return subject, branch, (rec.get("vault") or "")
+
+
+def vault_root(vault, root=None):
+    """The record's `vault` as a ROOT PATH, or `""` when it names nothing.
+
+    ⚠️ **The record stores a NAME, not a path** — `fleet-register.py` defaults to
+    `os.path.basename(os.getcwd())` and the subject-resolution block writes `$VAULT`, so
+    a live record reads `vault: private-personal`. Both `--vault` consumers want an
+    absolute path: `manager-quiet.py` refuses a bare name outright ("a relative path (a
+    vault NAME included) resolves against the caller's cwd"), and `manager-liveness.py`
+    would resolve it against the cwd. Passing the name through unchanged would therefore
+    make every read fail and every wake refuse — the fail-closed direction, but wrong.
+    Resolved under `~/Documents/Obsidian`, the convention `manager-menu-guard.py` and
+    `who-needs-me.py` already use, with `OBSIDIAN_DIR` as the override.
+    """
+    if not vault:
+        return ""
+    expanded = os.path.expanduser(vault)
+    if os.path.isabs(expanded):
+        return expanded
+    root = root or os.environ.get("OBSIDIAN_DIR") or "~/Documents/Obsidian"
+    return os.path.join(os.path.expanduser(root), vault)
 
 
 def read_subject_state(session_id, *, subject_of=subject_of, run=subprocess.run):
@@ -168,11 +197,16 @@ def read_subject_state(session_id, *, subject_of=subject_of, run=subprocess.run)
     pair = subject_of(session_id)
     if pair is None:
         return None
-    subject, branch = pair
+    subject, branch, vault = pair
+    argv = [sys.executable, os.path.join(HERE, "manager-liveness.py"),
+            "--state", "--subject", subject, "--branch", branch]
+    root = vault_root(vault)
+    if root:
+        # The subject's OWN tree. Without it `--vault` defaults to `"."` and the page test
+        # reads the cwd's vault, which is how a sleeping subject read as not-SLEEPING.
+        argv += ["--vault", root]
     try:
-        res = run([sys.executable, os.path.join(HERE, "manager-liveness.py"),
-                   "--state", "--subject", subject, "--branch", branch],
-                  capture_output=True, text=True, timeout=20)
+        res = run(argv, capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
         return guard.STATE_UNREADABLE
     lines = (res.stdout or "").strip().splitlines()
@@ -181,7 +215,86 @@ def read_subject_state(session_id, *, subject_of=subject_of, run=subprocess.run)
     return lines[0].split("\t", 1)[0] or guard.STATE_UNREADABLE
 
 
-def plan(session_ids, *, records, panes, pid_ttys, read, card, state,
+def read_blocked_reason(session_id, *, subject_of=subject_of, run=subprocess.run):
+    """Why the session's subject is not moving — or None when it has runnable work.
+
+    `future-date:<instant>` for a subject whose every open row is date-deferred,
+    `stood-down` for one deliberately disarmed, `self-close` for one whose every tracked
+    row is terminal with no live worker, `guard.STATE_UNREADABLE` when a subject
+    RESOLVED but the reason could not be read, and `None` when there is work to do or no
+    subject resolved (the screen verdict decides).
+
+    ⚠️ **The classification is not re-derived here.** `manager-quiet.py` already owns it
+    (`verdict_for` / `reopen_trigger`), and its output is the verdict on line 1 with the
+    reopen instant on line 2. A second implementation would be a second owner of one
+    wait — the defect `commands/steps/keepalive-decision-parks.md` names in as many words.
+
+    ⚠️ **It is called with `--read-only`.** `manager-quiet.py` records a tick and moves the
+    stand-down counter on every ordinary call, so a wake that classified a subject would
+    be an extra quiet tick for it — and enough wakes would stand a live manager down.
+
+    ⚠️ **A missing vault is `STATE_UNREADABLE`, never a fallback to the cwd.** Reading the
+    cwd's tree would answer about a different vault and return a plausible, wrong reason;
+    the guard refuses on an unreadable reason exactly as it does on an unreadable state.
+    """
+    pair = subject_of(session_id)
+    if pair is None:
+        return None
+    subject, _branch, vault = pair
+    root = vault_root(vault)
+    if not root:
+        return guard.STATE_UNREADABLE
+    try:
+        res = run([sys.executable, os.path.join(HERE, "manager-quiet.py"),
+                   "--subject", subject, "--vault", root, "--read-only"],
+                  capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return guard.STATE_UNREADABLE
+    lines = (res.stdout or "").strip().splitlines()
+    if res.returncode != 0 or not lines:
+        return guard.STATE_UNREADABLE
+    fields = lines[0].split("\t")
+    if len(fields) < 2:
+        return guard.STATE_UNREADABLE
+    verdict = fields[0].strip()
+    if verdict == "sleep-until":
+        for ln in lines[1:]:
+            if ln.startswith("Sleep until "):
+                return f"future-date:{ln[len('Sleep until '):].strip()}"
+        # A sleep verdict with no instant names nothing to wait for — refuse it rather
+        # than suppress the wake on an unnamed date.
+        return guard.STATE_UNREADABLE
+    if verdict == "stood-down":
+        return "stood-down"
+    if verdict == "self-close":
+        # Every tracked row is terminal and no worker of this session is live: the manager
+        # has nothing left to drive and should close ITSELF. Waking it with "you are idle
+        # at the prompt with open work" is false, so it is a skip reason like `stood-down`.
+        return "self-close"
+    return None
+
+
+def memo_reason(*, subject_of=subject_of, reason=read_blocked_reason):
+    """`reason`, memoized per RESOLVED SUBJECT — one classification per subject per run.
+
+    `manager-quiet.py` reads the subject's whole tracked set, so classifying per SESSION
+    would run that walk once per pane: a fleet of N sessions over M subjects pays N walks
+    where M would do. A session that resolves no subject is not cached — it has no key.
+    """
+    cache = {}
+
+    def read(session_id):
+        key = subject_of(session_id)
+        if key is None:
+            return None
+        if key not in cache:
+            cache[key] = reason(session_id)
+        return cache[key]
+
+    return read
+
+
+def plan(session_ids, *, records, panes, pid_ttys, read, card, state, reason=None,
          self_session=None, self_pane=None):
     """One row per requested session: where it joins, and what the guard says. Pure given
     its inputs — every read is passed in, so the target selection is testable without a
@@ -229,8 +342,11 @@ def plan(session_ids, *, records, panes, pid_ttys, read, card, state,
                     row["card"] = c
                 else:
                     row["subject_state"] = state(sid)
+                    if reason is not None:
+                        row["blocked_reason"] = reason(sid)
                     row["verdict"] = guard.verdict(read(row["pane"]),
-                                                   subject_state=row["subject_state"])
+                                                   subject_state=row["subject_state"],
+                                                   blocked_reason=row.get("blocked_reason"))
         rows.append(row)
     return rows
 
@@ -241,7 +357,7 @@ def _composer_clear(text):
 
 
 def send(pane_id, message, *, run=subprocess.run, read=read_pane, sleep=time.sleep,
-         subject_state=None):
+         subject_state=None, blocked_reason=None):
     """Type `message` into a pane the guard just cleared, then confirm POSITIVELY.
 
     `subject_state` is the plan's reading, reused rather than re-read: the guard's
@@ -257,7 +373,7 @@ def send(pane_id, message, *, run=subprocess.run, read=read_pane, sleep=time.sle
     swallowed (measured 2026-09-15, 2026-09-20).
     """
     before = read(pane_id)
-    v = guard.verdict(before, subject_state=subject_state)
+    v = guard.verdict(before, subject_state=subject_state, blocked_reason=blocked_reason)
     if not v.startswith("wake"):
         return f"failed:guard-flipped {v}"
 
@@ -305,6 +421,7 @@ def main(argv=None):
 
     rows = plan(args.session, records=records, panes=panes, pid_ttys=pid_ttys,
                 read=read_pane, card=open_card, state=read_subject_state,
+                reason=memo_reason(),
                 self_session=os.environ.get("CLAUDE_CODE_SESSION_ID"),
                 self_pane=os.environ.get("WEZTERM_PANE"))
 
@@ -313,7 +430,8 @@ def main(argv=None):
         if row["verdict"] and row["verdict"].startswith("wake"):
             if args.send:
                 row["outcome"] = send(row["pane"], args.message,
-                                      subject_state=row.get("subject_state"))
+                                      subject_state=row.get("subject_state"),
+                                      blocked_reason=row.get("blocked_reason"))
                 if row["outcome"] != "delivered":
                     rc = max(rc, 1)
             else:
