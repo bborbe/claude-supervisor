@@ -334,6 +334,19 @@ class TestStuckOrder(Case):
                          ["prod-gate", "closest", "oldest", "blocked-most"])
 
 
+class TestRowShape(Case):
+    """SC1's three rows are built from this block -- pin the fields they read."""
+
+    def test_the_block_carries_the_fields_the_manager_rows_are_built_from(self):
+        self.tick(at(1))
+        code, report, err = self.env.run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["verdict"], "PROGRESSING")
+        block = report["block"]
+        for field in ("⏱ Window", "Moved:", "Toward:", "Activity:"):
+            self.assertIn(field, block)
+
+
 class TestBusyNoMove(Case):
     def test_three_identical_polls_and_no_write_is_loop(self):
         for minute in (2, 6, 10):
