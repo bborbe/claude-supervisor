@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.375.1
 
 - fix: **the criterion gate reads the vault's three trace tokens, not just `— closes`, and no longer lets a mis-shaped bullet shadow the task row.** `scripts/criterion-gate.py` reported `— supports SC<n>` and `— no criterion: …` rows as `untraced`, so a live proof round (plugin 0.374.0) returned 27 `untraced` rows of which 23 already carried a trace — and its `untraced — run /unblock` advice would send the operator to re-annotate correctly-annotated rows. The verdict is now three-way: `open` (a `— closes` naming an unticked criterion), `supports` (`— supports` / `— no criterion` — traced, closes nothing, not opened, **not** untraced), and `untraced` (no trace token at all — the only one that warrants `/unblock`). The row matcher now requires a task row's text to **begin** with a wikilink, so a criterion-shaped or mis-shaped bullet can no longer be parsed before the real task row (3 such false matches measured). Change set: `scripts/criterion-gate.py`, `scripts/tests/test_criterion_gate.py` (2 new fixtures), `CHANGELOG.md`.
 
