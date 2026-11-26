@@ -72,7 +72,7 @@ Each shape closes on evidence a **named** producer creates; no shape closes on a
 
 **Why not a `(BLOCKING)` box.** A `(BLOCKING)` checkbox stays legitimate for a *conditional dependency the row's own executor resolves* — vault-cli's task-writing guidance on `blocked_by` endorses it there. It is wrong for **operator work**: the agent cannot tick it, the operator never sees it as work, and the row stalls. Operator work leaves the agent row as a card (§ 1) or a row (§ 2), and the agent row cites the result.
 
-**A bare `y` is not consent for a question it does not name.** A one-word affirmative answers only the prompt it was typed against. If the operator's `y` lands on a re-registration or any other prompt, it is not an answer to the open question, and no consumer — a manager, a watcher, a gate — may read it as one. Treat a bare `y` as consent only when it names, or is unambiguously the answer to, the question it closes.
+**A bare `y` is not consent for a question it does not name.** A one-word affirmative answers only the prompt it was typed against. If the operator's `y` lands on a re-registration or any other prompt, it is not an answer to the open question, and no consumer — a manager, a gate, or any other reader of the answer — may read it as one. Treat a bare `y` as consent only when it names, or is unambiguously the answer to, the question it closes.
 
 ## 7. What a manager may decide alone
 
