@@ -1021,39 +1021,19 @@ def read_live_spawned_workers(sid, registry_dir=None, heartbeat_dir=None):
     return live_spawned_workers(sid, ledger, live)
 
 
-def _own_session_id(entries):
-    """The registry entry that is THIS process's session — walk the pid ancestry.
+def _own_session_id():
+    """This session's own id, as the shell sees it (`CLAUDE_CODE_SESSION_ID`).
 
-    `CLAUDE_CODE_SESSION_ID` is what a shell sees; the registry keys on the claude
-    process's pid, and the two can diverge. Comparing `--self` against the env var alone
-    would silently never match when they do, which looks identical to "the feature does
-    not work", so resolve from the registry by walking up from this process to the entry
-    whose pid is an ancestor.
+    A Bash tool cannot spoof another session's env, so `--self` is safe keyed on it: only
+    the session whose own env id equals the target can exempt `busy-target`. A divergence
+    from the registry refuses **visibly** as `not-self` rather than silently never matching,
+    so a self-close that cannot verify says so instead of no-oping.
     """
-    by_pid = {}
-    for path, rec in entries or []:
-        try:
-            by_pid[int(os.path.basename(path).split(".", 1)[0])] = rec
-        except (ValueError, IndexError):
-            continue
-    pid = os.getpid()
-    seen = set()
-    while pid and pid not in seen:
-        seen.add(pid)
-        rec = by_pid.get(pid)
-        if rec is not None:
-            return (rec.get("sessionId") or rec.get("session_id") or "").strip() or None
-        try:
-            out = subprocess.check_output(
-                ["ps", "-o", "ppid=", "-p", str(pid)], text=True
-            ).strip()
-        except (subprocess.SubprocessError, FileNotFoundError, ValueError):
-            break
-        try:
-            pid = int(out)
-        except ValueError:
-            break
-    return None
+    return (
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or ""
+    ).strip() or None
 
 
 def main():
@@ -1137,7 +1117,7 @@ def main():
     # diverge) and exempt busy-target ONLY; every other guard below still runs and refuses.
     self_close = False
     if args.self:
-        own = _own_session_id(entries)
+        own = _own_session_id()
         if own is None or own != sid:
             return refuse(
                 "not-self",

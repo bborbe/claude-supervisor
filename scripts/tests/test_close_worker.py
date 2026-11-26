@@ -88,30 +88,17 @@ class TestLiveSpawnedWorkers(unittest.TestCase):
 
 
 class TestOwnSessionId(unittest.TestCase):
-    """`--self` resolves the caller's own session from the registry, not the env var."""
+    """`--self` keys on the shell's own session id (`CLAUDE_CODE_SESSION_ID`)."""
 
-    def test_resolves_this_processes_registry_entry(self):
-        entries = [("/r/4242.json", {"sessionId": "sess-abc"})]
-        with mock.patch.object(cw.os, "getpid", return_value=4242):
-            self.assertEqual(cw._own_session_id(entries), "sess-abc")
+    def test_reads_the_env_session_id(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-abc"}, clear=False):
+            self.assertEqual(cw._own_session_id(), "sess-abc")
 
-    def test_walks_up_to_an_ancestor(self):
-        entries = [("/r/500.json", {"sessionId": "sess-x"})]
-        chain = {"100": "50", "50": "500", "500": "1"}
-
-        def fake_ps(args, **kwargs):
-            return chain.get(args[args.index("-p") + 1], "")
-
-        with mock.patch.object(cw.os, "getpid", return_value=100), mock.patch.object(
-            cw.subprocess, "check_output", side_effect=fake_ps
+    def test_none_when_unset(self):
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_CODE_SESSION_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False
         ):
-            self.assertEqual(cw._own_session_id(entries), "sess-x")
-
-    def test_none_when_no_ancestor_matches(self):
-        with mock.patch.object(cw.os, "getpid", return_value=100), mock.patch.object(
-            cw.subprocess, "check_output", return_value=""
-        ):
-            self.assertIsNone(cw._own_session_id([]))
+            self.assertIsNone(cw._own_session_id())
 
 
 class TestFrontmatter(unittest.TestCase):
