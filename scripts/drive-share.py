@@ -367,6 +367,13 @@ def measure(
     for sid, entry in by_sid.items():
         if (entry.get("verdict") or "") != "unverifiable":
             continue
+        # Step 0's retained rows carry a NON-EMPTY `reprobe_verdict`; this round's fresh
+        # rows canonicalise to "". Presence alone is not the discriminator --
+        # `drive-ledger.py`'s `canonical()` emits the key on every entry -- so test the
+        # value. Counting the retained ones made the denominator track the ledger's size
+        # (1/281 -> 1/11 -> 0/280 across three consecutive rounds).
+        if (entry.get("reprobe_verdict") or "").strip():
+            continue
         key = (sid or "")[:8] or entry.get("name") or "?"
         row = detected.setdefault(
             key,
