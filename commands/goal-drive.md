@@ -83,6 +83,23 @@ that stale bucket.
 
 ⚠️ **A round assumes no context left over from the previous round.** State lives on disk (the tracked-set file, the snapshot, the verdicts cache); re-read what a step needs rather than carrying it forward.
 
+## The window — what moved, measured
+
+Every tick, after the readings (row 2) and before the sweep, take the measured window for every live worker and for the subject. One call per session, never one per box:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/progress-window.py \
+  --session "<worker session id>" --anchor "<that worker's task file>" [--coverage "<its coverage file>"] --json
+```
+
+Render, in this order:
+
+1. **One row per live worker** — `<sid8> · <verdict>[/<subtype>] · <open boxes> · <the box that moved>`. `PROGRESSING` means an A/B observation inside the window; a registry `busy <-> idle` flip is activity, never movement (`docs/session-progress.md` § The rule).
+2. **One subject row** — the closure boxes that moved across the tracked set, the tasks opened or closed, and the cards answered in this window.
+3. **One acts row per act this round took** — a nudge, spawn or reap, naming whether A/B movement on its targeted box followed. A nudge sent is not a nudge that worked. A round that took no act renders no acts row; it does not render an empty one.
+
+A by-hand round whose pre-dispatch gate exits 0 reports `IDLE subject` and drives — "nothing changed" is the finding the operator ran it for, not a reason to replay the stored table. The verdicts `BLOCKED-OPERATOR`, `WAITING-OK`, `WAITING-STALE` and the `DRIFT` subtype are read from the same block, never re-derived here.
+
 ## Arguments
 
 - **`$1` (optional — resolved from the session when omitted):** the **subject** — a goal name matching a page in `24 Goals/`, or a topic name matching a topic page in `23 Topics/` *(operator's vault; not shipped with this plugin)*. The branch is detected from whichever page resolves (step 1); this command never assumes one.
