@@ -81,6 +81,17 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 
 **Split:** rows 0, 2–3, 5, 7–10, 12, 15, 18, 20 run in `supervisor:fleet-round`; 1, 11, 13, 14, 17, 19 stay: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-dispatch.md`
 
+## The window — the stuck list, measured
+
+The sweep's classification says which session is in which class; the window says what moved. Read it for every stuck row, one call each:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/progress-window.py \
+  --session "<sid>" --anchor "<its task file>" --json
+```
+
+Render the stuck list with `progress-window.py`'s `drive_stuck_order(rows)` — production or irreversible gate first, then closest to closure, then sessions blocked, then minutes since last A/B. An ordered key, never a scalar. A `progressing` class needs A/B movement from this block; a registry `busy <-> idle` flip is activity, never movement.
+
 ## INLINE — the hard rules
 
 Full text and the `⚠️` clauses live in `steps/rules.md`.

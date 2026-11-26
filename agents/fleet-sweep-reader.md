@@ -212,6 +212,15 @@ do not read a slow round as a stuck one.
 ```text
 sessions=<N> · snapshot=written|skipped|UNKNOWN · payload=<path>
 progressing=<n> · stalled=<n> · parked=<n> · parked-on-watcher=<n> · waiting-on-human=<n> · held=<n> · stood-down=<n> · lapsed=<n> · finished=<n> · unclassified=<n>
+
+⚠️ **`progressing` needs A/B movement from the window, not a status change.** For every row the table classifies as `progressing`, take the measured window once:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/progress-window.py \
+  --session "<sid>" --anchor "<its task file>" --json
+```
+
+`PROGRESSING` in that block means an A/B observation inside the window. A registry `busy <-> idle` flip is activity and never movement, so a flip with no artifact stays out of `progressing` — render it in the class its own signal names (`parked`, `waiting-on-human`, `stalled`). The block also carries `BLOCKED-OPERATOR`, `WAITING-OK`, `WAITING-STALE` and the `DRIFT` subtype; read them, never re-derive them. The stuck list's order comes from the same script's `drive_stuck_order(rows)`.
 pages=<bucket>=<n> · <bucket>=<n> …    — or: UNKNOWN (read failed)
 blocked=<n> · closers=<n> · orphan=<n> · reap=<n> · collision=<n> · unmanaged=<n> · context70=<n> · ledger=<n> · no-card=<n> · routing=<n>
 ```
