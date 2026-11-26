@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.371.0
 
 - feat: **`close-worker.py --self` lets a session close itself past `busy-target`.** A manager that has decided it is done must close its own session, but `busy-target` fires because it is mid-round. `--self` exempts `busy-target` **only**, and only when the target id equals this session's own `CLAUDE_CODE_SESSION_ID` (a divergence from the registry refuses visibly as `not-self`, never silently); every other guard (`live-workers`, `liveness-unknown`, `gate-held`, `dirty-worktree`, `task-terminal`, `task-unresolved`) still runs, and a self-close prints a `self-close` token. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
 
