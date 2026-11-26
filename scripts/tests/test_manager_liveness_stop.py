@@ -44,10 +44,12 @@ class TestStopGuard(unittest.TestCase):
         self.assertEqual(rc, 1)
         wa.assert_not_called()
 
-    def test_an_unreadable_ledger_refuses(self):
+    def test_an_unreadable_ledger_still_stands_down(self):
+        # The marker is load-bearing (it stops the keep-alive restarting the subject), so
+        # an unreadable ledger writes it rather than skipping it.
         rc, wa = self._stop(None)
-        self.assertEqual(rc, 1)
-        wa.assert_not_called()
+        self.assertEqual(rc, 0)
+        wa.assert_called()
 
     def test_a_dead_worker_still_stands_down(self):
         rc, wa = self._stop([])

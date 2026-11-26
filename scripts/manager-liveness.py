@@ -1449,14 +1449,8 @@ def stop(subject: str, branch: str) -> int:
     caller = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
     if caller:
         children = _close_worker.read_live_spawned_workers(caller)
-        if children is None:
-            print(
-                f"refused: liveness-unknown — {caller}'s live workers cannot be counted; "
-                "not standing down on no evidence",
-                file=sys.stderr,
-            )
-            return 1
         if children:
+            # Positive evidence of live workers: refuse. The manager must close them first.
             print(
                 f"refused: live-workers {', '.join(c[:8] for c in children)} — "
                 f"{caller} still has {len(children)} live worker(s); a stand-down would "
@@ -1464,6 +1458,15 @@ def stop(subject: str, branch: str) -> int:
                 file=sys.stderr,
             )
             return 1
+        if children is None:
+            # Liveness unknown: the marker is LOAD-BEARING — it is what stops the keep-alive
+            # restarting the subject — so write it and warn rather than skip it. Refusing
+            # here would reintroduce the uncapped restart loop the marker exists to prevent.
+            print(
+                f"warning: liveness-unknown — {caller}'s live workers could not be counted; "
+                "writing the stand-down marker unverified",
+                file=sys.stderr,
+            )
     s = slug(subject, branch)
     write_atomic(path(s, "stopped"), time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
     # The epoch an arm consumes to start a fresh cadence sample. Written here rather
