@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.370.6
 
 - fix: **`/supervisor:stop` refuses to stand a manager down while it still has live spawned workers.** Same defect as the close guard (#1105): a headless worker's permission prompts park with the session that spawned it, so standing that manager down while a worker is live leaves the worker with no answer path. `manager-liveness.py --stop` now joins the caller session's spawn ledger against liveness (reusing `close-worker.py`'s `read_live_spawned_workers`) and refuses with `live-workers` (naming the ids) on positive evidence of live workers. An unreadable ledger writes the marker with a warning rather than skipping it, because the marker is load-bearing — it stops the keep-alive restarting the subject, so refusing here would reintroduce the uncapped restart loop. A caller with no session id (a script or a test) skips the guard. Change set: `scripts/manager-liveness.py`, `scripts/tests/test_manager_liveness_stop.py`, `CHANGELOG.md`.
 
