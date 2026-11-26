@@ -933,6 +933,27 @@ def blocked_state(text):
     return None
 
 
+def drive_stuck_order(rows):
+    """The fleet's stuck list, in the spec's order (`docs/session-progress.md` § Manager and fleet views).
+
+    Production or irreversible gate first, then closest to closure (fewest open boxes),
+    then the number of sessions it blocks (most first), then minutes since its last A/B
+    (longest first). An ordered key, never a scalar: a weighted "stuck score" is not
+    explainable to the operator who has to act on it.
+
+    `rows` carry `gate_class`, `open_boxes`, `blocks` and `minutes_since_ab`; a missing
+    field sorts last on its own key rather than being invented.
+    """
+    def rank(row):
+        return (
+            0 if str(row.get("gate_class") or "").upper() in ("D", "E") else 1,
+            row.get("open_boxes") if isinstance(row.get("open_boxes"), int) else 10 ** 6,
+            -(row.get("blocks") or 0),
+            -(row.get("minutes_since_ab") or 0),
+        )
+    return sorted(rows, key=rank)
+
+
 def local_hm(stamp):
     return parse_ts(stamp).astimezone().strftime("%H:%M")
 

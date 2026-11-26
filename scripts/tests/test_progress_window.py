@@ -316,6 +316,24 @@ class TestBlockedOperator(Case):
         self.assertNotEqual(report["verdict"], "BLOCKED-OPERATOR")
 
 
+class TestStuckOrder(Case):
+    """The stuck list is an ordered key, not a score -- four rows, exact order."""
+
+    def test_the_sort_puts_the_prod_gate_first_then_closest_to_closure(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pw", SCRIPT)
+        pw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pw)
+        rows = [
+            {"name": "blocked-most", "gate_class": "C", "open_boxes": 2, "blocks": 5, "minutes_since_ab": 90},
+            {"name": "prod-gate", "gate_class": "D", "open_boxes": 4, "blocks": 0, "minutes_since_ab": 10},
+            {"name": "closest", "gate_class": "C", "open_boxes": 1, "blocks": 0, "minutes_since_ab": 30},
+            {"name": "oldest", "gate_class": "C", "open_boxes": 2, "blocks": 5, "minutes_since_ab": 120},
+        ]
+        self.assertEqual([r["name"] for r in pw.drive_stuck_order(rows)],
+                         ["prod-gate", "closest", "oldest", "blocked-most"])
+
+
 class TestBusyNoMove(Case):
     def test_three_identical_polls_and_no_write_is_loop(self):
         for minute in (2, 6, 10):
