@@ -126,6 +126,24 @@ TOPIC_DIRS = ("23 Topics",)
 # goal is a parked page whose holder is still its manager, not a finished one.
 PAGE_TERMINAL = {"completed", "aborted"}
 
+# The two arms of "this task is parked on an operator gate".
+#
+# Arm (i) is the marker the vault's own convention writes on an open task line, so it is
+# the primary arm. Arm (ii) is a free-text fallback and is best-effort by design: a worker
+# that words its hold differently slips past it. That asymmetry is deliberate — a marker
+# arm that fires on prose would refuse ordinary closes, while a missed fallback costs only
+# the specific message below and falls back to the generic `task-not-terminal`.
+PRODUCTION_TOUCHING_MARKER = "⚠️ production-touching"
+HELD_AWAITING_PHRASES = (
+    "held for the operator's explicit go-ahead",
+    "held for the operator",
+    "waiting on the operator",
+)
+
+# A card id as the vault writes it — a 32-char lowercase hex token, e.g.
+# "on card `beb1c931e202057fe343f841ff2ff9a4`".
+CARD_ID_RE = re.compile(r"\b[0-9a-f]{32}\b")
+
 # Where the vaults live. `SUPERVISOR_VAULTS_ROOT` first for the same reason the registry
 # and the load path carry an override: a drill or a test must be able to point the task
 # lookup at a tree it controls, and a committed script never hardcodes a home path.
@@ -873,6 +891,94 @@ def _defer_expired(value, today):
     return parsed is not None and parsed < defer_date.as_now(today)
 
 
+def _body_without_frontmatter(path):
+    """The page's markdown body, or `None` when it cannot be read.
+
+    The gate lines live in the body; a frontmatter key that happens to contain the marker
+    text is not a declared gate.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            return text[end + 4 :]
+    return text
+
+
+def last_progress_line(body):
+    """The last non-empty line of the `# Progress` section, or `None`.
+
+    The same value `sweepgate.ProgressTail` computes on the wrapper side: the stall
+    escalation quotes it on the card, and this guard reads it to recognise a declared
+    wait, so the two sides agree on what "what the row last said" means.
+    """
+    lines = body.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == "# Progress":
+            start = index + 1
+            break
+    if start is None:
+        return None
+    tail = None
+    for line in lines[start:]:
+        if line.startswith("# "):
+            break
+        if line.strip():
+            tail = line.strip()
+    return tail
+
+
+def gate_declared(body):
+    """Whether the task declares a production-touching / operator-only gate."""
+    for line in body.splitlines():
+        if line.startswith("- [ ] ") and PRODUCTION_TOUCHING_MARKER in line:
+            return True
+    tail = last_progress_line(body)
+    if tail is None:
+        return False
+    lowered = tail.lower()
+    return any(phrase in lowered for phrase in HELD_AWAITING_PHRASES)
+
+
+def card_recorded(body, fm):
+    """Whether the task records an attention card id, by either convention."""
+    if (fm.get("card_id") or "").strip():
+        return True
+    tail = last_progress_line(body)
+    return bool(tail and CARD_ID_RE.search(tail))
+
+
+def uncarded_gate(path, fm):
+    """`(refusal, detail)` when the task sits on an operator gate with nothing recorded.
+
+    This is the 2026-11-26 shape: a headless worker reached a production-touching step,
+    stopped, and ended without posting a card or setting a `defer_date`. The generic
+    `task-not-terminal` refusal already blocked the close, but its message names only
+    "a terminal status or a future defer_date" — so the worker could not tell that the
+    thing missing was the card, and the row sat invisible for ~25 h.
+
+    Returning a distinct token is the whole point: the caller branches on the first line of
+    stdout, and a worker reading `gate-uncarded` knows to post the card rather than to
+    finish or defer a task it deliberately stopped.
+    """
+    body = _body_without_frontmatter(path)
+    if body is None or not gate_declared(body):
+        return None
+    if card_recorded(body, fm):
+        return None
+    return (
+        "gate-uncarded",
+        f"{os.path.basename(path)} sits on a production-touching gate with no attention "
+        f"card recorded; a close needs a card id (a 32-hex token in the last # Progress "
+        f"line, or a `card_id:` frontmatter key) or a future defer_date",
+    )
+
+
 def task_verdict(task, today):
     """`(refusal, detail)` when the task does not permit a close, else `None`."""
     if task is None:
@@ -904,6 +1010,13 @@ def task_verdict(task, today):
             f"neither deferred nor running. A close needs a terminal status "
             f"({'/'.join(sorted(TERMINAL))}), a re-defer to a future date, or a hold with a reason",
         )
+    # The more specific refusal wins over the generic one: a task parked on an operator
+    # gate needs a card, not a terminal status, and saying so is the difference between a
+    # worker that posts one and a worker that reads "finish or defer" about work it
+    # deliberately stopped.
+    gate = uncarded_gate(path, fm)
+    if gate is not None:
+        return gate
     return (
         "task-not-terminal",
         f"{os.path.basename(path)} is status {status or '(none)'!r} with "
