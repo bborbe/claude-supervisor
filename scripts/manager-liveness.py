@@ -1441,6 +1441,29 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
 
 
 def stop(subject: str, branch: str) -> int:
+    # Refuse to stand a manager down while it still has live spawned workers: their
+    # permission prompts park with it, and only it can release them. The join is the same
+    # one close-worker's close guard uses (ledger + registry ∪ heartbeat); an unreadable
+    # source refuses rather than standing down on no evidence. A caller with no session id
+    # (a script or a test) skips the guard — there is no manager to protect.
+    caller = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    if caller:
+        children = _close_worker.read_live_spawned_workers(caller)
+        if children is None:
+            print(
+                f"refused: liveness-unknown — {caller}'s live workers cannot be counted; "
+                "not standing down on no evidence",
+                file=sys.stderr,
+            )
+            return 1
+        if children:
+            print(
+                f"refused: live-workers {', '.join(c[:8] for c in children)} — "
+                f"{caller} still has {len(children)} live worker(s); a stand-down would "
+                "leave them without an answer path",
+                file=sys.stderr,
+            )
+            return 1
     s = slug(subject, branch)
     write_atomic(path(s, "stopped"), time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
     # The epoch an arm consumes to start a fresh cadence sample. Written here rather
