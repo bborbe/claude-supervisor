@@ -62,6 +62,7 @@ def entry(sid, **over):
         "nudge": "none",
         "suppression": "none",
         "task_file": "",
+        "reprobe_verdict": "",
         "unverifiable_streak": 0,
         "unverifiable_round": "",
         "unverifiable_action": "",
@@ -207,9 +208,11 @@ class TestShare(Fixture):
         self.assertTrue(joined[0]["verified"], "the 2-round pane read counts as an action")
 
     def test_a_retained_unverifiable_row_does_not_join_the_denominator(self):
-        """Step 0's retained rows carry `reprobe_verdict`; this round's fresh rows do not.
+        """Step 0's retained rows carry a non-empty `reprobe_verdict`; fresh rows do not.
 
-        Counting the retained ones made the denominator track the ledger's size
+        The key is present on BOTH — `drive-ledger.py`'s `canonical()` emits it on every
+        entry — so the discriminator is the value, not the key. Counting the retained
+        ones made the denominator track the ledger's size
         (1/281 -> 1/11 -> 0/280 across three consecutive rounds).
         """
         rows = self.measure(
@@ -224,6 +227,15 @@ class TestShare(Fixture):
         )
         self.assertEqual(len(rows), 3, "three digest rows, no retained row joins")
         self.assertEqual([row for row in rows if row["sid"] == "eeeeeeee"], [])
+
+    def test_a_fresh_unverifiable_row_with_an_empty_reprobe_verdict_still_joins(self):
+        """The canonical fresh shape: the key is present and empty, and it counts."""
+        rows = self.measure(
+            [entry("ffffffff", verdict="unverifiable", reprobe_verdict="")]
+        )
+        joined = [row for row in rows if row["sid"] == "ffffffff"]
+        self.assertEqual(len(joined), 1, "an empty reprobe_verdict is a fresh row")
+        self.assertEqual(joined[0]["class"], "unverifiable")
 
 
 class TestRealDigestFormat(unittest.TestCase):
