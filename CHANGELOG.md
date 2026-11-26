@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.370.3
 
 - fix: **the drive leg carries only the rows it can still nudge, and `share` counts this round's rows.** `retained_entries()` returned every ledger entry whose verdict was `blocked`/`unverifiable` — 737 of 2850 on 2026-11-26, 410 of them with no `task_file` (unprobeable by construction) and only 19 with a live session among the 323 that have one — so the round's `N candidates` header tracked the ledger's total size rather than the round's work. It now admits a row only when it has a `task_file` AND `session-liveness.py --check` returns LIVE (ABSENT and UNKNOWN both drop, because neither licenses a nudge); the ledger itself is untouched, `drive-ledger.py` staying its one writer. The second half: `drive-share.py measure()` admitted every `unverifiable` entry in the merged payload, including step 0's retained rows, so `share` swung `1/281` → `1/11` → `0/280` across three consecutive rounds; it now skips entries carrying a **non-empty** `reprobe_verdict` (a fresh row canonicalises to `""`, and `canonical()` emits the key on every entry). Change set: `scripts/drive-retained.py`, `scripts/drive-share.py`, `scripts/tests/test_drive_retained.py`, `scripts/tests/test_drive_share.py`, `CHANGELOG.md`.
 
