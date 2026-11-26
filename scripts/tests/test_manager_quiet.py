@@ -87,6 +87,10 @@ class Base(unittest.TestCase):
         os.makedirs(self.state)
         self.write("24 Goals/AGoal.md", GOAL)
         self.m = load(self.state)
+        # The round-tail reads THIS session's live workers; make it hermetic (None ->
+        # stood-down, the pre-self-close behaviour) so these tests never hit the real
+        # ledger/registry the way a live manager would.
+        self.m._live_workers_of_this_session = lambda: None
 
     def write(self, rel, text):
         with open(os.path.join(self.vault, rel), "w", encoding="utf-8") as fh:
