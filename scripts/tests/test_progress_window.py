@@ -68,7 +68,8 @@ class Env:
         self.projects = root / "projects"
         self.sessions = root / "sessions"
         self.state = root / "state"
-        for d in (self.projects / "proj", self.sessions, self.state):
+        self.attention = root / "attention"
+        for d in (self.projects / "proj", self.sessions, self.state, self.attention):
             d.mkdir(parents=True)
         self.vault = self.repo("vault")
         (self.vault / "25 Tasks").mkdir()
@@ -146,6 +147,24 @@ class Env:
         self.records.append({"type": "assistant", "timestamp": iso(when), "message": {
             "role": "assistant", "content": [{"type": "text", "text": text}]}})
 
+    def wait(self, ends, when, session=SID, began=None):
+        """A declared wait: a `Stop` record whose closer panel carries `⏰ Ends:`.
+
+        `began` writes the FIRST `Stop` of the run naming the same observable, so `ts`
+        (when the wait started) and `last_ts` (its newest render) differ -- the shape a
+        re-parked wait has, and the one the 2x rule measures from.
+        """
+        records = []
+        if began is not None:
+            records.append({"event": "Stop", "ts": began.timestamp(),
+                            "detail": "panel\n⏰ Ends: " + ends})
+        records.append({"event": "Stop", "ts": when.timestamp(),
+                        "detail": "panel\n⏰ Ends: " + ends})
+        path = self.attention / (session + ".events.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+
     def registered(self, started, status="busy", updated=None):
         stamp = lambda d: int(d.timestamp() * 1000)
         (self.sessions / "4242.json").write_text(json.dumps({
@@ -180,7 +199,8 @@ class Env:
         if coverage is not None:
             args += ["--coverage", str(coverage)]
         env = dict(os.environ, SUPERVISOR_PROJECTS_DIR=str(self.projects),
-                   SUPERVISOR_SESSIONS_DIR=str(self.sessions), SUPERVISOR_STATE_DIR=str(self.state))
+                   SUPERVISOR_SESSIONS_DIR=str(self.sessions), SUPERVISOR_STATE_DIR=str(self.state),
+                   ATTENTION_STATE_DIR=str(self.attention))
         proc = subprocess.run([sys.executable, str(SCRIPT), *args, *extra],
                               capture_output=True, text=True, env=env)
         report = json.loads(proc.stdout) if proc.stdout.strip() else None
@@ -199,6 +219,43 @@ class Case(unittest.TestCase):
         code, report, err = result
         self.assertEqual(code, 0, err)
         return report
+
+
+class TestWaiting(Case):
+    """The two waiting verdicts, and that they outrank IDLE but never a Moved window.
+
+    Before this class a waiting session read `BUSY-NO-MOVE` (or `IDLE`), which takes the
+    full drive at a worker that is correctly parked -- the defect the waiting verdicts
+    exist to remove (`docs/session-progress.md` § Verdicts rows 6-7).
+    """
+
+    def test_a_declared_wait_is_waiting_ok_not_idle(self):
+        self.env.wait("CI run 42 finishes (GitHub Actions)", when=SINCE)
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "WAITING-OK")
+        self.assertEqual(report["wait"]["mechanism"], "external")
+
+    def test_an_expired_wait_is_waiting_stale(self):
+        # No clock in the slot and no re-render for over an hour: `declared-wait.py`
+        # reads it `expired`, so the window must not call it BUSY-NO-MOVE either.
+        self.env.wait("CI finishes (no date named)", when=SINCE - datetime.timedelta(hours=2))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "WAITING-STALE")
+
+    def test_a_wait_past_twice_its_expected_duration_is_stale(self):
+        # Began 10:45, named 10:55 (10 min expected), re-rendered at 11:45 -- the reader
+        # still says `declared` (a fresh render), and 60 min elapsed is 6x expected.
+        self.env.wait("CI run 42 finishes by 2026-10-18T10:55:00Z", when=SINCE,
+                      began=SINCE - datetime.timedelta(minutes=60))
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "WAITING-STALE")
+        self.assertEqual(report["wait"]["expected_s"], 600)
+
+    def test_a_wait_never_hides_a_moved_window(self):
+        self.tick(at(1))
+        self.env.wait("CI finishes", when=SINCE)
+        report = self.ok(self.env.run())
+        self.assertEqual(report["verdict"], "PROGRESSING")
 
 
 class TestBusyNoMove(Case):

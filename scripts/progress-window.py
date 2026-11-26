@@ -47,6 +47,7 @@ import datetime
 import functools
 import glob
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -73,6 +74,9 @@ RUNNING_NO_HISTORY = 600
 #: BUSY-NO-MOVE thresholds -- starting values, calibrated from recorded runs.
 LOOP_MIN = 3
 READ_LOOP_MIN = 10
+
+#: A declared wait is OK until it passes 2x its own expected duration (spec § Verdicts).
+WAIT_SLACK = 2.0
 
 WRITE_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 ASSERTED_KINDS = {"pr", "test", "phase"}
@@ -722,6 +726,8 @@ def measure(args):
     started = parse_ts(registry.get("startedAt")) if registry and registry.get("startedAt") else first
     open_boxes = [k for k, v in end_boxes.items() if not v["checked"]]
 
+    wait = wait_state(args.session, now)
+
     subtype = None
     # A call in flight only shields the no-move verdicts: a productive session is
     # nearly always mid-call, so ranking it above a Moved entry hid PROGRESSING.
@@ -731,6 +737,10 @@ def measure(args):
         verdict = "PROGRESSING"
     elif pending and pending["age_s"] < pending["bound_s"]:
         verdict = "TOOL-RUNNING"
+    elif wait and wait["state"] == "WAITING-OK":
+        verdict = "WAITING-OK"
+    elif wait:
+        verdict = "WAITING-STALE"
     elif started is not None and started > until - ORIENTATION:
         verdict = "ORIENTING"
     elif not window:
@@ -763,7 +773,7 @@ def measure(args):
         "observations": obs, "moved": moved, "toward": toward,
         "activity": activity, "pending": pending,
         "session_started": iso(started) if started else None,
-        "claim": claim,
+        "claim": claim, "wait": wait,
     })
     report["block"] = render(report)
     return report
@@ -782,6 +792,53 @@ def classify_busy(groups, window, wrote):
     if not wrote and len(window) >= READ_LOOP_MIN:
         return "READ-LOOP"
     return None
+
+
+def _declared_wait():
+    """Import declared-wait.py -- the one `⏰ Ends:` reader (hyphenated filename)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "declared-wait.py")
+    spec = importlib.util.spec_from_file_location("declared_wait", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def wait_state(sid, now):
+    """The session's declared wait graded for the waiting verdicts, or None.
+
+    WAITING-OK while `declared-wait.py` reads the wait `declared` and it is inside 2x
+    its own expected duration -- the clock the slot names, measured from when the wait
+    began; WAITING-STALE once that read is `expired`, or the expected duration is
+    doubled. A failed read is None, never a verdict, on the same rule as every other
+    source. The reader is imported, not re-implemented: it is the one home for the
+    `⏰ Ends:` read (its own docstring names the consumers that would otherwise each
+    carry a copy).
+    """
+    try:
+        mod = _declared_wait()
+        record = mod.wait_record(sid, now=now.timestamp())
+    except Exception:
+        return None
+    if not record:
+        return None
+    state = "WAITING-OK" if record.get("verdict") == "declared" else "WAITING-STALE"
+    began = record.get("ts")
+    expected = None
+    try:
+        clock = mod._latest_clock(record.get("ends") or "")
+        if clock is not None and began is not None and clock > began:
+            expected = int(clock - began)
+            if state == "WAITING-OK" and (now.timestamp() - began) > WAIT_SLACK * expected:
+                state = "WAITING-STALE"
+    except Exception:
+        expected = None
+    return {
+        "state": state,
+        "mechanism": record.get("mechanism"),
+        "ends": record.get("ends"),
+        "expected_s": expected,
+        "began": None if began is None else iso(datetime.datetime.fromtimestamp(began, datetime.timezone.utc)),
+    }
 
 
 def local_hm(stamp):
@@ -809,6 +866,10 @@ def render(report):
     if act["top_repeat"]:
         activity += " · %d identical repeats (`%s`)" % (act["top_repeat"]["count"], act["top_repeat"]["label"][:60])
     lines.append("  Activity:  " + activity)
+    if report.get("wait"):
+        w = report["wait"]
+        eta = "" if w["expected_s"] is None else " · expected ~%d min" % max(1, w["expected_s"] // 60)
+        lines.append("  Waiting:   %s — %s%s" % (w["state"], (w["ends"] or "no trigger")[:80], eta))
     claim = report["claim"]
     shown = "none filed" if claim["input"] is None else "%s — %s" % (
         json.dumps(claim["input"], ensure_ascii=False) if not isinstance(claim["input"], str) else claim["input"],
