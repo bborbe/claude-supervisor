@@ -199,8 +199,9 @@ wrapper's flagged tick.** When the goal page is operator-flagged and eligible
 (`scripts/flag_provenance.py` `flag_admits()` **and** `scripts/flagged-rows.py` `eligible()`),
 the tick emits `open-manager` for it and opens or resumes the goal's manager, so the census
 reports `wrapper flagged tick` and the row is kept. An unflagged or agent-flagged goal has no
-such resumer and stays unkept; a `cannot-tell` declaring topic is never handed on — that is the
-second-writer guard.
+such resumer and stays unkept; a `cannot-tell` declaring topic, and a declaring topic whose
+session is live, are never handed on — the first is the second-writer guard, the second is the
+tick's own `open-manager` condition.
 
 ⚠️ **The handover no longer strands the page — the `STOPPED` rule is what keeps the chain
 open.** § 1 selects on `scripts/owner.py`'s verdict through `scripts/topic-candidates.py` and
@@ -209,8 +210,9 @@ unless it still carries its `.stopped` marker, and a re-manageable topic gets a 
 manager. A `STOPPED` topic is still never re-opened,
 so for one of those the goals stay unkept — a round must not report them kept after a close on
 the assumption that it follows. The one exception is the flagged tick above: a goal the operator
-flagged is kept whenever its declaring topics are a definite `not-owner`, because the tick reads
-the goal page, never the topic's loop.
+flagged is kept when its declaring topics are a definite `not-owner` **and** none of them records
+a live session — the tick's own `open-manager` branch fires only when the subject has no live
+manager, so a live topic that merely stopped its round is not a resumer.
 
 ### Three invariants
 

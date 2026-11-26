@@ -19,6 +19,7 @@ stopped round runs no census.
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import importlib.util
 import json
@@ -394,7 +395,12 @@ def flagged_tick_keeps(page, world):
     if not world["legs"]["goal"]:
         return False
     block = page["fm"]
-    if FLAGGED.eligible(block, "goal", time.strftime("%Y-%m-%d")) is not None:
+    # ⚠️ The CURRENT INSTANT, not today's date. `flagged-rows.py` passes the same to the same
+    # gate, and its own comment says why: a date reads as local midnight, which would park a
+    # defer that already came due today for another full day. A bare date here would disagree
+    # with the tick about whether the row is due.
+    now = datetime.datetime.now().astimezone()
+    if FLAGGED.eligible(block, "goal", now) is not None:
         return False
     return FLAG.flag_admits(block, "goal")
 
@@ -416,9 +422,9 @@ def keepers_of(page, world):
         if claimants:
             return claimants, "", False
         # ⚠️ The fleet goal leg covers goals in NO topic, and only those
-        # (`keepalive-topicless-goals.md`) — a declared goal whose topic manager is stood
-        # down is kept by nobody, and calling it fleet-kept is the false green this exists
-        # to remove.
+        # (`keepalive-topicless-goals.md`) — calling a topic-declared goal fleet-kept is the
+        # false green this exists to remove. The one keeper that DOES reach it is the
+        # wrapper's flagged tick, handled below.
         if not verdicts:
             if not world["legs"]["goal"]:
                 return [], ("goal is in no topic and the fleet round has no goal keep-alive "
@@ -433,9 +439,16 @@ def keepers_of(page, world):
         # ⚠️ **One keeper does reach a topic-declared goal: the wrapper's flagged tick.**
         # The goal tier is merged into the topic tier (2026-11-24), so a goal page's own
         # `claude_session_id` is opened and re-opened by the flagged tick, not by a goal
-        # round. Only a DEFINITE `not-owner` set is handed on — a `cannot-tell` topic keeps
-        # the answer below, which is the second-writer guard.
-        if not any(v["cannot"] for _, v in verdicts) and flagged_tick_keeps(page, world):
+        # round. Two guards keep this from becoming a false green:
+        #   * a `cannot-tell` topic keeps the answer below — the second-writer guard;
+        #   * a declaring topic whose SESSION is live keeps it too, because the tick's own
+        #     `open-manager` branch fires only when the subject has no live manager
+        #     (`flagged-rows.py` `chain_live`). A LIVE topic with a `STOPPED` loop is a
+        #     definite `not-owner` here, but the tick would skip the goal — so reporting it
+        #     kept would name a resumer that does not act.
+        if (not any(v["cannot"] for _, v in verdicts)
+                and not any(v["live"] for _, v in verdicts)
+                and flagged_tick_keeps(page, world)):
             return ["wrapper flagged tick"], "", False
         states = ", ".join(f"{t} [{v['cadence']}]" for t, v in verdicts)
         return ([], f"declaring topic(s) have no live armed manager: {states}",

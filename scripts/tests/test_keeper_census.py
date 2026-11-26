@@ -269,6 +269,35 @@ class CensusTest(unittest.TestCase):
         self.assertIn("declaring topic(s) have no live armed manager", text)
         self.assertNotIn("wrapper flagged tick", text)
 
+    def test_a_live_topic_with_a_stopped_loop_keeps_the_goal_unkept(self):
+        """SC2 — the tick's `open-manager` fires only with no live manager, so a live topic
+        session that merely stopped its round is not a resumer."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "T", sid="topic-sid")
+        self.write_text("goal", "G", flagged("goal", "G", sid="g-sid", topics=["T"]))
+        self.alive("g-sid", "manager")
+        self.alive("topic-sid", "manager")
+        self.states[("topic", "T")] = "STOPPED"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(1, code, text)
+        self.assertIn("RED unkept", text)
+        self.assertNotIn("wrapper flagged tick", text)
+
+    def test_a_flagged_goal_outside_the_eligible_population_stays_unkept(self):
+        """SC2 — the tick's `eligible()` gate: `status: in_progress` only."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("topic", "T")
+        self.write_text("goal", "G",
+                        flagged("goal", "G", sid="g-sid", status="hold", topics=["T"]))
+        self.alive("g-sid", "manager")
+        self.states[("topic", "T")] = "UNARMED"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(1, code, text)
+        self.assertIn("RED unkept", text)
+        self.assertNotIn("wrapper flagged tick", text)
+
     def test_live_stopped_goal_manager_leaves_its_worker_unkept(self):
         """Fixture 2 — goal manager LIVE, loop STOPPED, worker with no other keeper."""
         self.write("topic", "T", sid="topic-sid", body="## Goals\n- [[G]]\n\n## Non-goals\n")
