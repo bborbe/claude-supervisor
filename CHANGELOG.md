@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`/supervisor:stop` refuses to stand a manager down while it still has live spawned workers.** Same defect as the close guard (#1105): a headless worker's permission prompts park with the session that spawned it, so standing that manager down while a worker is live leaves the worker with no answer path. `manager-liveness.py --stop` now joins the caller session's spawn ledger against liveness (reusing `close-worker.py`'s `read_live_spawned_workers`) and refuses with `live-workers` (naming the ids) on positive evidence of live workers. An unreadable ledger writes the marker with a warning rather than skipping it, because the marker is load-bearing — it stops the keep-alive restarting the subject, so refusing here would reintroduce the uncapped restart loop. A caller with no session id (a script or a test) skips the guard. Change set: `scripts/manager-liveness.py`, `scripts/tests/test_manager_liveness_stop.py`, `CHANGELOG.md`.
+
 ## v0.370.5
 
 - fix: **`close-worker.py` refuses to close a manager that still has live spawned workers.** A headless worker's permission prompts park with the session that spawned it, and only that session can release them; a manager closed while a worker was live left the worker with no answer path, and its gates timed out after 15 minutes. The guard joins the spawn ledger against liveness (registry ∪ heartbeat — the same sources `adopt-orphans.py` uses) and refuses with `live-workers`, naming the worker ids. Liveness is never read from a task's `claude_session_id`, which a dead worker keeps, so a set field cannot satisfy it. An unreadable ledger or registry refuses with `liveness-unknown` rather than closing on no evidence, and the guard sits after `gate-held` so a dead store still reports the existing fail-closed verdict. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
