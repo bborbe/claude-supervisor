@@ -148,11 +148,21 @@ class SubjectStateTest(unittest.TestCase):
             seen["cmd"] = cmd
             return types.SimpleNamespace(returncode=0, stdout="OK\t\n", stderr="")
 
-        wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", "private-personal"),
-                                run=run)
+        # Pin OBSIDIAN_DIR: CI sets it to a temp tree, so an ambient-dependent
+        # assertion passes locally and fails there.
+        old = os.environ.get("OBSIDIAN_DIR")
+        os.environ["OBSIDIAN_DIR"] = "/tmp/obs-root"
+        try:
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal", "private-personal"),
+                                    run=run)
+        finally:
+            if old is None:
+                os.environ.pop("OBSIDIAN_DIR", None)
+            else:
+                os.environ["OBSIDIAN_DIR"] = old
         self.assertIn("--vault", seen["cmd"])
         self.assertEqual(seen["cmd"][seen["cmd"].index("--vault") + 1],
-                         os.path.expanduser("~/Documents/Obsidian/private-personal"))
+                         "/tmp/obs-root/private-personal")
 
     def test_no_vault_omits_the_flag_rather_than_passing_a_dot(self):
         seen = {}
@@ -174,8 +184,15 @@ class VaultRootTest(unittest.TestCase):
     """
 
     def test_a_bare_name_resolves_under_the_obsidian_root(self):
-        self.assertEqual(wake.vault_root("private-personal"),
-                         os.path.expanduser("~/Documents/Obsidian/private-personal"))
+        # Pinned: CI sets OBSIDIAN_DIR to a temp tree, so the DEFAULT root is only
+        # observable with the variable removed.
+        old = os.environ.pop("OBSIDIAN_DIR", None)
+        try:
+            self.assertEqual(wake.vault_root("private-personal"),
+                             os.path.expanduser("~/Documents/Obsidian/private-personal"))
+        finally:
+            if old is not None:
+                os.environ["OBSIDIAN_DIR"] = old
 
     def test_an_absolute_path_is_used_as_is(self):
         self.assertEqual(wake.vault_root("/vaults/x"), "/vaults/x")
