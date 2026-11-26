@@ -87,6 +87,33 @@ class TestLiveSpawnedWorkers(unittest.TestCase):
             self.assertIsNone(cw.read_live_spawned_workers(SID))
 
 
+class TestOwnSessionId(unittest.TestCase):
+    """`--self` resolves the caller's own session from the registry, not the env var."""
+
+    def test_resolves_this_processes_registry_entry(self):
+        entries = [("/r/4242.json", {"sessionId": "sess-abc"})]
+        with mock.patch.object(cw.os, "getpid", return_value=4242):
+            self.assertEqual(cw._own_session_id(entries), "sess-abc")
+
+    def test_walks_up_to_an_ancestor(self):
+        entries = [("/r/500.json", {"sessionId": "sess-x"})]
+        chain = {"100": "50", "50": "500", "500": "1"}
+
+        def fake_ps(args, **kwargs):
+            return chain.get(args[args.index("-p") + 1], "")
+
+        with mock.patch.object(cw.os, "getpid", return_value=100), mock.patch.object(
+            cw.subprocess, "check_output", side_effect=fake_ps
+        ):
+            self.assertEqual(cw._own_session_id(entries), "sess-x")
+
+    def test_none_when_no_ancestor_matches(self):
+        with mock.patch.object(cw.os, "getpid", return_value=100), mock.patch.object(
+            cw.subprocess, "check_output", return_value=""
+        ):
+            self.assertIsNone(cw._own_session_id([]))
+
+
 class TestFrontmatter(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -662,6 +689,14 @@ class TestCliRefusals(unittest.TestCase):
         done = self._run("--dry-run")
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.splitlines()[0], "liveness-unknown")
+
+    def test_self_flag_with_a_foreign_target_refuses_not_self(self):
+        """`--self` only exempts a session closing itself; a foreign id refuses `not-self`."""
+        self._registry(pid=999999, entrypoint="sdk-cli")
+        self._task("t.md", **{"claude_session_id": SID, "status": "completed"})
+        done = self._run("--self", "--dry-run")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "not-self")
 
     def test_unknown_session_id(self):
         done = self._run()
