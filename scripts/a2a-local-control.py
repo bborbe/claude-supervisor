@@ -34,7 +34,7 @@ own exit code and its own sentence, because a caller must reconcile it against `
 retry blindly.
 
 ⚠️ THE TOKEN IS RESOLVED AT RUN TIME AND NEVER PRINTED. It comes from TeamVault under the key
-`mcp-start.py` uses for `SUPERVISOR_A2A_TOKEN_DOCKER` (the local controller's own control secret),
+`mcp-start.py` used to resolve for `SUPERVISOR_A2A_TOKEN_DOCKER` (the local controller's own control secret),
 or from `$A2A_AUTH_TOKEN` when the controller's wrapper has already exported it. Only the KEY NAME
 is ever named; the value reaches no stream, no error string and no line of this file. The `create`
 reply carries a per-worker token beside its record, so the printer redacts any token-shaped key
@@ -81,8 +81,8 @@ from pathlib import Path
 ENDPOINT_DEFAULT = "http://localhost:8092/a2a"
 ENDPOINT_ENV = "SUPERVISOR_A2A_URL_LOCAL"
 
-# The token: the wrapper's own exported name first, then the TeamVault key `mcp-start.py` resolves
-# the docker controller's secret from. ⚠️ A lookup key is a short identifier rather than a secret;
+# The token: the wrapper's own exported name first, then the TeamVault key the deleted
+# `mcp-start.py` resolved the docker controller's secret from. ⚠️ A lookup key is a short identifier rather than a secret;
 # the VALUE it names is never logged, printed or embedded anywhere in this file.
 TOKEN_ENV = "A2A_AUTH_TOKEN"
 TOKEN_KEY = "pLv8Mw"

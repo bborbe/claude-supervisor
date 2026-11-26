@@ -34,7 +34,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 **Tokens, per verdict** — any other is refused at the write, which lists the accepted set:
 
-- **`resume`** — `/supervisor:open --goal`, whose resume path (Step 2B item 3 → Step 3) prints labels, not tokens: `⌛ waiting-approval` → `waiting-approval`; `--list --json` exited non-zero ("cannot tell") → `cannot-tell`; `start-rate.mjs` exit 1 → `start-rate`; `resolve-launcher.py` non-zero → `launcher-refused`.
+- **`resume`** — `/supervisor:open --goal`, whose resume path (Step 2B item 3 → Step 3) prints labels, not tokens: `⌛ waiting-approval` → `waiting-approval`; `--list --json` exited non-zero ("cannot tell") → `cannot-tell`; `resolve-launcher.py` non-zero → `launcher-refused`. ⚠️ The `start-rate` label this line used to list is retired — the `scripts/start-rate.mjs` it named was deleted 2026-11-26.
 - **`restart`** — `/supervisor:restart` prints its token as the first line: `unknown-session-id`, `ambiguous-pid`, `headless-target`, `held-session`, `hold-unreadable`, `role-undetermined`, `stale-load-path`, `environment-fault`, and `restart-precheck.py`'s `dirty-worktree`.
 
 ⚠️ **One goal can owe more than one verdict in a round** — a `resume` that then lapsed to a `restart`, say. `--record-outcome` answers the newest open one; add `--verdict resume|restart` to pick explicitly.
