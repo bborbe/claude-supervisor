@@ -90,7 +90,8 @@ disagree about a row.
     manager-quiet.py --subject "<goal or topic>" --vault <path> --reset
 
 **Output contract** — one line on stdout, `<verdict>` TAB `<n_runnable>` TAB `<n_quiet>`
-TAB `<consecutive_quiet>`, where `<verdict>` is `armed`, `sleep-until` or `stood-down`.
+TAB `<consecutive_quiet>`, where `<verdict>` is `armed`, `sleep-until`, `self-close` or
+`stood-down`.
 `armed` means the caller must leave the loop alone. `stood-down` means
 `QUIET_TICKS_TO_STAND_DOWN` consecutive quiet ticks were reached and the caller may
 disarm. `sleep-until` means the same threshold was reached but **every** quiet row is
@@ -507,7 +508,44 @@ def verdict_for(seen: dict, count: int) -> str:
         if (seen.get("exempt") or {}).get("reason"):
             return "armed"
         return "sleep-until"
+    # Every tracked task is TERMINAL (done) — no runnable row, no quiet-but-blocked /
+    # unapproved / deferred row — and no worker of this session is live: the manager has
+    # nothing left to drive and no worker to answer for, so it closes ITSELF rather than
+    # standing down and lingering. A live worker keeps the loop ARMED (wait for it); an
+    # unreadable count keeps it ARMED too (fail toward armed, never toward a close).
+    if not seen["runnable"] and not seen["quiet"] and seen.get("terminal"):
+        live = seen.get("live_workers")
+        if live is None:
+            # Cannot confirm the worker count (no session id, or an unreadable ledger):
+            # keep the existing STAND-DOWN (a marker, the session stays alive), never a
+            # close — a close on an unconfirmed count is the one direction that orphans.
+            return "stood-down"
+        if live:
+            return "armed"
+        return "self-close"
     return "stood-down"
+
+
+def _live_workers_of_this_session():
+    """Live workers this session spawned, or None when the count is unreadable.
+
+    Reuses `close-worker.py`'s join (the same one the close guard uses) so the round-tail
+    and the guard cannot disagree about what "a live worker" is. `None` on an unreadable
+    ledger or a caller with no session id — the verdict treats both as ARMED, never a
+    close.
+    """
+    sid = (
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or ""
+    ).strip()
+    if not sid:
+        return None
+    try:
+        children = _load("close_worker", "close-worker.py").read_live_spawned_workers(sid)
+    except Exception:
+        return None
+    return None if children is None else len(children)
 
 
 def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> dict:
@@ -535,6 +573,7 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
         return {"error": str(exc)}
     s = slug(subject)
     seen = survey(vault, members, today_key)
+    seen["live_workers"] = _live_workers_of_this_session()
     prior, prior_tick = read_quiet_state(s, state_dir)
     key = tick_key(s, state_dir)
     if seen["runnable"]:
@@ -605,6 +644,10 @@ def main(argv: list) -> int:
         # verdict come from one read of the tree — a step that recomputed the trigger
         # could name a different date than the one the stand-down was decided on.
         print(f"Stood down: zero runnable tasks; reopen on {result['trigger']}")
+    if result["verdict"] == "self-close":
+        # The wait-then-close arm: every task terminal and no live worker. The step closes
+        # this session with `close-worker.py --self` AFTER `manager-receipt.py --finish`.
+        print("Self-close: every task terminal, no live workers — close this session (close-worker.py --self)")
     if exempt.get("reason"):
         # LAST, never between the verdict and the action line: `commands/steps/round-quiet.md`
         # calls the second line the action line and tells the round to print it verbatim, so

@@ -39,3 +39,11 @@ When: end of every tick
    ⚠️ **The spend-per-change line is printed at the HEAD, not here** — `commands/steps/round-readings.md` step 1b, right after `--start` and before the sweep's snapshot. It measures the PREVIOUS round's window (`previous_round_started_at` → `round_started_at`); a same-instant window at this tail cannot see the round's own transcript, so printing it here reads `0` on every gated tick.
 
 9. **The tick's last write — a second liveness beat, after step 8.** Row 0a arms at the head only, so a long round arrives here `STALE`. Re-run row 0a's `--state` allow-list block, unchanged, **not restated here**: same `--subject` / `--branch` / `--interval` / `--vault`, never `--resume`, plus **`--beat tail`** — that marker keeps this beat out of `observed_period()`, which measures round-to-round. ⚠️ A liveness **RECORD**, not a wakeup arm (step 7 removed the only one the goal tier had). ⚠️ **Last, after step 8's check.** Rule: `round-liveness.md` § *A second beat at the tail*.
+
+10. **The self-close — the wait-then-close arm, after the round is recorded.** If this round's quiet check (`round-quiet.md`, step 2b) returned `self-close` — every declared task terminal and no worker of this session live — close this session **now**, after the receipt is checked (step 8) and the tail's liveness beat (step 9) are done, so no later round reads an open receipt:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/close-worker.py --self "$CLAUDE_CODE_SESSION_ID"
+   ```
+
+   ⚠️ **`--self` exempts `busy-target` only.** Obey any other guard refusal and do not close: `live-workers` (a worker came back live — stay armed and re-check next tick), `gate-held`, `dirty-worktree`, `task-terminal`, `task-unresolved`. A refusal means the round was wrong to think it was done, so the session stays open. A successful self-close prints a `self-close` token. **Never close without `--self`** — a plain close refuses `busy-target` on a live round. On a successful self-close the round ENDS and this session is gone (nothing to re-arm).
