@@ -380,6 +380,88 @@ class Receipt(unittest.TestCase):
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
         self.assertIn("skipped: needs-you", out)
 
+    # --- the window's floor is the previous round's end -------------------------
+    #
+    # Measured 2026-11-26 (goal manager session 1bce19d2): readings 11:37, sweep 11:41,
+    # `--start` 11:44, and `--check` named all three "not produced this round" though every
+    # step had run. The floor is the previous round's END, so the order in which a round
+    # writes its artifacts relative to its own `--start` call cannot decide the verdict.
+
+    def stage_previous_round(self, now, started_ago=300, ended_ago=100):
+        """Make the existing receipt a completed round that ended `ended_ago` seconds ago."""
+        p = self.m.path(self.m.slug(self.topic))
+        d = self.m.read_receipt(self.m.slug(self.topic))
+        d["round_started_at"] = now - started_ago
+        self.m.write_atomic(p, json.dumps(d) + "\n")
+        os.utime(p, (now - ended_ago, now - ended_ago))
+        return now - ended_ago
+
+    def test_an_artifact_written_before_start_but_after_the_previous_round_is_green(self):
+        # The measured timeline, replayed: round 1 ends at T1, round 2 writes its artifacts
+        # after T1 but BEFORE its own `--start` call, which runs last. Every step ran, so
+        # the round is green.
+        self.full_round()                               # round 1, complete
+        now = time.time()
+        self.stage_previous_round(now)                  # its receipt last written 100 s ago
+        arts = {"needs-you": self.artifact("ny2.txt", NEEDS_YOU_OK),
+                "sweep": self.artifact("sw2.json", SWEEP_OK),
+                "readings": self.artifact("rd2.json", READINGS_OK),
+                "drive": self.artifact("dv2.txt", DRIVE_OK)}
+        for p in arts.values():
+            os.utime(p, (now - 50, now - 50))           # written 50 s ago, before `--start`
+        self.start()                                    # round 2's head runs LAST
+        for step, p in arts.items():
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out, "")
+
+    def test_start_clears_the_fields_and_keeps_the_previous_artifact_out(self):
+        # `--start` still clears the fields, and the wider floor does not let a previous
+        # round's artifact back in: re-recording it after `--start` fails on the window.
+        self.start()
+        rd = self.artifact("readings-old.json", READINGS_OK)
+        self.record("readings", rd)
+        self.start()                                    # fields cleared; floor = old receipt
+        rc, out = self.check()
+        self.assertIn("skipped: readings — no artifact recorded", out)
+        self.record("readings", rd)                     # re-record the PREVIOUS round's file
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: readings — not produced this round", out)
+
+    def test_a_round_that_omits_readings_is_still_red(self):
+        # SC2a: a genuinely skipped step is still named, with the wider floor in place.
+        self.full_round()
+        now = time.time()
+        self.stage_previous_round(now)
+        self.start()
+        for step, p in (("needs-you", self.artifact("ny3.txt", NEEDS_YOU_OK)),
+                        ("sweep", self.artifact("sw3.json", SWEEP_OK)),
+                        ("drive", self.artifact("dv3.txt", DRIVE_OK))):
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: readings — no artifact recorded", out)
+
+    def test_an_artifact_predating_the_previous_round_is_still_red(self):
+        # SC2b: the file exists and carries the right shape, but it predates the previous
+        # round's start, so it is not this round's work.
+        self.full_round()
+        now = time.time()
+        self.stage_previous_round(now)
+        self.start()
+        for step, p in (("needs-you", self.artifact("ny4.txt", NEEDS_YOU_OK)),
+                        ("sweep", self.artifact("sw4.json", SWEEP_OK)),
+                        ("drive", self.artifact("dv4.txt", DRIVE_OK))):
+            self.record(step, p)
+        stale = self.artifact("rd4.json", READINGS_OK)
+        os.utime(stale, (now - 400, now - 400))         # predates the previous round's start
+        self.record("readings", stale)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: readings — not produced this round", out)
+
     def test_in_window_but_empty_files_are_flagged(self):
         # `touch` — the shortcut a mtime-only probe passes. Every field present,
         # every named file fresh, every named file EMPTY.
