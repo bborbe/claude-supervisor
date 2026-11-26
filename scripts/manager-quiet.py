@@ -510,7 +510,8 @@ def verdict_for(seen: dict, count: int) -> str:
     return "stood-down"
 
 
-def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> dict:
+def tick(subject: str, vault: str, today_key, state_dir: str | None = None,
+         record: bool = True) -> dict:
     """Record one tick and return the verdict. This is the whole rule.
 
     A runnable task resets the counter to 0 — the reset is what makes the count
@@ -520,6 +521,12 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
     **A tick is identified by `<slug>.cadence`'s mtime, not by the call.** A manager
     that reads its subject twice in one tick must not count two ticks: see the counter
     block below.
+
+    ⚠️ **`record=False` answers the same question WITHOUT writing**, reporting the STORED
+    count. A caller that is only reading — the wake's `read_blocked_reason` — must not
+    advance the stand-down counter: every wake tick would otherwise be an extra quiet tick
+    for every subject it looked at, and enough of them would stand a live manager down.
+    That is the silent-loss direction this module's docstring calls out.
     """
     pd = load_predispatch()
     bad_vault = pd.vault_root_error(vault)
@@ -550,7 +557,11 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
         count = prior
     else:
         count = prior + 1
-    write_quiet_state(s, count, key if key is not None else (prior_tick or 0), state_dir)
+    if record:
+        write_quiet_state(s, count, key if key is not None else (prior_tick or 0), state_dir)
+    else:
+        # A read-only caller reports the STORED count and writes nothing.
+        count = prior
     return {
         "subject": subject,
         "slug": s,
@@ -570,6 +581,9 @@ def main(argv: list) -> int:
     ap.add_argument("--vault", required=True)
     ap.add_argument("--today", help="YYYY-MM-DD or a full datetime; defaults to now")
     ap.add_argument("--state-dir", default=None)
+    ap.add_argument("--read-only", action="store_true",
+                    help="report the verdict without recording a tick or moving the "
+                         "counter — for callers that only read (the wake)")
     ap.add_argument("--reset", action="store_true", help="clear the counter and exit")
     a = ap.parse_args(argv)
 
@@ -586,7 +600,7 @@ def main(argv: list) -> int:
         # fail-toward-armed invariant. `next-focus.py` and `open-queue.py` refuse too.
         print(f"manager-quiet: REFUSED — bad --today: {a.today}", file=sys.stderr)
         return EXIT_UNREADABLE
-    result = tick(a.subject, a.vault, today_key, a.state_dir)
+    result = tick(a.subject, a.vault, today_key, a.state_dir, record=not a.read_only)
     if result.get("error"):
         print(result["error"], file=sys.stderr)
         return EXIT_UNREADABLE

@@ -221,6 +221,29 @@ class TestReset(Base):
         self.assertEqual(self.tick()["consecutive_quiet"], 1)
 
 
+class TestReadOnly(Base):
+    """`record=False` answers without writing — the wake's read must not be a tick.
+
+    ⚠️ Every ordinary `tick()` records and moves the counter, so a wake that classified a
+    subject would be an extra quiet tick for it; enough wakes would stand a live manager
+    down, which is the silent-loss direction this module's docstring calls out.
+    """
+
+    def test_a_read_only_call_reports_the_stored_count(self):
+        # No tasks: a quiet subject, so an ordinary tick moves the counter.
+        self.assertEqual(self.tick()["consecutive_quiet"], 1)
+        r = self.m.tick("AGoal", self.vault, TODAY, self.state, record=False)
+        self.assertEqual(r["consecutive_quiet"], 1, "the stored count, never an increment")
+        # The store is untouched, so the next real tick still moves 1 -> 2.
+        self.assertEqual(self.tick()["consecutive_quiet"], 2)
+
+    def test_a_read_only_call_writes_nothing(self):
+        path = os.path.join(self.state, "%s.quiet" % self.m.slug("AGoal"))
+        self.assertFalse(os.path.exists(path))
+        self.m.tick("AGoal", self.vault, TODAY, self.state, record=False)
+        self.assertFalse(os.path.exists(path), "a read must not create the quiet state")
+
+
 class TestQuietShapes(Base):
     """Each quiet shape is read from a field — none is inferred."""
 
