@@ -163,6 +163,18 @@ class GateDetectionTest(unittest.TestCase):
         body = "# Progress\n\n- last\n\n# Other\n\n- not this\n"
         self.assertEqual(cw.last_progress_line(body), "- last")
 
+    # Both heading levels are in use in the vault: a structured task writes `# Progress`,
+    # a page following the no-H1 rule writes `## Progress`. Matching only the first left
+    # the phrase arm permanently dark on the second — a fallback that never fires reads
+    # exactly like one that found nothing.
+    def test_h2_progress_heading_is_recognised(self):
+        body = "## Progress\n\n- first\n- last\n"
+        self.assertEqual(cw.last_progress_line(body), "- last")
+
+    def test_h2_progress_stops_at_the_next_h2(self):
+        body = "## Progress\n\n- last\n\n## Other\n\n- not this\n"
+        self.assertEqual(cw.last_progress_line(body), "- last")
+
     def test_absent_progress_section_is_none(self):
         self.assertIsNone(cw.last_progress_line("# Success Criteria\n\n- [ ] one\n"))
 
@@ -173,6 +185,31 @@ class GateDetectionTest(unittest.TestCase):
 
     def test_checked_box_is_not_a_declared_gate(self):
         self.assertFalse(cw.gate_declared("- [x] ⚠️ production-touching — done\n"))
+
+
+class LiveTaskRefusalsTest(unittest.TestCase):
+    """The shared token set, and the consumer that must read it rather than a literal."""
+
+    def test_both_live_task_tokens_are_in_the_set(self):
+        self.assertEqual(
+            set(cw.LIVE_TASK_REFUSALS), {"task-not-terminal", "gate-uncarded"}
+        )
+
+    def test_gate_uncarded_is_a_live_task_refusal(self):
+        # `reap-idle-headless.py` treats every token outside this set as
+        # `task-unresolved`; a gate-uncarded row that landed there would drop out of the
+        # reap verb's population and be misreported.
+        self.assertIn("gate-uncarded", cw.LIVE_TASK_REFUSALS)
+
+    def test_reap_reads_the_set_not_a_literal(self):
+        import re
+
+        source = os.path.join(_SCRIPTS, "reap-idle-headless.py")
+        with open(source, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("close_worker.LIVE_TASK_REFUSALS", text)
+        # A literal comparison here is the regression: it silently narrows the population.
+        self.assertNotRegex(text, re.escape('bad[0] != "task-not-terminal"'))
 
 
 if __name__ == "__main__":

@@ -144,6 +144,15 @@ HELD_AWAITING_PHRASES = (
 # "on card `beb1c931e202057fe343f841ff2ff9a4`".
 CARD_ID_RE = re.compile(r"\b[0-9a-f]{32}\b")
 
+# The refusals that mean "the task is alive, this session's work is not finished".
+#
+# ⚠️ One definition, every consumer. `reap-idle-headless.py` keys its whole population on
+# "the task gate said `task-not-terminal`", so adding a second live-task token without
+# widening that test silently reclassified every gated row as `task-unresolved` — the
+# exact regression this set exists to prevent. A new live-task refusal goes here, and no
+# consumer compares against a literal.
+LIVE_TASK_REFUSALS = frozenset({"task-not-terminal", "gate-uncarded"})
+
 # Where the vaults live. `SUPERVISOR_VAULTS_ROOT` first for the same reason the registry
 # and the load path carry an override: a drill or a test must be able to point the task
 # lookup at a tree it controls, and a committed script never hardcodes a home path.
@@ -919,14 +928,18 @@ def last_progress_line(body):
     lines = body.splitlines()
     start = None
     for index, line in enumerate(lines):
-        if line.strip() == "# Progress":
+        # Both heading levels are in use: a structured task writes `# Progress`, and a page
+        # that follows the vault's "no H1 title" rule writes `## Progress`. Matching only
+        # the first silently disabled the phrase arm on the second — a fallback that never
+        # fires reads exactly like a fallback that found nothing.
+        if line.strip() in ("# Progress", "## Progress"):
             start = index + 1
             break
     if start is None:
         return None
     tail = None
     for line in lines[start:]:
-        if line.startswith("# "):
+        if line.startswith("# ") or line.startswith("## "):
             break
         if line.strip():
             tail = line.strip()
