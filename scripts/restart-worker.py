@@ -352,11 +352,6 @@ def newest_load_path():
     return best, mtime
 
 
-# The supervisor MCP server's entry point, as the launch config names it. Matching on the
-# basename keeps this independent of which checkout a config points at.
-MCP_ENTRY = "mcp-start.py"
-
-
 def plugin_version(root):
     """The `version` in `<root>/.claude-plugin/plugin.json`, or `None` when unreadable.
 
@@ -377,44 +372,26 @@ def plugin_version(root):
 def mcp_source(argv):
     """`(source_root, source_version, installed_version)` for the supervisor MCP server.
 
-    A restart refreshes a session's MCP server only if the tree that server LAUNCHES from
-    is current. `~/.claude/mcp-<vault>.json` may point the `supervisor` server at a
-    workspace checkout (`~/Documents/workspaces/claude-supervisor/scripts/mcp-start.py`)
-    rather than the plugin cache, and a checkout lags the release until someone pulls it —
-    so a restart onto a stale checkout brings back the same server code and reads as a
-    no-op. Measured 2026-10-17: `spawn_agent` still lacked `mounts`/`secrets` after a
-    fresh process, because the launched checkout was behind.
+    ⚠️ **`source_root` is always `None` as of 2026-11-26, and that is now the true answer.**
+    This function used to find the supervisor's entry in the session's `--mcp-config` by
+    matching the basename `scripts/mcp-start.py`, then derive the checkout it launched
+    from — because a restart onto a stale checkout reloaded the same node server code and
+    read as a no-op (measured 2026-10-17: `spawn_agent` still lacked `mounts`/`secrets`
+    after a fresh process).
 
-    The source comes from the session's own `--mcp-config` argv; both versions are read
-    live — the checkout's `.claude-plugin/plugin.json` against the newest installed copy
-    under `LOAD_PATH_ROOT` — never hardcoded, so a printed version is evidence rather
-    than a claim. `source_root` is `None` when no config, no supervisor entry or no
-    readable entry point is found: an unknown source must never be reported as a
-    matching one, which is also why the warning is keyed on the two versions being
-    known AND equal.
+    That launcher no longer exists. The supervisor is served by the Go `claude-wrapper`
+    daemon over HTTP — `~/.claude/mcp-<vault>.json` carries `"type": "http"` and no
+    `command`/`args` — so no config launches the supervisor from a tree at all, and there
+    is no checkout whose freshness a restart could reload. The scan was deleted with the
+    launcher rather than left to match nothing.
+
+    The signature and the `installed_version` half are kept: callers still report the load
+    path they would resume from, and `describe_source` already renders a `None` root as
+    "MCP source: unknown", which is exactly right — an unknown source must never be
+    reported as a matching one.
     """
     load_path, _ = newest_load_path()
     installed = os.path.basename(load_path.rstrip(os.sep)) if load_path else None
-    for path in mcp_config_paths(argv):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        servers = data.get("mcpServers") if isinstance(data, dict) else None
-        if not isinstance(servers, dict):
-            continue
-        for config in servers.values():
-            if not isinstance(config, dict):
-                continue
-            tokens = [str(config.get("command") or "")]
-            tokens += [str(arg) for arg in (config.get("args") or [])]
-            for token in tokens:
-                if not token.endswith(MCP_ENTRY):
-                    continue
-                entry = os.path.abspath(os.path.expanduser(token))
-                root = os.path.dirname(os.path.dirname(entry))
-                return root, plugin_version(root), installed
     return None, None, installed
 
 
