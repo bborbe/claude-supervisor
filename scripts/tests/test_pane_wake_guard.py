@@ -171,6 +171,9 @@ class VerdictTest(unittest.TestCase):
     def test_stood_down_reason_skips(self):
         self.assertEqual(guard.verdict(IDLE, blocked_reason="stood-down"), "skip:blocked")
 
+    def test_self_close_reason_skips(self):
+        self.assertEqual(guard.verdict(IDLE, blocked_reason="self-close"), "skip:blocked")
+
     def test_operator_card_reason_still_wakes(self):
         # A card is answered in minutes; refusing here would suppress the one wake that
         # unblocks the subject.

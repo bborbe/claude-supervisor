@@ -22,7 +22,7 @@ Verdicts (one line on stdout):
   skip:no-composer         no `❯` prompt on screen, so idleness is unproven
   skip:machine-wait        the last turn declared a machine wait (`🟡 WAITING` / `⏰ Ends:`)
   skip:sleeping            the subject is date-gated asleep (`manager-liveness.py --state`)
-  skip:blocked             the subject's every open row is date-deferred, or it was stood down
+  skip:blocked             the subject's every open row is date-deferred, or it was stood down / self-closing
   skip:state-unreadable    a subject resolved but its state could not be read — fail closed
   error:<reason>           the pane could not be read
 
@@ -143,7 +143,7 @@ def verdict(text, allow_machine_wait=False, subject_state=None, blocked_reason=N
         # reason could be hiding a date-deferred subject, and a spurious wake types into a
         # pane whose session then closes it for good.
         return "skip:state-unreadable"
-    if blocked_reason and blocked_reason.startswith(("future-date:", "stood-down")):
+    if blocked_reason and blocked_reason.startswith(("future-date:", "stood-down", "self-close")):
         return "skip:blocked"
     if text is None:
         return "error:unreadable"

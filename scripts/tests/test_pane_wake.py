@@ -234,6 +234,14 @@ class BlockedReasonTest(unittest.TestCase):
             wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
             "stood-down")
 
+    def test_self_close_is_named(self):
+        # Every tracked row terminal, no live worker: nothing to drive, so a wake would
+        # be a false "you have open work".
+        run = self._run("self-close\t0\t0\t2\n")
+        self.assertEqual(
+            wake.read_blocked_reason("a", subject_of=lambda s: ("T", "goal", "v"), run=run),
+            "self-close")
+
     def test_armed_with_runnable_rows_has_no_reason(self):
         run = self._run("armed\t3\t2\t0\n")
         self.assertIsNone(

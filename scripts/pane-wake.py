@@ -219,7 +219,8 @@ def read_blocked_reason(session_id, *, subject_of=subject_of, run=subprocess.run
     """Why the session's subject is not moving — or None when it has runnable work.
 
     `future-date:<instant>` for a subject whose every open row is date-deferred,
-    `stood-down` for one deliberately disarmed, `guard.STATE_UNREADABLE` when a subject
+    `stood-down` for one deliberately disarmed, `self-close` for one whose every tracked
+    row is terminal with no live worker, `guard.STATE_UNREADABLE` when a subject
     RESOLVED but the reason could not be read, and `None` when there is work to do or no
     subject resolved (the screen verdict decides).
 
@@ -265,6 +266,11 @@ def read_blocked_reason(session_id, *, subject_of=subject_of, run=subprocess.run
         return guard.STATE_UNREADABLE
     if verdict == "stood-down":
         return "stood-down"
+    if verdict == "self-close":
+        # Every tracked row is terminal and no worker of this session is live: the manager
+        # has nothing left to drive and should close ITSELF. Waking it with "you are idle
+        # at the prompt with open work" is false, so it is a skip reason like `stood-down`.
+        return "self-close"
     return None
 
 

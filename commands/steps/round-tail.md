@@ -39,3 +39,11 @@ When: end of every tick
    ⚠️ **The spend-per-change line is printed at the HEAD, not here** — `commands/steps/round-readings.md` step 1b, right after `--start` and before the sweep's snapshot. It measures the PREVIOUS round's window (`previous_round_started_at` → `round_started_at`); a same-instant window at this tail cannot see the round's own transcript, so printing it here reads `0` on every gated tick.
 
 9. **The tick's last write — a second liveness beat, after step 8.** Row 0a arms at the head only, so a long round arrives here `STALE`. Re-run row 0a's `--state` allow-list block, unchanged, **not restated here**: same `--subject` / `--branch` / `--interval` / `--vault`, never `--resume`, plus **`--beat tail`** — that marker keeps this beat out of `observed_period()`, which measures round-to-round. ⚠️ A liveness **RECORD**, not a wakeup arm (step 7 removed the only one the goal tier had). ⚠️ **Last, after step 8's check.** Rule: `round-liveness.md` § *A second beat at the tail*.
+
+10. **The self-close — wait-then-close, after the round is recorded.** If this round's quiet check (`round-quiet.md`, step 2b) returned `self-close` (every task terminal, no live worker), close this session now — after step 8's receipt check and step 9's beat:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/close-worker.py --self "$CLAUDE_CODE_SESSION_ID"
+   ```
+
+   `--self` exempts `busy-target` only: obey any other refusal (`live-workers` — a worker returned live, stay armed; `gate-held`; `dirty-worktree`; `task-terminal`; `task-unresolved`) and keep the session. A successful close prints `self-close`; the round ends.
