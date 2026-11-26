@@ -198,6 +198,56 @@ class CriterionGateTest(unittest.TestCase):
         self.assertEqual(verdict(result, "Closes SC2")["verdict"], "open")
         self.assertEqual(result["to_abort"], [])
 
+    def test_supports_and_no_criterion_are_traced_not_untraced(self):
+        # A `— supports SCn` / `— no criterion: …` row HAS a trace: it must be `supports`,
+        # never `untraced` (SC3 reserves untraced for no trace at all — advising /unblock on
+        # a correctly-annotated row teaches operators to ignore the line).
+        body = """# Success Criteria
+
+- [ ] SC1: open
+
+# Definition of Done
+
+- [ ] DoD thing
+
+# Tasks
+
+- [ ] [[Support Row]] — supports SC1: contributes but closes nothing
+- [ ] [[None Row]] — no criterion: infra chore
+- [ ] [[Bare Row]]
+"""
+        result = decide({"goal": GOAL, "goal_text": body, "rows": [
+            {"task": "Support Row", "phase": "planning", "approved": True, "live": False},
+            {"task": "None Row", "phase": "planning", "approved": True, "live": False},
+            {"task": "Bare Row", "phase": "planning", "approved": True, "live": False},
+        ]})
+        self.assertEqual(verdict(result, "Support Row")["verdict"], "supports")
+        self.assertEqual(verdict(result, "None Row")["verdict"], "supports")
+        self.assertEqual(verdict(result, "Bare Row")["verdict"], "untraced")
+        self.assertEqual([u["task"] for u in result["untraced"]], ["Bare Row"])
+
+    def test_mis_shaped_bullet_does_not_shadow_the_task_row(self):
+        # A criterion-like or mis-shaped bullet carrying a link must not be parsed as a task
+        # row: only a checkbox bullet whose text BEGINS with a wikilink is a row.
+        body = """# Success Criteria
+
+- [ ] SC1: open
+
+# Definition of Done
+
+- [ ] DoD thing
+
+# Tasks
+
+- [ ] SC1 handled by [[Some Other]] — closes SC1: stray criterion-shaped bullet
+- [ ] [[Real Row]] — closes SC1: the actual task row
+"""
+        result = decide({"goal": GOAL, "goal_text": body, "rows": [
+            {"task": "Real Row", "phase": "planning", "approved": True, "live": False},
+        ]})
+        self.assertEqual(verdict(result, "Real Row")["verdict"], "open")
+        self.assertEqual(verdict(result, "Real Row")["criterion"], "SC1")
+
     def test_malformed_payload_exits_two(self):
         out = subprocess.run(
             [sys.executable, SCRIPT, "decide"],
