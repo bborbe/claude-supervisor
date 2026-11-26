@@ -41,11 +41,13 @@ TODAY = datetime.date(2026, 11, 26)
 SID = "cccccccc-3333-4333-8333-333333333333"
 CARD = "beb1c931e202057fe343f841ff2ff9a4"
 
-# The 2026-11-26 wording, verbatim from the row's own last Progress entry.
+# The 2026-11-26 wording, with the phrase the guard matches kept verbatim. The row's own
+# text named a machine-local workspace path; it is dropped here because the arm matches on
+# the phrase, not the path, and a local path in a shipped fixture is noise.
 REAL_WORDING = (
-    "Remaining: `make -C ~/Documents/workspaces/attention-controller launchd-reload`, "
-    "which restarts the controller and is production-touching, so it is held for the "
-    "operator's explicit go-ahead rather than run."
+    "Remaining: the launchd-reload step, which restarts the controller and is "
+    "production-touching, so it is held for the operator's explicit go-ahead "
+    "rather than run."
 )
 
 
