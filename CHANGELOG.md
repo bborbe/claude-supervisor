@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.375.2
 
 - docs: **a bare `y` is not consent for a question it does not name** — § 6 of `docs/attention-and-delegation.md` records that a one-word affirmative answers only the prompt it was typed against; a `y` landing on a re-registration is not an answer to the open question, and no consumer may read it as one.
 
