@@ -198,6 +198,26 @@ def resolve(task_path, root=None):
             "reason": "record present but no matching acked_revision"}
 
 
+def resolve_for_session(session_id, root=None):
+    """Resolve the decision state for the task owned by `session_id`.
+
+    The post path's entry point. A session with no resolvable task is
+    `unresolvable`, not `none`: the caller must refuse rather than post a card
+    it could not check (F1 — failure is refusal, never allow).
+    """
+    root = root or _DEFAULT_ROOT
+    try:
+        found = find_task_by_session(session_id, root)
+    except RuntimeError as err:
+        return {"status": STATUS_UNRESOLVABLE, "task": None, "record": None,
+                "reason": str(err)}
+    if not found:
+        return {"status": STATUS_UNRESOLVABLE, "task": None, "record": None,
+                "reason": f"no in-progress task for session {session_id}"}
+    path, _, _ = found
+    return resolve(path, root)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv or argv[0] != "resolve":
