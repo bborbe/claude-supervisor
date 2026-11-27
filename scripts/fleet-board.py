@@ -465,8 +465,14 @@ def _goals_section_links(text):
     return out
 
 
-def vault_index():
+def vault_index(roots=None):
     """Every vault read once: topic titles, goal titles, and the two link maps.
+
+    `roots` scopes the read to the named vault directories; `None` keeps the
+    board's fleet-wide behaviour. The scoped form exists for callers that must
+    answer about ONE vault (the manager resolver), because goal titles are not
+    namespaced across vaults and a fleet-wide index can resolve a same-titled
+    goal in the wrong vault.
 
     A missing `~/Documents/Obsidian` degrades to an empty index rather than
     aborting the board: the buckets and the coverage assertion do not depend on
@@ -475,7 +481,7 @@ def vault_index():
     topics, goals, task_titles, task_goals, task_managed_by = {}, {}, {}, {}, {}
     goal_pages = []  # (goal key, page text) deferred to the second pass
     topic_pages = []
-    for vault in _vault_roots():
+    for vault in (roots if roots is not None else _vault_roots()):
         for path in _pages(vault, TOPIC_SUBDIRS):
             topics[os.path.basename(path)[:-3].lower()] = os.path.basename(path)[:-3]
             topic_pages.append(path)
@@ -1066,6 +1072,38 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None, task_
             if found[1].lower() == subject.lower():
                 return sid
     return None
+
+
+def manager_for_goal(goal_title, index, registry, colours, slugs, task_titles):
+    """`(manager name, source)` for a live manager owning a goal, else `(None, None)`.
+
+    One rule, shared with the board: this calls `build_grouping` and its
+    `subjects` map rather than re-deriving a matcher, so the approval gate and
+    the board's manager classification cannot disagree. `source` is `"goal"` when a live
+    manager's subject IS the goal, `"topic"` when it is a topic that declares the
+    goal under `## Goals` (the normal answer since the goal tier merged into the
+    topic tier on 2026-11-24), and `None` when neither resolves.
+
+    A goal title that names no page resolves `(None, None)` — the caller must not
+    read that as "the fleet is unreadable"; unreadability is the registry read
+    returning `None` before this is called.
+    """
+    wanted = (goal_title or "").strip()
+    if not wanted:
+        return None, None
+    grouping = build_grouping(registry, index, colours, slugs, task_titles)
+    for sid, found in grouping.subjects.items():
+        if grouping.roles.get(sid) != ROLE_MANAGER or not found:
+            continue
+        if found[1].lower() == wanted.lower():
+            return registry[sid]["name"], "goal"
+    for topic in index.topics_of(wanted):
+        for sid, found in grouping.subjects.items():
+            if grouping.roles.get(sid) != ROLE_MANAGER or not found:
+                continue
+            if found[1].lower() == topic.lower():
+                return registry[sid]["name"], "topic"
+    return None, None
 
 
 def build_grouping(registry, index, colours, slugs, task_titles):
