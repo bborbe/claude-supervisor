@@ -87,7 +87,7 @@ FIELDS = (
 #: tool in flight and no declared wait. A verdict rather than a `nudge` value for the
 #: same reason as `closed` — the row leaves the candidate set, and a later round that
 #: finds the session gone should read a recorded outcome rather than an absence.
-VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed", "wrote-nothing", "stuck", "asleep-until", "unarmed")
+VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed", "wrote-nothing", "stuck", "asleep-until")
 #: Verdicts that carry a qualifier after a colon -- `asleep-until:<instant>` is one class
 #: with the reopen instant appended, the same shape `future-date:<instant>` already has on
 #: the wake side. Matched on the part before the colon, so the instant is recorded rather
