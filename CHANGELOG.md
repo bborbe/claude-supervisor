@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **an `allowlist`-tier gate can be settled inside the manager's `Monitor`, with no model turn.** `scripts/gate-answer-check.py` gains `--dry` — classify a card WITHOUT recording a `checked` ledger entry, which is the guard that keeps a pre-answer probe from booking and so starving the `manager`-tier cards the dispatched gate-answerer must answer — and `--by`, the provenance the store records, refused outside the `supervisor:` namespace so a manager never answers in the operator's name. `scripts/gate-preanswer.py` (new) reads `CLAUDE_CODE_SESSION_ID` from its own environment (never an argument), probes each `hst:` token with `--dry`, settles only rows reading `answerable` + `tier: allowlist` as `supervisor:gate-preanswer`, and re-emits every other token so the manager still dispatches the gate-answerer for the `manager` and `operator` tiers. A line it settles nothing on is re-emitted byte-identical, because the filter's `LIVENESS` heartbeat must not be rewritten. Change set: `scripts/gate-answer-check.py`, `scripts/gate-preanswer.py` (new), `scripts/tests/test_gate_answer_check.py`, `scripts/tests/test_gate_preanswer.py` (new), `CHANGELOG.md`.
+
 ## v0.375.2
 
 - docs: **a bare `y` is not consent for a question it does not name** — § 6 of `docs/attention-and-delegation.md` records that a one-word affirmative answers only the prompt it was typed against; a `y` landing on a re-registration is not an answer to the open question, and no consumer may read it as one.

@@ -319,6 +319,16 @@ class AnswerArgv(unittest.TestCase):
             gac.main(["--self", SELF, "--item", ITEM, "--item", ITEM, "--answer", "--expect", "x"])
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_by_overrides_the_recorded_provenance(self):
+        argv = gac.answer_argv(run(), by="supervisor:gate-preanswer")
+        self.assertEqual(argv[argv.index("--by") + 1], "supervisor:gate-preanswer")
+
+    def test_by_outside_the_supervisor_namespace_is_refused(self):
+        for by in ("operator", "supervisor", "Manager answer, via supervisor:", ""):
+            with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                gac.main(["--self", SELF, "--item", ITEM, "--by", by])
+            self.assertEqual(ctx.exception.code, 2, by)
+
 
 class Identity(unittest.TestCase):
     def test_matching_env_is_the_identity(self):
@@ -574,6 +584,37 @@ class EndToEnd(unittest.TestCase):
     def test_answer_without_expect_is_a_usage_error(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             gac.main(["--self", SELF, "--item", ITEM, "--answer"])
+
+    def test_dry_probe_does_not_book(self):
+        """`--dry` is the pre-answer probe: repeatable, and it never consumes the card."""
+        hard = card(payload="Bash: rm -rf /x")
+        _, first, _, _ = self._main(["--self", SELF, "--item", ITEM, "--dry"], hard)
+        self.assertEqual(first["verdict"], gac.ESCALATE)
+        _, second, _, _ = self._main(["--self", SELF, "--item", ITEM, "--dry"], hard)
+        self.assertEqual(second["verdict"], gac.ESCALATE, "a dry probe must not book")
+        # The non-dry check still books, so the gate-answerer keeps its dedup.
+        self._main(["--self", SELF, "--item", ITEM], hard)
+        _, after, _, _ = self._main(["--self", SELF, "--item", ITEM], hard)
+        self.assertIn("already handled", after["why"])
+
+    def test_dry_probe_then_check_then_answer(self):
+        """The Monitor's sequence: probe, then check (books), then answer."""
+        _, probe, _, _ = self._main(["--self", SELF, "--item", ITEM, "--dry"], card())
+        self.assertEqual(probe["verdict"], gac.ANSWERABLE)
+        _, checked, _, _ = self._main(["--self", SELF, "--item", ITEM], card())
+        self.assertEqual(checked["verdict"], gac.ANSWERABLE)
+        rc, _, _, ran = self._main(
+            ["--self", SELF, "--item", ITEM, "--answer", "--expect", checked["expect"]], card())
+        self.assertEqual(rc, 0)
+        self.assertIn("--decision", ran.call_args.args[0])
+
+    def test_answer_records_the_named_provenance(self):
+        _, first, _, _ = self._main(["--self", SELF, "--item", ITEM], card())
+        _, _, _, ran = self._main(
+            ["--self", SELF, "--item", ITEM, "--answer", "--expect", first["expect"],
+             "--by", "supervisor:gate-preanswer"], card())
+        argv = ran.call_args.args[0]
+        self.assertEqual(argv[argv.index("--by") + 1], "supervisor:gate-preanswer")
 
 
 class Helpers(unittest.TestCase):
