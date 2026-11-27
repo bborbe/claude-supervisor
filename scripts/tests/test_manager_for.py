@@ -31,7 +31,7 @@ def _load(name, filename):
 fb = _load("fleet_board", "fleet-board.py")
 mf = _load("manager_for", "manager-for.py")
 
-CWD = "/Users/x/Documents/Obsidian/my-vault"
+CWD = "/vault"
 
 
 def _sid(n):
