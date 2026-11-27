@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.376.0
 
 - feat: **a goal's live manager is answerable from one CLI** — `scripts/manager-for.py --goal <title> --vault <path> --json` answers `{goal, manager, source}` for the approval gate, delegating to `fleet-board.py:manager_for_goal` so the gate and the board's `manager:` column cannot disagree. The rule reads a live manager whose subject is the goal, else the manager of a topic that declares the goal under `## Goals`; `source` says which. Exit 2 means the fleet read failed and is never collapsed into "no manager"; a missing vault is exit 2 as well. `vault_index(roots=…)` gains the single-vault scope the query needs, because goal titles are not namespaced across vaults. Change set: `scripts/fleet-board.py`, `scripts/manager-for.py` (new), `scripts/tests/test_manager_for.py` (new), `CHANGELOG.md`.
 
