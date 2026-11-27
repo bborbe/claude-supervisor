@@ -579,5 +579,59 @@ class TestDiscrimination(Base):
                 )
 
 
+class TestVerdictClass(unittest.TestCase):
+    """The qualified-verdict split, pinned so a widening cannot regress silently.
+
+    ⚠️ **This exists because the split was once unconditional.** `verdict.split(":")[0]`
+    accepted `revive:junk` and `blocked:anything`, widening the closed set to every
+    string whose prefix was a known verdict — the check kept reporting green while
+    rejecting nothing. The sibling test asserts `VERDICTS ⊆ prose`; it cannot catch a
+    prose verdict absent from the tuple, and it cannot catch this at all.
+
+    Loaded by path, not by import: the script has no package and `-` in its name.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("drive_ledger_under_test", SCRIPT)
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+
+    def accepted(self, verdict):
+        return self.mod.verdict_class(verdict) in self.mod.VERDICTS
+
+    def test_a_qualified_asleep_until_is_accepted(self):
+        self.assertTrue(
+            self.accepted("asleep-until:2026-11-27"),
+            "the reopen instant rides after a colon; an exact tuple cannot hold it",
+        )
+
+    def test_lapsed_is_accepted_because_unarmed_maps_to_it(self):
+        self.assertTrue(
+            self.accepted("lapsed"),
+            "UNARMED ranks with lapsed (docs/sweep-output.md), so the drive leg emits it",
+        )
+
+    def test_a_known_prefix_with_a_junk_qualifier_is_refused(self):
+        for verdict in ("revive:junk", "blocked:x", "stuck:nonsense"):
+            with self.subTest(verdict=verdict):
+                self.assertFalse(
+                    self.accepted(verdict),
+                    "only QUALIFIED_VERDICTS may carry a colon tail; %r must not be "
+                    "widened into the closed set" % verdict,
+                )
+
+    def test_unarmed_is_refused(self):
+        self.assertFalse(
+            self.accepted("unarmed"),
+            "reverted to lapsed — a benign unarmed disposition contradicts the spec",
+        )
+
+    def test_a_non_string_is_refused_not_crashed(self):
+        for verdict in (None, 0, [], {}):
+            with self.subTest(verdict=verdict):
+                self.assertFalse(self.accepted(verdict))
+
+
 if __name__ == "__main__":
     unittest.main()

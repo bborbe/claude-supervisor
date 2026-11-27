@@ -87,7 +87,28 @@ FIELDS = (
 #: tool in flight and no declared wait. A verdict rather than a `nudge` value for the
 #: same reason as `closed` — the row leaves the candidate set, and a later round that
 #: finds the session gone should read a recorded outcome rather than an absence.
-VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed", "wrote-nothing", "stuck")
+VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed", "wrote-nothing", "stuck", "asleep-until", "lapsed")
+#: Verdicts that carry a qualifier after a colon -- `asleep-until:<instant>` is one class
+#: with the reopen instant appended, the same shape `future-date:<instant>` already has on
+#: the wake side. Matched on the part before the colon, so the instant is recorded rather
+#: than rejected: an exact tuple cannot hold it, and refusing it would make `merge` reject
+#: the whole round's payload over a row that is correctly parked.
+QUALIFIED_VERDICTS = ("asleep-until",)
+
+
+def verdict_class(verdict):
+    """The class word inside a verdict, dropping a `:<qualifier>` tail.
+
+    ⚠️ **The split is confined to QUALIFIED_VERDICTS.** An unconditional split would
+    accept `revive:junk` and `blocked:anything`, silently widening the allowlist to every
+    string whose prefix is a known verdict — the check would stop rejecting malformed
+    input while still reporting green. A verdict whose head is NOT a qualified class is
+    returned whole, so it fails the membership test exactly as before.
+    """
+    if not isinstance(verdict, str):
+        return verdict
+    head, sep, _ = verdict.partition(":")
+    return head if sep and head in QUALIFIED_VERDICTS else verdict
 #: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
 #: makes the action fire ONCE per silence rather than on every round at or past the
 #: threshold: a row held back by the per-round cap keeps advancing its streak, so a
@@ -293,7 +314,7 @@ def refuse(message):
 def check(row, sid):
     """None when the row is usable, else the reason it is not."""
     verdict = row.get("verdict")
-    if verdict not in VERDICTS:
+    if verdict_class(verdict) not in VERDICTS:
         return "session %s carries verdict %r, not one of %s" % (
             sid,
             verdict,
