@@ -616,6 +616,38 @@ class EndToEnd(unittest.TestCase):
         argv = ran.call_args.args[0]
         self.assertEqual(argv[argv.index("--by") + 1], "supervisor:gate-preanswer")
 
+    def test_max_tier_refuses_a_higher_card_without_booking_it(self):
+        """A caller allowed only the mechanical tier must not settle above it — and must not
+        book the card either, or the gate-answerer that IS allowed to judge it reads `skip`."""
+        mgr = session(command="make test")
+        self.inputs["sessions"] = [mgr]
+        item = card(payload="Bash: make test")
+        _, refused, _, _ = self._main(
+            ["--self", SELF, "--item", ITEM, "--max-tier", "allowlist"], item)
+        self.assertEqual(refused["tier"], "manager", refused["why"])
+        self.assertEqual(refused["verdict"], gac.SKIP)
+        self.assertIn("ceiling", refused["why"])
+
+    def test_max_tier_refusal_books_nothing(self):
+        mgr = session(command="make test")
+        self.inputs["sessions"] = [mgr]
+        item = card(payload="Bash: make test")
+        self._main(["--self", SELF, "--item", ITEM, "--max-tier", "allowlist"], item)
+        _, again, _, _ = self._main(["--self", SELF, "--item", ITEM], item)
+        self.assertNotIn("already handled", again["why"], "the ceiling refusal must not book")
+
+    def test_release_returns_a_booked_card(self):
+        hard = card(payload="Bash: rm -rf /x")
+        _, first, _, _ = self._main(["--self", SELF, "--item", ITEM], hard)
+        self.assertEqual(first["verdict"], gac.ESCALATE)
+        _, skip, _, _ = self._main(["--self", SELF, "--item", ITEM], hard)
+        self.assertIn("already handled", skip["why"])
+        rc, rel, _, _ = self._main(["--self", SELF, "--item", ITEM, "--release"], hard)
+        self.assertEqual(rc, 0)
+        self.assertTrue(rel["released"])
+        _, back, _, _ = self._main(["--self", SELF, "--item", ITEM], hard)
+        self.assertEqual(back["verdict"], gac.ESCALATE, "a released card is judged again")
+
 
 class Helpers(unittest.TestCase):
     def test_stricter(self):

@@ -65,7 +65,8 @@ class Preanswer(unittest.TestCase):
 
         def verdict(self_id, item_id, *extra):
             calls.append(extra)
-            return check if extra == () else probe
+            # The re-check is the call that carries the ceiling; the probe is the bare `--dry`.
+            return check if "--max-tier" in extra else probe
         return verdict, calls
 
     def test_allowlist_answerable_is_settled_by_this_path(self):
@@ -96,9 +97,15 @@ class Preanswer(unittest.TestCase):
         self.assertIn("not answerable", why)
 
     def test_a_changed_card_is_refused_not_settled(self):
-        verdict, _ = self._verdicts(ok(), ok(verdict="skip"))
+        verdict, _ = self._verdicts(ok(), ok())
         settled, why = gp.preanswer(SELF, A, run=lambda argv: (4, "", "expect mismatch"),
                                     verdict=verdict)
+        self.assertFalse(settled)
+        self.assertIn("answer refused", why)
+
+    def test_a_recheck_that_no_longer_reads_answerable_is_left(self):
+        verdict, _ = self._verdicts(ok(), ok(verdict="skip"))
+        settled, why = gp.preanswer(SELF, A, run=lambda argv: (0, "", ""), verdict=verdict)
         self.assertFalse(settled)
         self.assertIn("re-check", why)
 
@@ -108,6 +115,25 @@ class Preanswer(unittest.TestCase):
         gp.preanswer(SELF, A, run=lambda argv: (seen.append(argv), (4, "", "x"))[1], verdict=verdict)
         self.assertIn("--answer", seen[0])
         self.assertIn("--expect", seen[0])
+
+    def test_the_allowlist_ceiling_is_on_both_acting_steps(self):
+        """The invariant must hold where the card is settled, not only at the probe."""
+        verdict, calls = self._verdicts(ok(), ok())
+        seen = []
+        gp.preanswer(SELF, A, run=lambda argv: (seen.append(argv), (0, "", ""))[1], verdict=verdict)
+        self.assertIn(("--max-tier", "allowlist"), calls, "the check must carry the ceiling")
+        self.assertTrue(seen)
+        for argv in seen:
+            self.assertEqual(argv[argv.index("--max-tier") + 1], "allowlist", argv)
+
+    def test_a_failed_answer_releases_the_booking(self):
+        verdict, _ = self._verdicts(ok(), ok())
+        seen = []
+        settled, why = gp.preanswer(
+            SELF, A, run=lambda argv: (seen.append(argv), (4, "", "refused"))[1], verdict=verdict)
+        self.assertFalse(settled, why)
+        self.assertTrue(any("--release" in argv for argv in seen),
+                        "a failed answer must release the booked card")
 
 
 class Process(unittest.TestCase):

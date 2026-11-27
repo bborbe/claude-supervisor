@@ -414,7 +414,7 @@ def _role_human(session_id, ledger):
 
 def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
            tier_mod, allowlist, own_mod, scope=None, seen=None, answering=False, expect=None,
-           is_human=None, live=None):
+           is_human=None, live=None, max_tier="operator"):
     """One verdict dict. Every input that could not be read arrives as `None`.
 
     `item` is the store record, `None` when unreadable, or `{}` when absent (404).
@@ -531,6 +531,15 @@ def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
         return done(ESCALATE, "operator tier: %s" % reading.get("reason"))
     if reading.get("tier") not in ("allowlist", "manager"):
         return done(ESCALATE, "unknown tier %r reads as operator" % reading.get("tier"))
+    # A caller that may only settle the mechanical tier states that ceiling here, so the
+    # invariant is enforced at EVERY acting step rather than only at its own probe. The tier
+    # is read from the parked call AND the card payload, and the `expect` hash covers only the
+    # call — so a payload edit between probe and answer can raise the tier while the hash still
+    # matches. SKIP is the right verdict: it books nothing, so the card stays available to the
+    # gate-answerer that is allowed to apply the rubric.
+    if _RANK.get(reading.get("tier"), 3) > _RANK.get(max_tier, 3):
+        return done(SKIP, "tier %r is above this path's ceiling %r — left for the gate-answerer"
+                    % (reading.get("tier"), max_tier))
     if out["command_truncated"]:
         return done(ESCALATE, "%s input truncated at %d chars — not judgeable in full" % (out["tool"], COMMAND_CAP))
     outside = write_target_refusal(out["tool"], inp, out["cwd"])
@@ -706,6 +715,17 @@ class Ledger:
         fields["at"] = time.time()
         self.items[item_id] = fields
 
+    def forget(self, item_id):
+        """Drop one entry, returning the card to every other answerer.
+
+        A booked card is `skip` for this manager's lifetime, so a path that books a card and
+        then fails to answer it would strand that gate permanently — the dispatched
+        gate-answerer would read `skip` and never look again. Releasing is the only repair.
+        """
+        if self.items is None:
+            return
+        self.items.pop(item_id, None)
+
     def save(self):
         if self.items is None:
             return
@@ -776,9 +796,17 @@ def main(argv=None):
                         help="classify WITHOUT recording a ledger entry — the pre-answer probe")
     parser.add_argument("--by", default=DEFAULT_ANSWERED_BY,
                         help="with --answer: the provenance the store records (must be supervisor:*)")
+    parser.add_argument("--max-tier", dest="max_tier", default="operator",
+                        choices=("allowlist", "manager", "operator"),
+                        help="refuse (without booking) any card above this tier — a caller that "
+                             "may only settle the mechanical tier passes `allowlist`")
+    parser.add_argument("--release", action="store_true",
+                        help="drop this item's ledger entry, returning the card to other answerers")
     args = parser.parse_args(argv)
     if not args.by.startswith("supervisor:"):
         parser.error("--by must start with 'supervisor:' — a manager never answers in the operator's name")
+    if args.release and len(args.item) != 1:
+        parser.error("--release takes exactly one --item")
     if not args.self_id or not args.item:
         parser.error("pass --self <this session id> and at least one --item")
     if args.answer and (len(args.item) != 1 or not args.expect):
@@ -787,6 +815,15 @@ def main(argv=None):
     if refusal:
         print("REFUSED: %s" % refusal)
         return 2
+
+    if args.release:
+        item_id = args.item[0].strip()
+        if item_id.startswith("hst:"):
+            item_id = item_id[len("hst:"):]
+        with Ledger(ledger_path(self_id)) as book:
+            book.forget(item_id)
+        print(json.dumps({"item_id": item_id, "released": True}))
+        return 0
 
     inputs = load_inputs(self_id)
     index = inputs["index"]
@@ -804,7 +841,8 @@ def main(argv=None):
                              inputs["allowlist"], inputs["own_mod"],
                              scope=inputs.get("scope"), seen=seen,
                              answering=args.answer, expect=args.expect or None,
-                             is_human=inputs["is_human"], live=inputs.get("live"))
+                             is_human=inputs["is_human"], live=inputs.get("live"),
+                             max_tier=args.max_tier)
             print(json.dumps(verdict))
             if not args.answer:
                 if verdict["verdict"] in (ANSWERABLE, ESCALATE) and not args.dry:

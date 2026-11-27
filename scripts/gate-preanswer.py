@@ -20,6 +20,16 @@ Reads gate lines on stdin (the `gate-owner-filter.py --feed --digest` output) an
 is `skip` for that manager's lifetime. Probing with `--item` would therefore starve exactly the
 `manager`-tier cards the dispatched gate-answerer must answer.
 
+⚠️ **The allowlist ceiling is enforced at every acting step, not only at the probe.** Both the
+check and the answer call carry `--max-tier allowlist`. The tier is read from the parked call AND
+the card payload, while the `expect` hash covers only the call — so a payload edit between probe
+and answer can raise the tier with the hash still matching, and a probe-only check would settle a
+judgment-required gate with no rubric behind it.
+
+⚠️ **A failed answer releases its booking.** A booked card is `skip` for this manager's lifetime,
+so leaving it booked would strand the gate — the dispatched gate-answerer would read `skip` and
+never look again. `--release` is the repair.
+
 ⚠️ **Identity is the environment, never an argument.** The script reads
 `CLAUDE_CODE_SESSION_ID` from its own environment — the `Monitor` runs inside the manager session
 and inherits it — and refuses when it is unset or malformed. Passing a session id in would make
@@ -105,12 +115,17 @@ def preanswer(self_id, item_id, run=_run, verdict=_verdict):
     expect = probe.get("expect")
     if not expect:
         return False, "probe carried no expect hash"
-    checked = verdict(self_id, item_id)
+    checked = verdict(self_id, item_id, "--max-tier", "allowlist")
     if checked is None or checked.get("verdict") != "answerable":
-        return False, "re-check did not read answerable"
+        return False, "re-check did not read answerable at the allowlist ceiling"
     rc, _, err = run([sys.executable, CHECK, "--self", self_id, "--item", item_id,
-                      "--answer", "--expect", expect, "--by", PREANSWER_BY])
+                      "--answer", "--expect", expect, "--by", PREANSWER_BY,
+                      "--max-tier", "allowlist"])
     if rc != 0:
+        # Release the booking. A booked card is `skip` for this manager's lifetime, so leaving
+        # it booked after a failed answer would strand the gate — the dispatched gate-answerer
+        # would read `skip` and never look again. Releasing is the only repair.
+        run([sys.executable, CHECK, "--self", self_id, "--item", item_id, "--release"])
         return False, "answer refused (rc %d) %s" % (rc, err.strip()[:120])
     return True, "answered %s" % item_id
 
