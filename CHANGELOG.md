@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`attention-ask.py post` refuses a card that asks for a wide-reach decision, and allows the announcement card that replaces it.** The rule already existed in the operator's vault (`One-Way and Two-Way Door Decisions` § Where the decision is made — *"Never a board card"*) and nothing enforced it: on 2026-11-27 a worker put the IBKR weekly-candle choice on a card, took the click as the decision, and closed the task with no decision record. The new `scripts/wide-reach-decision-guard.py` resolves the asking task by `claude_session_id`, then checks the three marks the task names — `wide_reach_decision: pending`, a `# Decision` block, or a Decision Record in any registered vault's `40 Decisions/` whose `related_task` names the task and which `vault-cli decision ack` has not accepted. A **deciding** card (any option that is not a pure ack/dismiss — `yes`/`no` count as deciding, because a yes/no answer to a real question IS the decision) is refused; an **announcement** card (no options, or only acks) is always allowed. `--force` keeps a deliberate card postable. Every edge fails open — no guard module, no resolvable task, or an unreadable vault all allow the card — because a card with no resolvable task is outside the criterion's scope and a lookup failure is not evidence of a pending decision. Change set: `scripts/wide-reach-decision-guard.py` (new), `scripts/tests/test_wide_reach_decision_guard.py` (new, 22 cases), `scripts/attention-ask.py`, `CHANGELOG.md`.
+
 ## v0.375.2
 
 - docs: **a bare `y` is not consent for a question it does not name** — § 6 of `docs/attention-and-delegation.md` records that a one-word affirmative answers only the prompt it was typed against; a `y` landing on a re-registration is not an answer to the open question, and no consumer may read it as one.

@@ -565,6 +565,50 @@ def manager_guard():
         return None
 
 
+WIDE_REACH_GUARD = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "wide-reach-decision-guard.py")
+
+
+def wide_reach_guard():
+    """The wide-reach decision predicate module, or None when it cannot load.
+
+    Loaded the same way `manager_guard` loads its module — never mirrored. A
+    load failure warns and ALLOWS the card: a guard that cannot read its own
+    predicate must not become a fleet-wide card outage.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "wide_reach_decision_guard", WIDE_REACH_GUARD)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod if hasattr(mod, "refusal_for") else None
+    except Exception as err:
+        _warn(f"wide-reach guard unavailable ({err}) — decision check skipped")
+        return None
+
+
+def wide_reach_refusal(options, producer_id):
+    """Refuse a deciding card when the asking task waits on a wide-reach decision.
+
+    Fail-open at every edge: no guard module, no resolvable task, or an
+    unreadable vault all ALLOW the card. The rule being enforced is "a card
+    that asks for a decision on a task with a wide-reach decision pending is
+    refused" — a card with no resolvable task is outside that scope, and a
+    lookup failure is not evidence of a pending decision.
+    """
+    guard = wide_reach_guard()
+    if guard is None:
+        return None
+    try:
+        front, body = guard.load_session_task(producer_id)
+    except Exception as err:
+        _warn(f"wide-reach task lookup failed ({err}) — decision check skipped")
+        return None
+    if front is None:
+        return None
+    return guard.refusal_for(options, front, body)
+
+
 _SESSION_ROLE = None
 
 
@@ -1255,6 +1299,14 @@ def cmd_post(args, out=sys.stdout):
     refusal = pane_ask_refusal(args.payload, getattr(args, "context", None))
     if refusal:
         print(f"REFUSED: {refusal}", file=out)
+        return 2
+    # The wide-reach rule: a one-way door with wide reach gets a written decision
+    # record and an interactive talk-through, never a board card — the card only
+    # announces the decision. Refused by default; `--force` keeps a deliberate
+    # card postable.
+    wide_reach = wide_reach_refusal(options, producer[0])
+    if wide_reach and not getattr(args, "force", False):
+        print(f"REFUSED: {wide_reach}", file=out)
         return 2
     return _post_and_report(args, *producer, args.payload, options, out,
                             mechanism=mechanism)
