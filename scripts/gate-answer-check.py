@@ -75,8 +75,17 @@ carried end to end — the store's answer route already accepts `request_id`; `b
 compare it with the park's before it settles.
 
 Usage:
-  gate-answer-check.py --self <this session id> --item <store-item-id> [--item …]
-  gate-answer-check.py --self <this session id> --item <store-item-id> --answer --expect <hash>
+  gate-answer-check.py --self <this session id> --item <store-item-id> [--item …] [--dry]
+  gate-answer-check.py --self <this session id> --item <store-item-id> --answer --expect <hash> [--by <provenance>]
+
+`--dry` classifies without recording a ledger entry. A pre-answer `Monitor` needs exactly that:
+`--item` books every `answerable`/`escalate` card as `checked`, and a booked card is `skip` for
+this manager's lifetime — so a Monitor that probed every open card would starve the `manager`-tier
+cards the dispatched gate-answerer must answer. Probe with `--dry`, then check-then-answer only
+the rows it read `answerable` + `tier: allowlist`.
+
+`--by` names the answering path the store records, and must stay under `supervisor:` — a manager
+never answers in the operator's name.
 
 Exit: 0 when every item got a verdict line · 2 on a usage error or an identity refusal · with
 `--answer`: `attention-answer.py`'s own exit, or 4 when nothing was answered (the re-check, the
@@ -172,6 +181,13 @@ COMMAND_CAP = 2000
 #: The manager's own voice. A manager answering as the operator is a forged provenance claim
 #: (`docs/fleet-surface.md` § The two prefixes are not interchangeable).
 MANAGER_PREFIX = "Manager answer, via supervisor:"
+
+#: Who the store records as the answerer. A pre-answer `Monitor` is NOT the gate-answerer
+#: sub-agent, and the provenance must say which path settled the card — the pre-answer
+#: criterion reads `answered_by` back out of the store, so a hardcoded value would make every
+#: row look like the sub-agent answered it. Every value stays under the `supervisor:` namespace:
+#: a manager never answers in the operator's name.
+DEFAULT_ANSWERED_BY = "supervisor:gate-answerer"
 
 #: A pick touching any of these is the operator's, whatever its recommendation. Matched
 #: case-insensitively over the payload, the context and every option label — fail closed:
@@ -398,7 +414,7 @@ def _role_human(session_id, ledger):
 
 def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
            tier_mod, allowlist, own_mod, scope=None, seen=None, answering=False, expect=None,
-           is_human=None, live=None):
+           is_human=None, live=None, max_tier="operator"):
     """One verdict dict. Every input that could not be read arrives as `None`.
 
     `item` is the store record, `None` when unreadable, or `{}` when absent (404).
@@ -515,6 +531,15 @@ def decide(item_id, item, self_id, ledger, claims, holds, sessions, task_files,
         return done(ESCALATE, "operator tier: %s" % reading.get("reason"))
     if reading.get("tier") not in ("allowlist", "manager"):
         return done(ESCALATE, "unknown tier %r reads as operator" % reading.get("tier"))
+    # A caller that may only settle the mechanical tier states that ceiling here, so the
+    # invariant is enforced at EVERY acting step rather than only at its own probe. The tier
+    # is read from the parked call AND the card payload, and the `expect` hash covers only the
+    # call — so a payload edit between probe and answer can raise the tier while the hash still
+    # matches. SKIP is the right verdict: it books nothing, so the card stays available to the
+    # gate-answerer that is allowed to apply the rubric.
+    if _RANK.get(reading.get("tier"), 3) > _RANK.get(max_tier, 3):
+        return done(SKIP, "tier %r is above this path's ceiling %r — left for the gate-answerer"
+                    % (reading.get("tier"), max_tier))
     if out["command_truncated"]:
         return done(ESCALATE, "%s input truncated at %d chars — not judgeable in full" % (out["tool"], COMMAND_CAP))
     outside = write_target_refusal(out["tool"], inp, out["cwd"])
@@ -592,12 +617,12 @@ def decide_pick(item, out, done, own_why, task_files, producer):
     return done(ANSWERABLE, "%s; one recommended option, no operator-only class" % own_why)
 
 
-def answer_argv(verdict):
+def answer_argv(verdict, by=DEFAULT_ANSWERED_BY):
     """`attention-answer.py` argv for an `answerable` verdict, or None for anything else."""
     if verdict.get("verdict") != ANSWERABLE:
         return None
     base = [sys.executable, os.path.join(_HERE, "attention-answer.py"), "answer",
-            verdict["item_id"], "--by", "supervisor:gate-answerer"]
+            verdict["item_id"], "--by", by]
     if verdict.get("kind") == "permission":
         return base + ["--decision", "allow"]
     if verdict.get("kind") == "pick" and verdict.get("recommended") and PICK_ANSWERING_ENABLED:
@@ -690,6 +715,17 @@ class Ledger:
         fields["at"] = time.time()
         self.items[item_id] = fields
 
+    def forget(self, item_id):
+        """Drop one entry, returning the card to every other answerer.
+
+        A booked card is `skip` for this manager's lifetime, so a path that books a card and
+        then fails to answer it would strand that gate permanently — the dispatched
+        gate-answerer would read `skip` and never look again. Releasing is the only repair.
+        """
+        if self.items is None:
+            return
+        self.items.pop(item_id, None)
+
     def save(self):
         if self.items is None:
             return
@@ -756,7 +792,21 @@ def main(argv=None):
                         help="re-check ONE item and, only when answerable, answer it")
     parser.add_argument("--expect", default="",
                         help="with --answer: the `expect` hash the check printed")
+    parser.add_argument("--dry", action="store_true",
+                        help="classify WITHOUT recording a ledger entry — the pre-answer probe")
+    parser.add_argument("--by", default=DEFAULT_ANSWERED_BY,
+                        help="with --answer: the provenance the store records (must be supervisor:*)")
+    parser.add_argument("--max-tier", dest="max_tier", default="operator",
+                        choices=("allowlist", "manager", "operator"),
+                        help="refuse (without booking) any card above this tier — a caller that "
+                             "may only settle the mechanical tier passes `allowlist`")
+    parser.add_argument("--release", action="store_true",
+                        help="drop this item's ledger entry, returning the card to other answerers")
     args = parser.parse_args(argv)
+    if not args.by.startswith("supervisor:"):
+        parser.error("--by must start with 'supervisor:' — a manager never answers in the operator's name")
+    if args.release and len(args.item) != 1:
+        parser.error("--release takes exactly one --item")
     if not args.self_id or not args.item:
         parser.error("pass --self <this session id> and at least one --item")
     if args.answer and (len(args.item) != 1 or not args.expect):
@@ -765,6 +815,15 @@ def main(argv=None):
     if refusal:
         print("REFUSED: %s" % refusal)
         return 2
+
+    if args.release:
+        item_id = args.item[0].strip()
+        if item_id.startswith("hst:"):
+            item_id = item_id[len("hst:"):]
+        with Ledger(ledger_path(self_id)) as book:
+            book.forget(item_id)
+        print(json.dumps({"item_id": item_id, "released": True}))
+        return 0
 
     inputs = load_inputs(self_id)
     index = inputs["index"]
@@ -782,14 +841,15 @@ def main(argv=None):
                              inputs["allowlist"], inputs["own_mod"],
                              scope=inputs.get("scope"), seen=seen,
                              answering=args.answer, expect=args.expect or None,
-                             is_human=inputs["is_human"], live=inputs.get("live"))
+                             is_human=inputs["is_human"], live=inputs.get("live"),
+                             max_tier=args.max_tier)
             print(json.dumps(verdict))
             if not args.answer:
-                if verdict["verdict"] in (ANSWERABLE, ESCALATE):
+                if verdict["verdict"] in (ANSWERABLE, ESCALATE) and not args.dry:
                     book.record(item_id, state="checked", verdict=verdict["verdict"],
                                 expect=verdict["expect"], why=verdict["why"])
                 continue
-            argv_ = answer_argv(verdict)
+            argv_ = answer_argv(verdict, by=args.by)
             if argv_ is None:
                 print("NOT_ANSWERED: re-check reads %s — %s" % (verdict["verdict"], verdict["why"]))
                 return 4
