@@ -246,8 +246,11 @@ OWING_VERDICTS = ("resume", "restart")
 # and pass. So the vocabulary is per verdict:
 #
 #   resume  → `/supervisor:open --goal`, Step 2B item 3 → Step 3. That path's refusals:
-#             `⌛ waiting-approval` (item 0), the registry read's "cannot tell" (item 1),
-#             `start-rate.mjs` exit 1 (Step 3.1) and `resolve-launcher.py` non-zero (3.1).
+#             `⌛ waiting-approval` (item 0), the registry read's "cannot tell" (item 1)
+#             and `resolve-launcher.py` non-zero (3.1). ⚠️ `start-rate` is RETIRED
+#             (2026-11-26): the `scripts/start-rate.mjs` it named was deleted and
+#             `commands/open.md` no longer references it. The token stays in
+#             `REFUSAL_TOKENS` so receipts written before that date still parse.
 #   restart → `/supervisor:restart`: `restart-worker.py`'s first-line tokens (its module
 #             docstring, plus `environment-fault` and `hold-unreadable`, which it returns
 #             when the hold store cannot be read), and `restart-precheck.py`'s

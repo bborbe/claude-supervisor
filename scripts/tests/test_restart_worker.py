@@ -771,11 +771,22 @@ class McpSource(unittest.TestCase):
         return path
 
     def test_reads_root_and_version_live(self):
+        """A config naming the deleted launcher resolves to `None`, not to a checkout.
+
+        ⚠️ Rewritten 2026-11-26, when `scripts/mcp-start.py` was deleted. This test used to
+        assert that the checkout root and its `.claude-plugin/plugin.json` version were
+        recovered from a `scripts/mcp-start.py` entry in `--mcp-config`. The supervisor is
+        served by the Go `claude-wrapper` daemon over HTTP, so no config launches it from a
+        tree, there is no checkout whose staleness a restart could reload, and the scan that
+        recovered one was deleted with the launcher. The honest answer is `None` — rendered
+        by `describe_source` as "MCP source: unknown" — and asserting it here keeps the
+        fallback pinned rather than leaving the case uncovered.
+        """
         root = self.checkout("0.1.0")
         cfg = self.config([os.path.join(root, "scripts", "mcp-start.py")])
         got_root, got_version, _ = rw.mcp_source(f"claude --mcp-config={cfg}")
-        self.assertEqual(got_root, root)
-        self.assertEqual(got_version, "0.1.0")
+        self.assertIsNone(got_root)
+        self.assertIsNone(got_version)
 
     def test_plugin_version_missing_file_is_none(self):
         self.assertIsNone(rw.plugin_version(self.dir))
