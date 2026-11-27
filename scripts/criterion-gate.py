@@ -21,11 +21,14 @@ instead of in prose a run can narrate and then ignore.
 
 What it decides, per row
 ------------------------
-    open          the row's trace names an UNTICKED criterion, and no live task's row
-                  names that same criterion -> hand it over as `To open`
-    ticked        the row's trace names a criterion already ticked -> hold, never open
-    covered       a live task's row already names that same criterion -> hold, never open
-    untraced      the goal's row for the task carries no `— closes SC<n>` / `DoD<n>`
+    open          the row's trace is `— closes SC<n>`/`DoD<n>` naming an UNTICKED
+                  criterion, and no live task's row names that same criterion
+                  -> hand it over as `To open`
+    ticked        the row's `— closes` names a criterion already ticked -> hold, never open
+    covered       a live task's row already `— closes` that same criterion -> hold
+    supports      the row carries `— supports SC<n>` or `— no criterion: …` — TRACED but
+                  closes nothing -> not opened, and NOT untraced
+    untraced      the goal's row carries NO trace token at all
                   -> report `untraced — run /unblock`, never open, never skip silently
     criteria-met  the goal's every SC and DoD box is ticked -> never open; the row is a
                   leftover, and `commands/steps/goal-closure.md` Step 0b aborts it
@@ -71,9 +74,14 @@ import sys
 # closure verb refuses on `[/]`. Ticked means `[x]`/`[X]` and nothing else.
 BOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX/])\]\s*(.*)$")
 LINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
-# The trace the gate reads. Em dash (—), en dash (–) or hyphen tolerated; `closes SC<n>` or
-# `closes DoD<n>`. Never a bare "SC1" mention — only the explicit `closes` construct.
-CLOSES_RE = re.compile(r"[—–-]\s*closes\s+(SC|DoD)\s*(\d+)", re.IGNORECASE)
+# The trace the gate reads. The vault's goal pages use three token forms after the task
+# link: `— closes SC<n>` / `— closes DoD<n>` (this row closes that criterion — the only
+# form that opens), `— supports SC<n>` (serves it but closes nothing), and
+# `— no criterion: …` (explicitly none). Only `closes` opens; `supports` and
+# `no criterion` are TRACED and must NOT be reported untraced — SC3 reserves `untraced`
+# for a row with no trace AT ALL. A bare "SC1" mention is never a trace.
+TRACE_RE = re.compile(r"[—–-]\s*(closes|supports)\s+(SC|DoD)\s*(\d+)", re.IGNORECASE)
+NO_CRITERION_RE = re.compile(r"[—–-]\s*no criterion", re.IGNORECASE)
 SC_ID_RE = re.compile(r"^(SC\d+)\s*[:.]", re.IGNORECASE)
 HEADING_RE = re.compile(r"^#\s+(.*)$")
 
@@ -118,23 +126,36 @@ def parse_criteria(body):
 
 
 def parse_rows(body):
-    """Return {task name: {"closes": "SC2"|"DoD1"|None, "ticked": bool}} from `# Tasks`."""
+    """Return {task name: {"trace_kind", "criterion", "ticked"}} from `# Tasks`.
+
+    trace_kind is "closes" | "supports" | "no-criterion" | None. A row is a checkbox
+    bullet whose text **begins** with a wikilink — a criterion line or a mis-shaped
+    bullet carrying a link further along is not a task row (the proof run measured three
+    such false matches when the matcher accepted a link anywhere in the line).
+    """
     rows = {}
     for line in section(body, "Tasks").splitlines():
         m = BOX_RE.match(line)
         if not m:
             continue
         rest = m.group(2)
-        lm = LINK_RE.search(rest)
+        stripped = rest.lstrip()
+        if not stripped.startswith("[["):
+            continue
+        lm = LINK_RE.match(stripped)
         if not lm:
             continue
         name = lm.group(1).strip()
-        cm = CLOSES_RE.search(rest)
-        closes = None
-        if cm:
-            kind = "SC" if cm.group(1).upper() == "SC" else "DoD"
-            closes = f"{kind}{cm.group(2)}"
-        rows[name] = {"closes": closes, "ticked": m.group(1).lower() == "x"}
+        trace_kind, criterion = None, None
+        tm = TRACE_RE.search(rest)
+        if tm:
+            trace_kind = "closes" if tm.group(1).lower() == "closes" else "supports"
+            kind = "SC" if tm.group(2).upper() == "SC" else "DoD"
+            criterion = f"{kind}{tm.group(3)}"
+        elif NO_CRITERION_RE.search(rest):
+            trace_kind = "no-criterion"
+        rows[name] = {"trace_kind": trace_kind, "criterion": criterion,
+                      "ticked": m.group(1).lower() == "x"}
     return rows
 
 
@@ -172,8 +193,8 @@ def decide(p):
     for r in candidates:
         if r.get("live"):
             row = rows.get(r.get("task"))
-            if row and row.get("closes"):
-                live_criteria.add(row["closes"])
+            if row and row.get("trace_kind") == "closes":
+                live_criteria.add(row["criterion"])
 
     verdicts, untraced, to_abort = [], [], []
     for r in candidates:
@@ -187,13 +208,20 @@ def decide(p):
                              "criterion": None, "reason": reason})
             to_abort.append({"task": name, "reason": reason})
             continue
-        if not row or not row.get("closes"):
+        kind = row.get("trace_kind") if row else None
+        if kind is None:
             verdicts.append({"task": name, "verdict": "untraced",
                              "criterion": None,
-                             "reason": "no — closes SC/DoD trace on the goal's row"})
+                             "reason": "no — closes / — supports / — no criterion trace"})
             untraced.append({"task": name})
             continue
-        crit = row["closes"]
+        if kind in ("supports", "no-criterion"):
+            verdicts.append({"task": name, "verdict": "supports",
+                             "criterion": row.get("criterion"),
+                             "reason": "traced but closes nothing — not opened, not untraced"})
+            continue
+        # kind == "closes": the only form that can open.
+        crit = row["criterion"]
         if ticked.get(crit, False):
             verdicts.append({"task": name, "verdict": "ticked", "criterion": crit,
                              "reason": f"criterion {crit} already met"})
@@ -211,7 +239,7 @@ def decide(p):
         producers = []
         for r in candidates:
             row = rows.get(r.get("task"))
-            if not row or row.get("closes") != nxt:
+            if not row or row.get("trace_kind") != "closes" or row.get("criterion") != nxt:
                 continue
             # Only a row still in the operator's inbox is a card candidate.
             if r.get("phase") != "todo" or r.get("approved"):
