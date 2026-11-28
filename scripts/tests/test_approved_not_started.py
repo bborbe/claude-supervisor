@@ -111,38 +111,118 @@ class FormatAge(unittest.TestCase):
 
 
 class ManagerFor(unittest.TestCase):
+    """The column delegates to `fleet-board.manager_for_goal` — one rule, no second matcher.
+
+    Every case builds a real vault root, because the rule is page-resolving: a subject
+    must name a goal page (or a topic page declaring it) to have a manager. That is the
+    same predicate the approval gate uses, which is the whole point — before this
+    change the column matched a bare session name and could disagree with the gate.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.tasks = os.path.join(self.root, "25 Tasks")
+        self.goals = os.path.join(self.root, "24 Goals")
+        self.topics = os.path.join(self.root, "23 Topics")
+        for path in (self.tasks, self.goals, self.topics):
+            os.makedirs(path, exist_ok=True)
+
+    def _goal_page(self, title):
+        with open(os.path.join(self.goals, title + ".md"), "w", encoding="utf-8") as handle:
+            handle.write("---\npage_type: goal\n---\n\n# Success Criteria\n")
+        return title
+
+    def _topic_page(self, title, *declared):
+        body = "---\npage_type: topic\n---\n\n## Goals\n\n" + "".join(
+            "- [[%s]]\n" % goal for goal in declared
+        )
+        with open(os.path.join(self.topics, title + ".md"), "w", encoding="utf-8") as handle:
+            handle.write(body)
+        return title
+
+    def _manager_for(self, goals, manager_name, managed_by=None):
+        fb = ans.fleet_board()
+        index = fb.vault_index([self.root])
+        registry = {"sid-1": {"status": "running", "name": manager_name, "cwd": ""}}
+        return ans.manager_for(goals, managed_by, index, registry, {}, set())
+
     def test_exact_goal_title_match(self):
-        live = {"manager layer": "sid-1"}
-        self.assertEqual(ans.manager_for(["[[Manager Layer]]"], live), "Manager Layer")
+        self._goal_page("Manager Layer")
+        self.assertEqual(
+            self._manager_for(["[[Manager Layer]]"], "Manager Layer"), "Manager Layer"
+        )
 
     def test_manager_suffix_allowed(self):
-        live = {"manager layer manager": "sid-1"}
-        self.assertEqual(ans.manager_for(["[[Manager Layer]]"], live), "Manager Layer Manager")
+        self._goal_page("Manager Layer")
+        self.assertEqual(
+            self._manager_for(["[[Manager Layer]]"], "Manager Layer Manager"),
+            "Manager Layer Manager",
+        )
+
+    def test_topic_manager_owns_the_goal_it_declares(self):
+        """The 2026-11-28 fix: a topic-managed goal must not read `unmanaged` here."""
+        self._goal_page("Goal A")
+        self._topic_page("Topic T", "Goal A")
+        self.assertEqual(self._manager_for(["[[Goal A]]"], "Topic T"), "Topic T")
+
+    def test_a_bare_session_name_with_no_page_is_not_a_manager(self):
+        """Negative control for the one-rule change — the old matcher matched this."""
+        self.assertIsNone(self._manager_for(["[[Goal A]]"], "Goal A"))
+        self.assertIsNone(self._manager_for([], "Goal A"))
 
     def test_no_live_manager_is_none(self):
-        self.assertIsNone(ans.manager_for(["[[Manager Layer]]"], {}))
+        self._goal_page("Manager Layer")
+        self.assertIsNone(self._manager_for(["[[Manager Layer]]"], "Somebody Else"))
 
     def test_no_goals_is_none(self):
-        self.assertIsNone(ans.manager_for([], {"manager layer": "sid-1"}))
+        self._goal_page("Manager Layer")
+        self.assertIsNone(self._manager_for([], "Manager Layer"))
 
     def test_managed_by_beats_the_goals_order(self):
         """The doc's tier 1 — the row's own `managed_by` subject wins over its `goals:`."""
-        live = {"goal a manager": "sid-1", "goal b manager": "sid-2"}
-        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, "[[Goal B]]"), "Goal B Manager")
+        self._goal_page("Goal A")
+        self._goal_page("Goal B")
+        fb = ans.fleet_board()
+        index = fb.vault_index([self.root])
+        registry = {
+            "sid-a": {"status": "running", "name": "Goal A Manager", "cwd": ""},
+            "sid-b": {"status": "running", "name": "Goal B Manager", "cwd": ""},
+        }
+        self.assertEqual(
+            ans.manager_for(["[[Goal A]]"], "[[Goal B]]", index, registry, {}, set()),
+            "Goal B Manager",
+        )
 
     def test_absent_managed_by_falls_through_to_goals(self):
-        live = {"goal a manager": "sid-1"}
-        self.assertEqual(ans.manager_for(["[[Goal A]]"], live), "Goal A Manager")
-        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, None), "Goal A Manager")
+        self._goal_page("Goal A")
+        self.assertEqual(self._manager_for(["[[Goal A]]"], "Goal A Manager"), "Goal A Manager")
+        self.assertEqual(
+            self._manager_for(["[[Goal A]]"], "Goal A Manager", None), "Goal A Manager"
+        )
 
     def test_unresolvable_managed_by_falls_through_to_goals(self):
-        live = {"goal a manager": "sid-1"}
-        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, "[[Nobody]]"), "Goal A Manager")
+        self._goal_page("Goal A")
+        self.assertEqual(
+            self._manager_for(["[[Goal A]]"], "Goal A Manager", "[[Nobody]]"),
+            "Goal A Manager",
+        )
 
 
 class Collect(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp()
+        # `collect` derives the vault root from the tasks dir's parent, because the
+        # ownership rule resolves a subject to a PAGE. The fixture must therefore look
+        # like a vault, not like a bare directory of task files.
+        self.root = tempfile.mkdtemp()
+        self.dir = os.path.join(self.root, "25 Tasks")
+        self.goals = os.path.join(self.root, "24 Goals")
+        self.topics = os.path.join(self.root, "23 Topics")
+        for path in (self.dir, self.goals, self.topics):
+            os.makedirs(path, exist_ok=True)
+
+    def _goal_page(self, title):
+        with open(os.path.join(self.goals, title + ".md"), "w", encoding="utf-8") as handle:
+            handle.write("---\npage_type: goal\n---\n\n# Success Criteria\n")
 
     def _collect(self, live):
         return ans.collect(self.dir, live, NOW)
@@ -245,6 +325,7 @@ class Collect(unittest.TestCase):
         self.assertEqual([r["name"] for r in self._collect([])], ["Older", "Newer"])
 
     def test_manager_joined_from_goals(self):
+        self._goal_page("Manager Layer")
         task_file(
             self.dir,
             "Owned",
@@ -253,6 +334,33 @@ class Collect(unittest.TestCase):
         )
         rows = self._collect([{"sessionId": "sid", "name": "Manager Layer", "alive": True}])
         self.assertEqual(rows[0]["manager"], "Manager Layer")
+
+    def test_topic_managed_goal_is_joined_not_null(self):
+        """The 2026-11-28 defect, at the column: the gate accepted this goal while the
+        row read `manager: null`, so the two reads disagreed. Now both use one rule."""
+        self._goal_page("Goal A")
+        with open(os.path.join(self.topics, "Topic T.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\npage_type: topic\n---\n\n## Goals\n\n- [[Goal A]]\n")
+        task_file(
+            self.dir,
+            "Topic managed",
+            "approved_at: 2026-10-01T21:00:00Z\nstatus: next\n"
+            "goals:\n    - '[[Goal A]]'",
+        )
+        rows = self._collect([{"sessionId": "sid", "name": "Topic T", "alive": True}])
+        self.assertEqual(rows[0]["manager"], "Topic T")
+
+    def test_a_dead_manager_does_not_fill_the_column(self):
+        """Liveness gates the column exactly as it gates the approval."""
+        self._goal_page("Manager Layer")
+        task_file(
+            self.dir,
+            "Owned",
+            "approved_at: 2026-10-01T21:00:00Z\nstatus: next\n"
+            "goals:\n    - '[[Manager Layer]]'",
+        )
+        rows = self._collect([{"sessionId": "sid", "name": "Manager Layer", "alive": False}])
+        self.assertIsNone(rows[0]["manager"])
 
 
 class Render(unittest.TestCase):

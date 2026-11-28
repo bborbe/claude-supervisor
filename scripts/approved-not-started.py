@@ -201,32 +201,65 @@ def read_live(registry_dir=None, heartbeat_dir=None):
     return records if isinstance(records, list) else None
 
 
-def _manager_named(subject, live_by_name):
-    """The live manager session whose registry name matches `subject`, or None."""
-    title = subject.strip().strip("[]").strip()
-    for candidate in (title, title + " Manager"):
-        if live_by_name.get(candidate.lower()):
-            return candidate
-    return None
+_FLEET_BOARD = None
 
 
-def manager_for(goals, live_by_name, managed_by=None):
+def fleet_board():
+    """`fleet-board.py` loaded once. The ownership rule lives there, never here."""
+    global _FLEET_BOARD
+    if _FLEET_BOARD is None:
+        _FLEET_BOARD = _load("fleet_board", "fleet-board.py")
+    return _FLEET_BOARD
+
+
+def subject_title(value):
+    """A goal title from a frontmatter link or a plain title, without `[[ ]]`."""
+    return (value or "").strip().strip("[]").strip()
+
+
+def live_registry(live):
+    """`{session id: {status, name, cwd}}` for the live records.
+
+    The shape `fleet-board.build_grouping` reads. A record without a `sessionId`
+    cannot key a session, and one not marked alive is not a manager whatever its
+    name — a dead manager must never satisfy this column.
+    """
+    registry = {}
+    for rec in live:
+        sid = rec.get("sessionId")
+        if not sid or not rec.get("alive", True):
+            continue
+        registry[sid] = {
+            "status": rec.get("state") or rec.get("status") or "",
+            "name": rec.get("name") or "",
+            "cwd": rec.get("cwd") or "",
+        }
+    return registry
+
+
+def manager_for(goals, managed_by, index, registry, colours, slugs):
     """The live manager session for a row, or None.
 
-    The order is the one `docs/fleet-surface.md` § *Which manager owns a subject* states,
-    and this function reads tier 1: a row's own `managed_by` subject is tried before its
-    `goals:`. The field is hand-authored — nothing writes it automatically — so an absent
-    or unresolvable value is not an error; it falls through to `goals:`.
+    ⚠️ **One rule, not a second matcher.** This delegates to
+    `fleet-board.py:manager_for_goal` — the same helper `manager-for.py` hands the
+    approval gate — so this column and the gate's answer cannot disagree. Before
+    2026-11-28 this function re-derived a tier-1 name match of its own, and a
+    topic-managed goal read `manager: null` here while the gate accepted it.
 
-    Convention, not invention: a session whose registry name matches a subject title (a
-    `<X> Manager` suffix allowed) is that subject's manager — the same rule
-    `fleet-board.py` uses to place a session under its parent. A row whose goal has no
-    live manager reads `unmanaged`, which is a fact about the fleet, not a failure.
+    Precedence is the one `docs/fleet-surface.md` § *Which manager owns a subject*
+    states: the row's own `managed_by` subject first, then each `goals:` entry. A
+    subject that names no goal or topic page resolves no manager — a fact about the
+    fleet, not a failure. That is why a bare session name no longer matches: the
+    subject must resolve to a page, exactly as it must for the gate.
     """
+    fb = fleet_board()
     for subject in ([managed_by] if managed_by else []) + list(goals):
-        found = _manager_named(subject, live_by_name)
-        if found:
-            return found
+        title = subject_title(subject)
+        if not title:
+            continue
+        name, _source = fb.manager_for_goal(title, index, registry, colours, slugs, {})
+        if name:
+            return name
     return None
 
 
@@ -238,11 +271,13 @@ def collect(tasks_dir, live, now):
     fleet.
     """
     live_ids = {(r.get("sessionId") or "").lower() for r in live if r.get("alive", True)}
-    live_by_name = {}
-    for rec in live:
-        name = (rec.get("name") or "").strip().lower()
-        if name and rec.get("alive", True):
-            live_by_name.setdefault(name, rec.get("sessionId"))
+    # Read once per round, never per row: the index walk is the expensive half, and
+    # every row in one round must be judged against the same fleet snapshot.
+    fb = fleet_board()
+    index = fb.vault_index([os.path.dirname(os.path.abspath(tasks_dir))])
+    registry = live_registry(live)
+    colours = fb.colour_census()
+    slugs = fb.loop_slugs()
 
     rows = []
     for entry in sorted(os.listdir(tasks_dir)):
@@ -279,8 +314,9 @@ def collect(tasks_dir, live, now):
                 "name": entry[:-3],
                 "approved_at": approved.isoformat(),
                 "age_seconds": (now - approved).total_seconds(),
-                "manager": manager_for(list_field(block, "goals"), live_by_name,
-                                       field(block, "managed_by")),
+                "manager": manager_for(list_field(block, "goals"),
+                                       field(block, "managed_by"),
+                                       index, registry, colours, slugs),
                 "class": ORPHANED if sid else NEVER_STARTED,
             }
         )
